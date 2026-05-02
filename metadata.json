@@ -1,0 +1,6 @@
+{
+  "name": "ROO Classic Auction Manager",
+  "description": "An auction bidding management tool for Ragnarok Origin Classic guilds, featuring real-time bidding and item tracking for Fragment Cards, LND, TNS, and more.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
