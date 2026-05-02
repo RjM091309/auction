@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port=3000 --host=0.0.0.0",
+    "dev": "vite --port=1011 --host=0.0.0.0",
     "dev:all": "concurrently -k -n web,api -c cyan,magenta \"npm run dev\" \"npm run server:dev\"",
     "build": "vite build",
     "preview": "vite preview",
