@@ -4,15 +4,14 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  History, 
-  Trash2, 
-  CheckCircle2, 
+import {
+  History,
+  Trash2,
+  CheckCircle2,
   Check,
   LayoutDashboard,
-  LogOut,
   Shuffle,
-  Gavel
+  Gavel,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { AuctionItem, AuctionState, ItemType, GuildMember } from './types';
@@ -125,45 +124,53 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
-      {/* Sidebar Navigation */}
-      <nav className="fixed left-0 top-0 h-full w-20 bg-slate-900 border-r border-slate-800 flex flex-col items-center py-8 gap-8 z-50">
-        <div className="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-900/20">
-          <Gavel className="text-white w-6 h-6" />
-        </div>
-        
-        <div className="flex flex-col gap-4">
-          <NavIcon 
-            icon={<LayoutDashboard />} 
-            active={activeTab === 'dashboard'} 
-            onClick={() => setActiveTab('dashboard')} 
-            label="Queues"
-          />
-          <NavIcon 
-            icon={<History />} 
-            active={activeTab === 'history'} 
-            onClick={() => setActiveTab('history')} 
-            label="Logs"
-          />
-        </div>
-
-        <div className="mt-auto pb-4">
-          <NavIcon icon={<LogOut />} active={false} onClick={() => {}} label="Exit" />
-        </div>
-      </nav>
-
-      {/* Main Content */}
-      <main className="pl-20 min-h-screen">
-        <div className="max-w-6xl mx-auto px-8 py-12">
-          
-          <header className="mb-12 flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
-            <div>
-              <h1 className="text-4xl font-bold tracking-tight text-white mb-2 underline decoration-blue-600/50 decoration-4 underline-offset-8">Outlast Guild Bid</h1>
-              <p className="text-slate-400 font-medium">Auction queue</p>
+      <header className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md">
+        <div className="max-w-6xl mx-auto px-6 sm:px-8 py-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-4 min-w-0">
+            <div className="shrink-0 w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-900/20">
+              <Gavel className="text-white w-6 h-6" aria-hidden />
             </div>
+            <div className="min-w-0">
+              <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white truncate underline decoration-blue-600/50 decoration-4 underline-offset-4">
+                Outlast Guild Bid
+              </h1>
+              <p className="text-slate-400 text-sm font-medium">Auction queue</p>
+            </div>
+          </div>
+          <nav
+            className="flex w-full sm:w-auto rounded-2xl bg-slate-900 p-1 border border-slate-800 gap-1"
+            aria-label="Main"
+          >
+            <button
+              type="button"
+              onClick={() => setActiveTab('dashboard')}
+              className={`flex flex-1 sm:flex-initial items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all ${
+                activeTab === 'dashboard'
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/80'
+              }`}
+            >
+              <LayoutDashboard className="w-4 h-4 shrink-0" aria-hidden />
+              Queues
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('history')}
+              className={`flex flex-1 sm:flex-initial items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all ${
+                activeTab === 'history'
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/80'
+              }`}
+            >
+              <History className="w-4 h-4 shrink-0" aria-hidden />
+              Logs
+            </button>
+          </nav>
+        </div>
+      </header>
 
-     
-          </header>
-
+      <main className="min-h-screen">
+        <div className="max-w-6xl mx-auto px-6 sm:px-8 py-10 sm:py-12">
           <AnimatePresence mode="wait">
             {activeTab === 'dashboard' && (
               <motion.div 
@@ -408,15 +415,6 @@ function QueueCard({ item, members, onOpenAddName, onShuffle, onComplete, onDele
         </div>
       </div>
     </motion.div>
-  );
-}
-
-function NavIcon({ icon, active, onClick, label }: { icon: React.ReactNode, active: boolean, onClick: () => void, label: string }) {
-  return (
-    <button onClick={onClick} className={`group relative p-4 rounded-2xl transition-all duration-300 ${active ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-800'}`}>
-      {React.cloneElement(icon as React.ReactElement, { className: 'w-6 h-6' })}
-      <span className="absolute left-full ml-4 px-3 py-1.5 bg-slate-800 text-[10px] font-black uppercase tracking-widest text-white rounded-lg opacity-0 group-hover:opacity-100 transition-all whitespace-nowrap z-[100] border border-slate-700">{label}</span>
-    </button>
   );
 }
 

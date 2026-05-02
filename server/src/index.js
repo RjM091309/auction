@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
-import { createPool, initSchema, seedIfEmpty } from './db.js';
+import { createPool, initSchema, seedIfEmpty, verifyMysqlConnection } from './db.js';
 import { getFullState, replaceFullState } from './stateRepo.js';
 
 const PORT = Number(process.env.PORT ?? 3333);
@@ -44,6 +44,7 @@ app.put('/api/state', async (req, res) => {
 });
 
 async function main() {
+  await verifyMysqlConnection(pool);
   await initSchema(pool);
   await seedIfEmpty(pool);
   app.listen(PORT, () => {

@@ -1,6 +1,15 @@
 import mysql from 'mysql2/promise';
 import { DATA_VERSION, DEFAULT_AUCTION_ITEMS } from './defaults.js';
 
+/** Ping DB once and log when TCP/auth + DB selection succeed. */
+export async function verifyMysqlConnection(pool) {
+  await pool.query('SELECT 1');
+  const host = process.env.MYSQL_HOST ?? '127.0.0.1';
+  const port = Number(process.env.MYSQL_PORT ?? 3306);
+  const database = process.env.MYSQL_DATABASE ?? 'rooc';
+  console.log(`[db] connected to MySQL ${host}:${port}/${database}`);
+}
+
 export function createPool() {
   return mysql.createPool({
     host: process.env.MYSQL_HOST ?? '127.0.0.1',
@@ -14,29 +23,41 @@ export function createPool() {
   });
 }
 
-/** Run once on startup (idempotent). */
+/**
+ * CRUD tables for guild auction state (`src/types.ts`, `src/App.tsx`).
+ * One statement per query so mysql2 works without multipleStatements.
+ */
 export async function initSchema(pool) {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_meta (
       \`key\` VARCHAR(64) NOT NULL PRIMARY KEY,
       value TEXT NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
 
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS members (
       id VARCHAR(64) NOT NULL PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
-      role ENUM('Leader', 'Member') NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      role ENUM('Leader', 'Member') NOT NULL,
+      INDEX idx_members_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
 
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS auction_items (
       id VARCHAR(64) NOT NULL PRIMARY KEY,
       name VARCHAR(512) NOT NULL,
       type VARCHAR(64) NOT NULL,
       winner_name VARCHAR(255) NULL,
       status ENUM('active', 'completed', 'cancelled') NOT NULL,
-      created_at BIGINT NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      created_at BIGINT NOT NULL,
+      INDEX idx_auction_items_status (status),
+      INDEX idx_auction_items_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
 
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS item_queue (
       item_id VARCHAR(64) NOT NULL,
       member_id VARCHAR(64) NOT NULL,
@@ -45,7 +66,7 @@ export async function initSchema(pool) {
       CONSTRAINT fk_item_queue_item FOREIGN KEY (item_id) REFERENCES auction_items(id) ON DELETE CASCADE,
       CONSTRAINT fk_item_queue_member FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE,
       INDEX idx_item_queue_item (item_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 }
 
