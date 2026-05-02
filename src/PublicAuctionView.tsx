@@ -4,7 +4,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, CheckCircle2, Gavel, History, LayoutDashboard, RefreshCw, UserPlus } from 'lucide-react';
+import { Check, CheckCircle2, History, LayoutDashboard, RefreshCw, UserPlus } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import Swal from 'sweetalert2';
 import type { AuctionItem, AuctionState, GuildMember, ItemType } from './types';
@@ -34,48 +34,6 @@ const typeColors: Record<
   TNS: 'text-amber-400 border-amber-500/30 bg-amber-500/10',
   'Ancient Item': 'text-red-400 border-red-500/30 bg-red-500/10',
   Other: 'text-slate-400 border-slate-700 bg-slate-800',
-};
-
-/** Draw-winner count badge — same palette as `typeColors` for that item type. */
-const drawWinnerBadge: Record<
-  ItemType,
-  { box: string; label: string; count: string; sub: string; subMuted: string }
-> = {
-  'Fragment Card': {
-    box: 'border-purple-500/45 bg-purple-500/18 shadow-md shadow-purple-900/20',
-    label: 'text-purple-400',
-    count: 'text-purple-100',
-    sub: 'text-purple-200',
-    subMuted: 'text-purple-400/95',
-  },
-  LND: {
-    box: 'border-blue-500/45 bg-blue-500/18 shadow-md shadow-blue-900/20',
-    label: 'text-blue-400',
-    count: 'text-blue-100',
-    sub: 'text-blue-200',
-    subMuted: 'text-blue-400/95',
-  },
-  TNS: {
-    box: 'border-amber-500/45 bg-amber-500/18 shadow-md shadow-amber-900/18',
-    label: 'text-amber-400',
-    count: 'text-amber-100',
-    sub: 'text-amber-200',
-    subMuted: 'text-amber-500/95',
-  },
-  'Ancient Item': {
-    box: 'border-red-500/45 bg-red-500/18 shadow-md shadow-red-900/20',
-    label: 'text-red-400',
-    count: 'text-red-100',
-    sub: 'text-red-200',
-    subMuted: 'text-red-400/95',
-  },
-  Other: {
-    box: 'border-slate-500/45 bg-slate-600/35 shadow-md shadow-slate-900/25',
-    label: 'text-slate-400',
-    count: 'text-slate-100',
-    sub: 'text-slate-200',
-    subMuted: 'text-slate-400',
-  },
 };
 
 export default function PublicAuctionView() {
@@ -224,8 +182,15 @@ export default function PublicAuctionView() {
       <header className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md">
         <div className="max-w-screen-2xl mx-auto flex flex-col gap-4 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-8">
           <div className="flex min-w-0 items-center gap-4">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-600 shadow-lg shadow-blue-900/20">
-              <Gavel className="h-6 w-6 text-white" aria-hidden />
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-900 p-0.5 ring-1 ring-slate-700 shadow-lg shadow-black/30">
+              <img
+                src="/images/OUTLAST_RO.png"
+                alt="Outlast Guild"
+                className="h-full w-full object-contain"
+                width={48}
+                height={48}
+                decoding="async"
+              />
             </div>
             <div className="min-w-0">
               <h1 className="truncate text-xl font-bold tracking-tight text-white sm:text-2xl">
@@ -460,7 +425,6 @@ function PublicQueueCard({
 
   /** Same cap as admin shortlist rows after “Shuffle all queues”. */
   const winnerPickPoolSize = maxQueueSlotsAfterShuffle(item.type);
-  const dw = drawWinnerBadge[item.type];
 
   return (
     <motion.article
@@ -479,28 +443,20 @@ function PublicQueueCard({
           </h2>
         </div>
         <div
-          className={`flex shrink-0 flex-col items-center rounded-2xl border px-3 py-2.5 text-center sm:px-3.5 sm:py-3 ${dw.box}`}
+          className="flex shrink-0 flex-col items-center rounded-2xl border border-slate-600/45 bg-slate-800/50 px-3 py-2.5 text-center sm:px-3.5 sm:py-3"
           title={`After shuffle, only the top ${winnerPickPoolSize} in this queue are in the winner draw (same as admin shortlist).`}
         >
-          <span
-            className={`text-[9px] font-black uppercase tracking-[0.18em] ${dw.label}`}
-          >
+          <span className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-400">
             Draw winner
           </span>
-          <span
-            className={`my-0.5 font-mono text-[1.65rem] font-black leading-none tabular-nums sm:text-3xl [text-decoration:none] ${dw.count}`}
-          >
+          <span className="my-0.5 font-mono text-[1.65rem] font-black leading-none tabular-nums text-slate-100 sm:text-3xl [text-decoration:none]">
             {winnerPickPoolSize}
           </span>
-          <span
-            className={`max-w-[7.5rem] text-[9px] font-bold leading-snug [text-decoration:none] ${dw.sub}`}
-          >
+          <span className="max-w-[7.5rem] text-[9px] font-bold leading-snug text-slate-400 [text-decoration:none]">
             {winnerPickPoolSize === 1
               ? 'Only 1 can win'
               : `Only ${winnerPickPoolSize} can win`}
-            <span
-              className={`mt-0.5 block font-semibold [text-decoration:none] ${dw.subMuted}`}
-            >
+            <span className="mt-0.5 block font-semibold text-slate-500 [text-decoration:none]">
               after shuffle
             </span>
           </span>

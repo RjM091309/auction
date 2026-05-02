@@ -13,7 +13,6 @@ import {
   Shuffle,
   RotateCcw,
   ListX,
-  Gavel,
   Pencil,
   GripVertical,
   LogOut,
@@ -467,8 +466,15 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       <header className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md">
         <div className="max-w-screen-2xl mx-auto px-6 sm:px-8 py-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-4 min-w-0">
-            <div className="shrink-0 w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-900/20">
-              <Gavel className="text-white w-6 h-6" aria-hidden />
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-900 p-0.5 ring-1 ring-slate-700 shadow-lg shadow-black/30">
+              <img
+                src="/images/OUTLAST_RO.png"
+                alt="Outlast Guild"
+                className="h-full w-full object-contain"
+                width={48}
+                height={48}
+                decoding="async"
+              />
             </div>
             <div className="min-w-0">
               <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white truncate">

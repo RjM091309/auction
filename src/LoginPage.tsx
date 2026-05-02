@@ -5,7 +5,7 @@
 
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Eye, EyeOff, Gavel, KeyRound } from 'lucide-react';
+import { Eye, EyeOff, KeyRound } from 'lucide-react';
 import { loginRequest } from './lib/apiState';
 
 export default function LoginPage({ onLoggedIn }: { onLoggedIn: () => void }) {
@@ -40,8 +40,15 @@ export default function LoginPage({ onLoggedIn }: { onLoggedIn: () => void }) {
         className="w-full max-w-md rounded-[2rem] border border-slate-800 bg-slate-900 p-10 shadow-2xl shadow-blue-950/40"
       >
         <div className="mb-8 flex flex-col items-center gap-3 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-600 shadow-lg shadow-blue-900/30">
-            <Gavel className="h-7 w-7 text-white" aria-hidden />
+          <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-2xl bg-slate-900 p-1 ring-1 ring-slate-700 shadow-lg shadow-black/30">
+            <img
+              src="/images/OUTLAST_RO.png"
+              alt="Outlast Guild"
+              className="h-full w-full object-contain"
+              width={56}
+              height={56}
+              decoding="async"
+            />
           </div>
           <h1 className="text-2xl font-black tracking-tight text-white">Outlast Guild Bid</h1>
           <p className="text-sm font-medium text-slate-400">Sign in to manage the auction queue</p>
