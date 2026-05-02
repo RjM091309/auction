@@ -19,7 +19,7 @@ function freshDefaultState(): AuctionState {
 function isLegacyTwoCardSeed(items: AuctionState['items']): boolean {
   if (items.length !== 2) return false;
   const names = new Set(items.map((i) => i.name));
-  const hasLnd = names.has('Light And Dark Feathers (LND)');
+  const hasLnd = names.has('Light And Dark Feathers ');
   const fragNames = new Set([
     'Puppet Frag Card',
     'Puppet Fragment Card',

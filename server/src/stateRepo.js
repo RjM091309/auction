@@ -1,4 +1,13 @@
+import { randomUUID } from 'crypto';
 import { DATA_VERSION } from './defaults.js';
+
+function clientError(statusCode, message, opts = {}) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  if (opts.code) err.code = opts.code;
+  if (opts.extra) err.extra = opts.extra;
+  return err;
+}
 
 function isAuctionState(body) {
   return (
@@ -60,6 +69,12 @@ export async function getFullState(pool) {
   );
   if (shortlistMeta[0]?.value === '0') winnerShortlistUiEnabled = false;
 
+  let shuffleLocked = false;
+  const [shuffleLockRows] = await pool.query(
+    "SELECT value FROM app_meta WHERE `key` = 'shuffle_locked' LIMIT 1"
+  );
+  if (shuffleLockRows[0]?.value === '1') shuffleLocked = true;
+
   return {
     items,
     members: members.map((m) => ({
@@ -69,7 +84,95 @@ export async function getFullState(pool) {
     })),
     dataVersion,
     winnerShortlistUiEnabled,
+    shuffleLocked,
   };
+}
+
+/**
+ * Public: add IGN to an active item’s queue (same rules as admin “Add name to queue”).
+ * Persists via replaceFullState. No auth.
+ */
+export async function publicAddBidToQueue(pool, body) {
+  const raw = typeof body?.name === 'string' ? body.name.trim() : '';
+  if (!raw) {
+    throw clientError(400, 'Name is required');
+  }
+  const tid = typeof body?.itemId === 'string' ? body.itemId.trim() : '';
+  if (!tid) {
+    throw clientError(400, 'Item is required');
+  }
+
+  const state = await getFullState(pool);
+
+  if (state.shuffleLocked === true) {
+    throw clientError(400, 'Queue signup is closed until the next reset', {
+      code: 'shuffle_locked',
+    });
+  }
+
+  const ignLower = raw.toLowerCase();
+
+  const card = state.items.find((it) => it.id === tid);
+  if (!card) {
+    const err = new Error('Item not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  if (card.status !== 'active') {
+    throw clientError(400, 'This auction is not active');
+  }
+
+  const queueHasThisIgn = (it) =>
+    it.interestedMemberIds.some((mid) => {
+      const n = state.members.find((m) => m.id === mid)?.name;
+      return n != null && n.trim().toLowerCase() === ignLower;
+    });
+
+  if (queueHasThisIgn(card)) {
+    throw clientError(400, 'Already in this queue', {
+      code: 'already_listed',
+      extra: { itemName: card.name },
+    });
+  }
+
+  const otherCard = state.items.find(
+    (it) =>
+      it.status === 'active' && it.id !== tid && queueHasThisIgn(it)
+  );
+  if (otherCard) {
+    throw clientError(400, 'Already on another item', {
+      code: 'on_other_item',
+      extra: { otherItemName: otherCard.name },
+    });
+  }
+
+  const existing = state.members.find(
+    (m) => m.name.toLowerCase() === ignLower
+  );
+  const mid = existing?.id ?? randomUUID();
+
+  const membersNext = existing
+    ? state.members
+    : [...state.members, { id: mid, name: raw, role: 'Member' }];
+
+  const itemsNext = state.items.map((it) => {
+    if (it.id !== tid) return it;
+    if (it.interestedMemberIds.includes(mid)) return it;
+    return {
+      ...it,
+      interestedMemberIds: [...it.interestedMemberIds, mid],
+    };
+  });
+
+  await replaceFullState(pool, {
+    items: itemsNext,
+    members: membersNext,
+    dataVersion: state.dataVersion,
+    winnerShortlistUiEnabled: state.winnerShortlistUiEnabled !== false,
+    shuffleLocked: state.shuffleLocked === true,
+  });
+
+  return getFullState(pool);
 }
 
 /** Soft-delete member (active=0) and remove from all queues; returns fresh state. */
@@ -179,6 +282,14 @@ export async function replaceFullState(pool, body) {
       await conn.query(
         'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
         ['winner_shortlist_ui', shortlistVal]
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'shuffleLocked')) {
+      const lockVal = body.shuffleLocked ? '1' : '0';
+      await conn.query(
+        'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+        ['shuffle_locked', lockVal]
       );
     }
 

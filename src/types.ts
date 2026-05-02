@@ -26,4 +26,9 @@ export interface AuctionState {
    * “Reset shuffle / Unmark all” sets false; “Shuffle all queues” sets true.
    */
   winnerShortlistUiEnabled?: boolean;
+  /**
+   * After one successful “Shuffle all queues”, true until “Reset shuffle / Unmark all”
+   * (one shuffle per round — pay / reset to shuffle again).
+   */
+  shuffleLocked?: boolean;
 }

@@ -12,7 +12,7 @@ export const DEFAULT_AUCTION_ITEMS = [
   },
   {
     id: 'm2',
-    name: 'Light And Dark Feathers (LND)',
+    name: 'Light And Dark Feathers',
     type: 'LND',
     winnerName: null,
     status: 'active',
@@ -20,7 +20,7 @@ export const DEFAULT_AUCTION_ITEMS = [
   },
   {
     id: 'm3',
-    name: 'Time And Space Feathers (TNS)',
+    name: 'Time And Space Feathers',
     type: 'TNS',
     winnerName: null,
     status: 'active',

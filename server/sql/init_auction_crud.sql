@@ -2,7 +2,7 @@
 -- Also applied on API boot via `server/src/db.js` → `initSchema()`.
 -- Manual: mysql -u USER -p DATABASE < server/sql/init_auction_crud.sql
 
--- app_meta: e.g. data_version; winner_shortlist_ui ('1'|'0') toggles winner checkmarks after reset
+-- app_meta: data_version; winner_shortlist_ui; shuffle_locked ('1' = shuffle used until reset)
 CREATE TABLE IF NOT EXISTS app_meta (
   `key` VARCHAR(64) NOT NULL PRIMARY KEY,
   value TEXT NOT NULL
