@@ -148,25 +148,20 @@ export function swal2ConfirmRemoveMember(ign: string): Promise<boolean> {
   }).then((r) => Boolean(r.isConfirmed));
 }
 
-/** Clear everyone from this item’s queue only — next auction / fresh sign-ups; roster entries stay. */
-export function swal2ConfirmClearItemQueue(
-  itemName: string,
-  bidderCount: number
+/** Clear every active auction card’s queue — roster entries stay; people can list again. */
+export function swal2ConfirmClearAllQueues(
+  totalQueueEntries: number,
+  cardsWithBidders: number
 ): Promise<boolean> {
-  const n = escapeHtml(itemName);
   return Swal.fire({
     ...darkShell,
     icon: 'warning',
-    title: 'Clear this queue?',
+    title: 'Clear all lists?',
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
-    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Remove <strong>${bidderCount}</strong> bidder${bidderCount === 1 ? '' : 's'} from this item’s list only. Names stay in the guild roster — people can join this queue again for the next round.</p>
-<div style="display:inline-block;margin-top:1rem;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;text-align:center">
-<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
-<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${n}</div>
-</div>`,
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Remove <strong>${totalQueueEntries}</strong> queue spot${totalQueueEntries === 1 ? '' : 's'} across <strong>${cardsWithBidders}</strong> active card${cardsWithBidders === 1 ? '' : 's'}. Names stay in the guild roster — anyone can join again for the next round.</p>`,
     showCancelButton: true,
-    confirmButtonText: 'Clear list',
+    confirmButtonText: 'Clear all lists',
     cancelButtonText: 'Cancel',
     confirmButtonColor: '#dc2626',
   }).then((r) => Boolean(r.isConfirmed));

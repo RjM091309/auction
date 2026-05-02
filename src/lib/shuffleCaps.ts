@@ -1,5 +1,18 @@
 import type { ItemType } from '../types';
 
+/** Winner-pool sizes come from `.env` (`VITE_AUCTION_WINNER_POOL_*`). Rebuild the web app after changing them. */
+function readPoolSize(envKey: string, fallback: number): number {
+  try {
+    const raw = import.meta.env[envKey as keyof ImportMetaEnv] as string | undefined;
+    if (raw === undefined || raw === '') return fallback;
+    const n = parseInt(String(raw), 10);
+    if (!Number.isFinite(n) || n < 0) return fallback;
+    return n;
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * Uniform integer in [0, n) — `crypto.getRandomValues` when available (no modulo bias);
  * falls back to `Math.random` if crypto is missing (e.g. some locked-down contexts).
@@ -23,17 +36,19 @@ function randomUintBelow(n: number): number {
 /**
  * How many top queue rows get the winner shortlist (green check) for this type.
  * Full queue is never trimmed on shuffle — only this many can be marked winner from the top.
+ * Values: `VITE_AUCTION_WINNER_POOL_*` in `.env` (see defaults in that file).
  */
-export function maxQueueSlotsAfterShuffle(type: ItemType): number | null {
+export function maxQueueSlotsAfterShuffle(type: ItemType): number {
+  const def = readPoolSize('VITE_AUCTION_WINNER_POOL_DEFAULT', 1);
   switch (type) {
     case 'Fragment Card':
-      return 2;
+      return readPoolSize('VITE_AUCTION_WINNER_POOL_FRAGMENT', 2);
     case 'LND':
-      return 6;
+      return readPoolSize('VITE_AUCTION_WINNER_POOL_LND', 6);
     case 'TNS':
-      return 8;
+      return readPoolSize('VITE_AUCTION_WINNER_POOL_TNS', 8);
     default:
-      return null;
+      return def;
   }
 }
 

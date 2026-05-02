@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   Shuffle,
   RotateCcw,
+  ListX,
   Gavel,
   Pencil,
   GripVertical,
@@ -36,7 +37,7 @@ import {
   swal2MemberNameUpdated,
   swal2SaveError,
   swal2ConfirmRemoveMember,
-  swal2ConfirmClearItemQueue,
+  swal2ConfirmClearAllQueues,
   swal2ConfirmResetShuffleUnmark,
 } from './lib/sweetAlert2';
 import {
@@ -144,6 +145,12 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const activeAuctions = useMemo(
     () => state?.items.filter((item) => item.status === 'active') ?? [],
     [state]
+  );
+
+  const totalActiveQueueEntries = useMemo(
+    () =>
+      activeAuctions.reduce((sum, it) => sum + it.interestedMemberIds.length, 0),
+    [activeAuctions]
   );
 
   const handleAddItem = (e: React.FormEvent) => {
@@ -279,21 +286,27 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     });
   };
 
-  const handleClearItemQueue = async (itemId: string) => {
+  const handleClearAllQueues = async () => {
     if (!state) return;
-    const card = state.items.find((i) => i.id === itemId);
-    if (!card || card.interestedMemberIds.length === 0) return;
-    const ok = await swal2ConfirmClearItemQueue(
-      displayAuctionItemName(card.name),
-      card.interestedMemberIds.length
+    const active = state.items.filter((i) => i.status === 'active');
+    const totalEntries = active.reduce(
+      (sum, it) => sum + it.interestedMemberIds.length,
+      0
     );
+    if (totalEntries === 0) return;
+    const cardsWithBidders = active.filter(
+      (it) => it.interestedMemberIds.length > 0
+    ).length;
+    const ok = await swal2ConfirmClearAllQueues(totalEntries, cardsWithBidders);
     if (!ok) return;
     setState((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
         items: prev.items.map((it) =>
-          it.id === itemId ? { ...it, interestedMemberIds: [] } : it
+          it.status === 'active'
+            ? { ...it, interestedMemberIds: [] }
+            : it
         ),
       };
     });
@@ -458,7 +471,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
               <Gavel className="text-white w-6 h-6" aria-hidden />
             </div>
             <div className="min-w-0">
-              <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white truncate underline decoration-blue-600/50 decoration-4 underline-offset-4">
+              <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white truncate">
                 Outlast Guild Bid
               </h1>
               <p className="text-slate-400 text-sm font-medium">Auction queue</p>
@@ -530,15 +543,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
               >
                 {activeAuctions.length > 0 && (
                   <div className="flex w-full min-w-0 flex-col items-stretch gap-3 sm:items-end">
-                    <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center sm:justify-end sm:gap-3">
-                      <p className="max-w-md text-right text-[10px] font-medium uppercase tracking-wide text-slate-500">
-                        Drag <GripVertical className="inline h-3 w-3 align-text-bottom text-slate-400" aria-hidden /> to
-                        move a bid to another card or reorder. <strong className="text-slate-400">Shuffle</strong> works
-                        once per round (use <strong className="text-slate-400">Reset</strong> to allow another). Only
-                        the top Frag 2 / LND 6 / TNS 8 rows show the winner checkmark. Reset sorts A–Z, clears winners,
-                        and hides checks until you shuffle again.
-                      </p>
-                      <div className="flex flex-wrap items-center justify-end gap-2">
+                    <div className="flex w-full flex-wrap items-center justify-end gap-2">
                         <button
                           type="button"
                           onClick={handleShuffleAllQueues}
@@ -563,7 +568,22 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           <RotateCcw className="h-4 w-4 shrink-0" aria-hidden />
                           Reset shuffle / Unmark all
                         </button>
-                      </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleClearAllQueues()}
+                          disabled={
+                            shuffleUi.active || totalActiveQueueEntries === 0
+                          }
+                          title={
+                            totalActiveQueueEntries === 0
+                              ? 'No bidders in any active queue'
+                              : 'Empty every active auction card’s queue (roster unchanged)'
+                          }
+                          className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 text-[10px] font-black uppercase tracking-wide text-white transition-all hover:bg-amber-900/80 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
+                        >
+                          <ListX className="h-4 w-4 shrink-0" aria-hidden />
+                          Clear all lists
+                        </button>
                     </div>
                     <AnimatePresence>
                       {shuffleUi.active && (
@@ -613,7 +633,6 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                         members={state.members}
                         showWinnerShortlist={state.winnerShortlistUiEnabled !== false}
                         onOpenAddName={openQueueNameModal}
-                        onClearQueue={handleClearItemQueue}
                         onEditMember={openEditMember}
                         onDeactivateMember={handleDeactivateMember}
                         onMoveQueueMember={handleQueueMove}
@@ -786,7 +805,6 @@ function QueueCard({
   members,
   showWinnerShortlist,
   onOpenAddName,
-  onClearQueue,
   onEditMember,
   onDeactivateMember,
   onMoveQueueMember,
@@ -798,7 +816,6 @@ function QueueCard({
   /** When false, no shortlist row styling or green “mark winner” buttons (after Reset / Unmark). */
   showWinnerShortlist: boolean;
   onOpenAddName: (itemId: string) => void;
-  onClearQueue: (itemId: string) => void | Promise<void>;
   onEditMember: (memberId: string) => void;
   onDeactivateMember: (memberId: string) => void | Promise<void>;
   onMoveQueueMember: (p: QueueMovePayload) => void;
@@ -816,7 +833,7 @@ function QueueCard({
 
   /** Rows that can be marked winner — Frag 2 / LND 6 / TNS 8; else top 1; 0 when shortlist UI is off after reset. */
   const shortlistSlots = showWinnerShortlist
-    ? maxQueueSlotsAfterShuffle(item.type) ?? 1
+    ? maxQueueSlotsAfterShuffle(item.type)
     : 0;
 
   return (
@@ -826,28 +843,13 @@ function QueueCard({
       title="Click to add a name to this queue"
       className="group h-auto w-full min-w-0 max-w-full self-start bg-slate-900 border border-slate-800 rounded-[2.5rem] p-6 shadow-2xl sm:p-8 flex flex-col gap-5 sm:gap-6 cursor-pointer transition-[border-color,box-shadow,background-color,transform] duration-200 ease-out hover:border-blue-500/45 hover:bg-slate-800/60 hover:shadow-blue-900/25 hover:shadow-2xl hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.99]"
     >
-      <div className="flex justify-between items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <span className={`text-[10px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-lg border font-mono ${typeColors[item.type]}`}>
-            {item.type}
-          </span>
-          <h3 className="text-3xl font-black text-white mt-4 tracking-tight leading-none break-words">
-            {displayAuctionItemName(item.name)}
-          </h3>
-        </div>
-        {item.interestedMemberIds.length > 0 ? (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              void onClearQueue(item.id);
-            }}
-            title="Remove everyone from this item’s queue for the next round"
-            className="shrink-0 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-amber-200 transition-colors hover:border-amber-400/60 hover:bg-amber-500/20"
-          >
-            Clear list
-          </button>
-        ) : null}
+      <div>
+        <span className={`text-[10px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-lg border font-mono ${typeColors[item.type]}`}>
+          {item.type}
+        </span>
+        <h3 className="text-3xl font-black text-white mt-4 tracking-tight leading-none break-words">
+          {displayAuctionItemName(item.name)}
+        </h3>
       </div>
 
       <div
