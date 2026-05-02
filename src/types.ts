@@ -21,4 +21,9 @@ export interface AuctionState {
   members: GuildMember[];
   /** Persisted; increment in `auctionDefaults` to migrate old localStorage */
   dataVersion?: number;
+  /**
+   * When false, winner shortlist UI is off: no green check, no blue “shortlist” row styling.
+   * “Reset shuffle / Unmark all” sets false; “Shuffle all queues” sets true.
+   */
+  winnerShortlistUiEnabled?: boolean;
 }

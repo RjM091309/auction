@@ -2,18 +2,20 @@
 -- Also applied on API boot via `server/src/db.js` → `initSchema()`.
 -- Manual: mysql -u USER -p DATABASE < server/sql/init_auction_crud.sql
 
--- app_meta: e.g. data_version (AuctionState.dataVersion)
+-- app_meta: e.g. data_version; winner_shortlist_ui ('1'|'0') toggles winner checkmarks after reset
 CREATE TABLE IF NOT EXISTS app_meta (
   `key` VARCHAR(64) NOT NULL PRIMARY KEY,
   value TEXT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- GuildMember: id, name, role
+-- GuildMember: id, name, role, active (0 = soft-deleted / hidden)
 CREATE TABLE IF NOT EXISTS members (
   id VARCHAR(64) NOT NULL PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
   role ENUM('Leader', 'Member') NOT NULL,
-  INDEX idx_members_name (name)
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  INDEX idx_members_name (name),
+  INDEX idx_members_active (active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- AuctionItem (row); interestedMemberIds → item_queue ordered by position

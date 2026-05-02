@@ -11,7 +11,7 @@ function isAuctionState(body) {
 
 export async function getFullState(pool) {
   const [members] = await pool.query(
-    'SELECT id, name, role FROM members ORDER BY name'
+    'SELECT id, name, role FROM members WHERE active = 1 ORDER BY name'
   );
 
   const [itemRows] = await pool.query(
@@ -20,10 +20,13 @@ export async function getFullState(pool) {
      ORDER BY created_at ASC`
   );
 
+  // Only queue rows whose member is active (avoids invisible UI rows when
+  // item_queue still references inactive or missing roster rows).
   const [queueRows] = await pool.query(
-    `SELECT item_id AS itemId, member_id AS memberId, position
-     FROM item_queue
-     ORDER BY item_id, position`
+    `SELECT iq.item_id AS itemId, iq.member_id AS memberId, iq.position
+     FROM item_queue iq
+     INNER JOIN members m ON m.id = iq.member_id AND m.active = 1
+     ORDER BY iq.item_id, iq.position`
   );
 
   const queueByItem = new Map();
@@ -51,6 +54,12 @@ export async function getFullState(pool) {
     if (!Number.isNaN(v)) dataVersion = v;
   }
 
+  let winnerShortlistUiEnabled = true;
+  const [shortlistMeta] = await pool.query(
+    "SELECT value FROM app_meta WHERE `key` = 'winner_shortlist_ui' LIMIT 1"
+  );
+  if (shortlistMeta[0]?.value === '0') winnerShortlistUiEnabled = false;
+
   return {
     items,
     members: members.map((m) => ({
@@ -59,7 +68,44 @@ export async function getFullState(pool) {
       role: m.role,
     })),
     dataVersion,
+    winnerShortlistUiEnabled,
   };
+}
+
+/** Soft-delete member (active=0) and remove from all queues; returns fresh state. */
+export async function deactivateMember(pool, memberId) {
+  const id = typeof memberId === 'string' ? memberId.trim() : '';
+  if (!id) {
+    const err = new Error('Invalid member id');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [found] = await conn.query(
+      'SELECT id FROM members WHERE id = ? LIMIT 1',
+      [id]
+    );
+    if (!Array.isArray(found) || found.length === 0) {
+      await conn.rollback();
+      const err = new Error('Member not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    await conn.query('DELETE FROM item_queue WHERE member_id = ?', [id]);
+    await conn.query('UPDATE members SET active = 0 WHERE id = ?', [id]);
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback().catch(() => {});
+    if (e.statusCode) throw e;
+    throw e;
+  } finally {
+    conn.release();
+  }
+
+  return getFullState(pool);
 }
 
 export async function replaceFullState(pool, body) {
@@ -76,12 +122,24 @@ export async function replaceFullState(pool, body) {
     await conn.beginTransaction();
     await conn.query('DELETE FROM item_queue');
     await conn.query('DELETE FROM auction_items');
-    await conn.query('DELETE FROM members');
+
+    const memberIds = Array.isArray(body.members)
+      ? body.members.map((m) => m.id).filter((x) => typeof x === 'string' && x)
+      : [];
 
     for (const m of body.members) {
       await conn.query(
-        'INSERT INTO members (id, name, role) VALUES (?, ?, ?)',
+        `INSERT INTO members (id, name, role, active) VALUES (?, ?, ?, 1)
+         ON DUPLICATE KEY UPDATE name = VALUES(name), role = VALUES(role), active = 1`,
         [m.id, m.name, m.role]
+      );
+    }
+
+    if (memberIds.length > 0) {
+      const ph = memberIds.map(() => '?').join(',');
+      await conn.query(
+        `UPDATE members SET active = 0 WHERE id NOT IN (${ph})`,
+        memberIds
       );
     }
 
@@ -115,6 +173,14 @@ export async function replaceFullState(pool, body) {
       'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
       ['data_version', String(dataVersion)]
     );
+
+    if (Object.prototype.hasOwnProperty.call(body, 'winnerShortlistUiEnabled')) {
+      const shortlistVal = body.winnerShortlistUiEnabled === false ? '0' : '1';
+      await conn.query(
+        'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+        ['winner_shortlist_ui', shortlistVal]
+      );
+    }
 
     await conn.commit();
   } catch (e) {

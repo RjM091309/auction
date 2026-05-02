@@ -24,3 +24,17 @@
     @apply bg-slate-800 rounded-full hover:bg-slate-700 transition-colors;
   }
 }
+
+/* SweetAlert2 — dark centered modals (see `lib/sweetAlert2.ts`) */
+.swal2-popup {
+  border: 1px solid rgb(30 41 59) !important;
+}
+
+.swal2-html-container.swal-queue-html {
+  margin: 0.35em 0 0 !important;
+  text-align: center !important;
+}
+
+.swal2-popup .swal2-timer-progress-bar {
+  background: rgb(37 99 235) !important;
+}

@@ -1,8 +1,14 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
-import { createPool, initSchema, seedIfEmpty, verifyMysqlConnection } from './db.js';
-import { getFullState, replaceFullState } from './stateRepo.js';
+import {
+  createPool,
+  initSchema,
+  migrateMembersActiveColumn,
+  seedIfEmpty,
+  verifyMysqlConnection,
+} from './db.js';
+import { getFullState, replaceFullState, deactivateMember } from './stateRepo.js';
 
 const PORT = Number(process.env.PORT ?? 3333);
 
@@ -43,9 +49,21 @@ app.put('/api/state', async (req, res) => {
   }
 });
 
+app.delete('/api/members/:memberId', async (req, res) => {
+  try {
+    const state = await deactivateMember(pool, req.params.memberId);
+    res.json(state);
+  } catch (e) {
+    const code = e.statusCode ?? 500;
+    if (code >= 500) console.error(e);
+    res.status(code).json({ error: String(e.message) });
+  }
+});
+
 async function main() {
   await verifyMysqlConnection(pool);
   await initSchema(pool);
+  await migrateMembersActiveColumn(pool);
   await seedIfEmpty(pool);
   app.listen(PORT, () => {
     console.log(`rooc server http://127.0.0.1:${PORT}  (mysql: ${process.env.MYSQL_DATABASE ?? 'rooc'})`);

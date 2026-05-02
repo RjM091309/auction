@@ -40,7 +40,9 @@ export async function initSchema(pool) {
       id VARCHAR(64) NOT NULL PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
       role ENUM('Leader', 'Member') NOT NULL,
-      INDEX idx_members_name (name)
+      active TINYINT(1) NOT NULL DEFAULT 1,
+      INDEX idx_members_name (name),
+      INDEX idx_members_active (active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
@@ -68,6 +70,19 @@ export async function initSchema(pool) {
       INDEX idx_item_queue_item (item_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+}
+
+/** Add \`members.active\` on existing DBs created before soft-delete support. */
+export async function migrateMembersActiveColumn(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'members' AND COLUMN_NAME = 'active'`
+  );
+  if (Array.isArray(rows) && rows.length > 0) return;
+  await pool.query(
+    `ALTER TABLE members ADD COLUMN active TINYINT(1) NOT NULL DEFAULT 1,
+     ADD INDEX idx_members_active (active)`
+  );
 }
 
 /** Seed default auction rows when DB has no items yet. */

@@ -1,0 +1,175 @@
+/**
+ * DB sync & queue feedback — npm `sweetalert2` (centered modals).
+ */
+import Swal from 'sweetalert2';
+
+const darkShell = {
+  background: '#020617',
+  color: '#f1f5f9',
+  confirmButtonColor: '#2563eb',
+};
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** After adding a name to an auction card queue */
+export function swal2QueueMemberAdded(args: {
+  ign: string;
+  itemName: string;
+}): Promise<void> {
+  const { ign, itemName } = args;
+  const i = escapeHtml(ign);
+  const n = escapeHtml(itemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'success',
+    title: 'Added successfully',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is now in the bid queue.</p>
+<div style="display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
+<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${n}</div>
+</div>
+</div>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** Character is already in another active item’s queue (one bid card per name). */
+export function swal2QueueAlreadyOnAnotherItem(args: {
+  ign: string;
+  otherItemName: string;
+}): Promise<void> {
+  const { ign, otherItemName } = args;
+  const i = escapeHtml(ign);
+  const o = escapeHtml(otherItemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'error',
+    title: 'Already bidding on another item',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Each character can only join <strong>one</strong> active bid queue at a time.</p>
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is already listed for:</p>
+<div style="display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Current item</div>
+<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${o}</div>
+</div>
+</div>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** Same character already listed on this card */
+export function swal2QueueAlreadyListed(args: {
+  ign: string;
+  itemName: string;
+}): Promise<void> {
+  const { ign, itemName } = args;
+  const i = escapeHtml(ign);
+  const n = escapeHtml(itemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'info',
+    title: 'Already in this queue',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is already on the list for this item.</p>
+<div style="display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
+<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${n}</div>
+</div>
+</div>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** After editing a roster / queue character name */
+export function swal2MemberNameUpdated(args: {
+  previousName: string;
+  newName: string;
+}): Promise<void> {
+  const a = escapeHtml(args.previousName);
+  const b = escapeHtml(args.newName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'success',
+    title: 'Name updated',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Character IGN was saved. All queues now show the new name.</p>
+<div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Before</div>
+<div style="font-size:14px;font-weight:600;color:#94a3b8;margin-bottom:0.75rem;word-break:break-word">${a}</div>
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">After</div>
+<div style="font-size:15px;font-weight:700;color:#f8fafc;word-break:break-word">${b}</div>
+</div>
+</div>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** Another roster entry already uses this IGN */
+export function swal2NameAlreadyTaken(): Promise<void> {
+  return Swal.fire({
+    ...darkShell,
+    icon: 'error',
+    title: 'Name already in use',
+    text: 'That IGN is already taken by another character. Pick a different spelling or remove the duplicate roster entry first.',
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** Confirm removing a bidder from the roster (soft-delete on server). */
+export function swal2ConfirmRemoveMember(ign: string): Promise<boolean> {
+  const i = escapeHtml(ign);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'warning',
+    title: 'Remove this bidder?',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">They will be removed from <strong>all</strong> queues and marked inactive in the database. This cannot be undone from the UI.</p>
+<p style="margin:1rem 0 0;line-height:1.5;font-size:15px;color:#f8fafc;text-align:center;font-weight:700;word-break:break-word">${i}</p>`,
+    showCancelButton: true,
+    confirmButtonText: 'Remove',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#dc2626',
+  }).then((r) => Boolean(r.isConfirmed));
+}
+
+/** Confirm reset: alphabetical queues + clear all winner marks (reopen cards). */
+export function swal2ConfirmResetShuffleUnmark(): Promise<boolean> {
+  return Swal.fire({
+    ...darkShell,
+    icon: 'warning',
+    title: 'Reset shuffle & unmark all?',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    text: 'Every queue will be sorted A–Z by IGN. All completed auctions go back to active with no winner. Green winner checkmarks stay hidden until you click Shuffle all queues again.',
+    showCancelButton: true,
+    confirmButtonText: 'Reset all',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#dc2626',
+  }).then((r) => Boolean(r.isConfirmed));
+}
+
+/** SweetAlert2 centered modal — save failed */
+export function swal2SaveError(message: string): Promise<void> {
+  return Swal.fire({
+    ...darkShell,
+    icon: 'error',
+    title: 'Could not save',
+    text: message,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
