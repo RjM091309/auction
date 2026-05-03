@@ -4,7 +4,16 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, CheckCircle2, History, LayoutDashboard, RefreshCw, UserPlus } from 'lucide-react';
+import {
+  Check,
+  Clock,
+  History,
+  LayoutDashboard,
+  RefreshCw,
+  Search,
+  UserPlus,
+  XCircle,
+} from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import Swal from 'sweetalert2';
 import type { AuctionItem, AuctionState, GuildMember, ItemType } from './types';
@@ -14,16 +23,33 @@ import {
   publicAddBidToQueue,
 } from './lib/apiState';
 import {
+  swal2AlreadyWonTypeThisWeek,
   swal2QueueAlreadyListed,
   swal2QueueAlreadyOnAnotherItem,
   swal2QueueMemberAdded,
 } from './lib/sweetAlert2';
+import { ignHasWeeklyTypeWin } from './lib/weeklyTypeWins';
 import {
   dedupeIgnAcrossActiveQueues,
   pruneOrphanQueueMembers,
 } from './lib/dedupeIgnAcrossQueues';
 import { maxQueueSlotsAfterShuffle } from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
+import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
+import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
+import {
+  BIDDER_STATE_LOSS,
+  BIDDER_STATE_ONGOING,
+  BIDDER_STATE_WIN,
+  type BidderLogStateFilter,
+  bidderLogEntryMatchesFilter,
+  bidderLogEntryMatchesSearch,
+  bidderStateBadgeClass,
+  bidderStateLabel,
+  countQueuedIgnByNormalized,
+  sortBidderStateLogNewestFirst,
+  summarizeBidderStateLog,
+} from './lib/bidderStateLogUi';
 
 const typeColors: Record<
   ItemType,
@@ -44,6 +70,12 @@ export default function PublicAuctionView() {
   const [queueNameModalItemId, setQueueNameModalItemId] = useState<string | null>(null);
   const [queueNameInput, setQueueNameInput] = useState('');
   const [queueSubmitting, setQueueSubmitting] = useState(false);
+  const [bidderLogFilter, setBidderLogFilter] =
+    useState<BidderLogStateFilter>('all');
+  const [bidderLogSubTab, setBidderLogSubTab] = useState<'ranking' | 'weekly'>(
+    'ranking'
+  );
+  const [bidderLogSearch, setBidderLogSearch] = useState('');
 
   const queueModalItem = useMemo(
     () => state?.items.find((i) => i.id === queueNameModalItemId) ?? null,
@@ -80,19 +112,128 @@ export default function PublicAuctionView() {
     }
   }, [state?.shuffleLocked]);
 
+  useEffect(() => {
+    setBidderLogFilter((f) => (f === 'ongoing' ? 'all' : f));
+  }, []);
+
+  /** Kapag binuksan ang join modal, i-refresh ang state para hindi stale ang `weeklyTypeWins`. */
+  useEffect(() => {
+    if (queueNameModalItemId) void load({ silent: true });
+  }, [queueNameModalItemId, load]);
+
   const handlePublicAddToQueue = async (e: React.FormEvent) => {
     e.preventDefault();
     const raw = queueNameInput.trim();
     const itemId = queueNameModalItemId;
-    if (!raw || !itemId || !state || !queueModalItem) return;
+    if (!raw || !itemId || queueSubmitting) return;
 
     setQueueSubmitting(true);
     try {
+      const remote = await fetchAuctionState();
+      if (!remote) {
+        void Swal.fire({
+          icon: 'error',
+          title: 'Could not verify',
+          text: 'Could not load latest queues. Check your connection and try again.',
+          background: '#020617',
+          color: '#f1f5f9',
+          confirmButtonColor: '#2563eb',
+        });
+        return;
+      }
+
+      const fresh = dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote));
+      setState(fresh);
+
+      const card = fresh.items.find((it) => it.id === itemId);
+      if (!card) {
+        void Swal.fire({
+          icon: 'error',
+          title: 'Item not found',
+          text: 'This auction card is no longer available.',
+          background: '#020617',
+          color: '#f1f5f9',
+          confirmButtonColor: '#2563eb',
+        });
+        setQueueNameModalItemId(null);
+        return;
+      }
+      if (card.status !== 'active') {
+        void Swal.fire({
+          icon: 'info',
+          title: 'Not active',
+          text: 'This auction is not open for bids.',
+          background: '#020617',
+          color: '#f1f5f9',
+          confirmButtonColor: '#2563eb',
+        });
+        return;
+      }
+      if (isAuctionItemHidden(card)) {
+        void Swal.fire({
+          icon: 'error',
+          title: 'Not available',
+          text: 'This item is not open for public bids.',
+          background: '#020617',
+          color: '#f1f5f9',
+          confirmButtonColor: '#2563eb',
+        });
+        return;
+      }
+      if (fresh.shuffleLocked === true) {
+        void Swal.fire({
+          icon: 'info',
+          title: 'Join queue closed',
+          text: 'Queue signup is closed until the next reset.',
+          background: '#020617',
+          color: '#f1f5f9',
+          confirmButtonColor: '#2563eb',
+        });
+        return;
+      }
+
+      const ignLower = raw.toLowerCase();
+      const queueHasThisIgn = (it: AuctionItem) =>
+        it.interestedMemberIds.some((mid) => {
+          const n = fresh.members.find((m) => m.id === mid)?.name;
+          return n != null && n.trim().toLowerCase() === ignLower;
+        });
+
+      if (queueHasThisIgn(card)) {
+        void swal2QueueAlreadyListed({
+          ign: raw,
+          itemName: displayAuctionItemName(card.name),
+        });
+        return;
+      }
+
+      const otherCard = fresh.items.find(
+        (it) =>
+          it.status === 'active' && it.id !== itemId && queueHasThisIgn(it)
+      );
+      if (otherCard) {
+        void swal2QueueAlreadyOnAnotherItem({
+          ign: raw,
+          otherItemName: displayAuctionItemName(otherCard.name),
+        });
+        return;
+      }
+
+      if (ignHasWeeklyTypeWin(fresh.weeklyTypeWins, raw, card.type)) {
+        void swal2AlreadyWonTypeThisWeek({
+          ign: raw,
+          itemName: displayAuctionItemName(card.name),
+        });
+        return;
+      }
+
       const next = await publicAddBidToQueue(itemId, raw);
-      setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(next)));
+      const normalized = dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(next));
+      setState(normalized);
+
       void swal2QueueMemberAdded({
         ign: raw,
-        itemName: displayAuctionItemName(queueModalItem.name),
+        itemName: displayAuctionItemName(card.name),
       });
       setQueueNameInput('');
       setQueueNameModalItemId(null);
@@ -101,13 +242,22 @@ export default function PublicAuctionView() {
         if (err.code === 'already_listed') {
           void swal2QueueAlreadyListed({
             ign: raw,
-            itemName: displayAuctionItemName(queueModalItem.name),
+            itemName: displayAuctionItemName(
+              err.extra?.itemName ?? queueModalItem?.name ?? 'this item'
+            ),
           });
         } else if (err.code === 'on_other_item') {
           void swal2QueueAlreadyOnAnotherItem({
             ign: raw,
             otherItemName: displayAuctionItemName(
               err.extra?.otherItemName ?? 'another item'
+            ),
+          });
+        } else if (err.code === 'already_won_type_this_week') {
+          void swal2AlreadyWonTypeThisWeek({
+            ign: raw,
+            itemName: displayAuctionItemName(
+              err.extra?.itemName ?? queueModalItem?.name ?? 'this item'
             ),
           });
         } else if (err.code === 'shuffle_locked') {
@@ -145,13 +295,54 @@ export default function PublicAuctionView() {
   };
 
   const activeItems = useMemo(
-    () => state?.items.filter((i) => i.status === 'active') ?? [],
+    () =>
+      state?.items.filter(
+        (i) => i.status === 'active' && !isAuctionItemHidden(i)
+      ) ?? [],
     [state]
   );
 
-  const historyItems = useMemo(
-    () => state?.items.filter((i) => i.status !== 'active') ?? [],
-    [state]
+  /** Match admin: if Fragment (etc.) is hidden, center 1–2 cards instead of a sparse grid. */
+  const centerFewPublicQueueCards =
+    activeItems.length > 0 && activeItems.length < 3;
+
+  const bidderStateLogEntries = state?.bidderStateLog ?? [];
+
+  const bidderStateLogEntriesSorted = useMemo(
+    () => sortBidderStateLogNewestFirst(bidderStateLogEntries),
+    [bidderStateLogEntries]
+  );
+
+  const queueIgnCounts = useMemo(
+    () =>
+      countQueuedIgnByNormalized(
+        state?.items ?? [],
+        state?.members ?? [],
+        isAuctionItemHidden
+      ),
+    [state?.items, state?.members]
+  );
+
+  const bidderStatsByIgn = useMemo(
+    () =>
+      summarizeBidderStateLog(
+        bidderStateLogEntriesSorted,
+        state?.shuffleLocked === true,
+        queueIgnCounts
+      ),
+    [bidderStateLogEntriesSorted, state?.shuffleLocked, queueIgnCounts]
+  );
+
+  /** Weekly list: win/loss only — ongoing rows stay in DB for ranking math but are not shown here. */
+  const filteredBidderLogEntries = useMemo(
+    () =>
+      bidderStateLogEntriesSorted.filter(
+        (row) =>
+          row.state !== BIDDER_STATE_ONGOING &&
+          bidderLogEntryMatchesFilter(row, bidderLogFilter) &&
+          bidderLogEntryMatchesSearch(row, bidderLogSearch)
+      ),
+    [bidderStateLogEntriesSorted, bidderLogFilter, bidderLogSearch]
   );
 
   if (loading && !state) {
@@ -268,9 +459,24 @@ export default function PublicAuctionView() {
                     <p className="font-medium text-slate-500">No active auction items right now.</p>
                   </div>
                 ) : (
-                  <div className="mx-auto grid min-w-0 grid-cols-1 items-start gap-5 sm:gap-6 md:mx-auto md:max-w-2xl md:gap-6 lg:max-w-3xl xl:mx-0 xl:max-w-none xl:grid-cols-2 xl:gap-7 2xl:grid-cols-3 2xl:gap-8">
+                  <div
+                    className={
+                      centerFewPublicQueueCards
+                        ? 'mx-auto flex min-w-0 w-full flex-wrap justify-center gap-5 sm:gap-6 md:gap-6 xl:gap-7 2xl:gap-8'
+                        : 'mx-auto grid min-w-0 grid-cols-1 items-start gap-5 sm:gap-6 md:mx-auto md:max-w-2xl md:gap-6 lg:max-w-3xl xl:mx-0 xl:max-w-none xl:grid-cols-2 xl:gap-7 2xl:grid-cols-3 2xl:gap-8'
+                    }
+                  >
                     {activeItems.map((item) => (
-                      <div key={item.id} className="min-w-0">
+                      <div
+                        key={item.id}
+                        className={
+                          centerFewPublicQueueCards
+                            ? activeItems.length === 1
+                              ? 'w-full min-w-0 max-w-xl shrink-0 sm:max-w-2xl'
+                              : 'w-full min-w-0 shrink-0 md:max-w-[calc(50%-1rem)] md:basis-[calc(50%-1rem)] xl:max-w-lg 2xl:max-w-xl'
+                            : 'min-w-0'
+                        }
+                      >
                         <PublicQueueCard
                           item={item}
                           members={state?.members ?? []}
@@ -292,36 +498,209 @@ export default function PublicAuctionView() {
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: 8 }}
                 transition={{ duration: 0.2 }}
-                className="space-y-6"
+                className="space-y-10"
               >
-                <h2 className="mb-4 text-xl font-bold text-white sm:mb-8 sm:text-2xl">Bidding history</h2>
-                {historyItems.length === 0 ? (
-                  <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-12 text-center sm:rounded-[2rem] sm:p-20 md:p-24">
-                    <p className="font-medium text-slate-500">No completed auctions yet.</p>
-                  </div>
-                ) : (
-                  historyItems.map((item) => (
-                    <div
-                      key={item.id}
-                      className="group flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900 p-4 transition-all hover:border-slate-700 sm:flex-row sm:items-center sm:justify-between sm:rounded-3xl sm:p-6"
+                <section className="space-y-4" aria-label="Bid outcomes">
+                  <nav
+                    className="mx-auto flex w-full min-w-0 max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-1 sm:mx-0"
+                    aria-label="Ranking and weekly log"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setBidderLogSubTab('ranking')}
+                      className={`flex min-h-10 min-w-0 flex-1 touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
+                        bidderLogSubTab === 'ranking'
+                          ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                          : 'text-slate-400 hover:bg-slate-800/80 hover:text-white'
+                      }`}
                     >
-                      <div className="flex min-w-0 items-start gap-4 sm:items-center sm:gap-6">
-                        <div className="shrink-0 rounded-xl bg-slate-800 p-3 sm:rounded-2xl sm:p-4">
-                          <CheckCircle2 className="h-5 w-5 text-green-500 sm:h-6 sm:w-6" aria-hidden />
-                        </div>
-                        <div className="min-w-0">
-                          <h3 className="mb-1 break-words text-lg font-bold leading-snug text-white sm:text-xl">
-                            {displayAuctionItemName(item.name)}
-                          </h3>
-                          <p className="font-mono text-[10px] font-black uppercase tracking-[0.1em] text-slate-500">
-                            Won by:{' '}
-                            <span className="text-amber-400">{item.winnerName || 'No taker'}</span>
-                          </p>
-                        </div>
+                      Ranking
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBidderLogSubTab('weekly')}
+                      className={`flex min-h-10 min-w-0 flex-1 touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
+                        bidderLogSubTab === 'weekly'
+                          ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                          : 'text-slate-400 hover:bg-slate-800/80 hover:text-white'
+                      }`}
+                    >
+                      Weekly logs
+                    </button>
+                  </nav>
+
+                  {bidderLogSubTab === 'ranking' &&
+                    (bidderStatsByIgn.length > 0 ? (
+                      <ul
+                        className="space-y-2"
+                        aria-label="Win and loss counts by bidder"
+                      >
+                        {bidderStatsByIgn.map((row) => (
+                          <li
+                            key={row.ign.toLowerCase()}
+                            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 sm:px-5 sm:py-3.5"
+                          >
+                            <span className="min-w-0 break-words font-bold text-amber-400">
+                              {row.ign}
+                            </span>
+                            <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 text-xs sm:text-sm">
+                              <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-green-400">
+                                <span className="text-[9px] font-black uppercase tracking-wide text-slate-500 sm:text-[10px]">
+                                  Win
+                                </span>
+                                {row.wins}
+                              </span>
+                              <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-rose-300">
+                                <span className="text-[9px] font-black uppercase tracking-wide text-slate-500 sm:text-[10px]">
+                                  Loss
+                                </span>
+                                {row.losses}
+                              </span>
+                              <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-blue-300">
+                                <span className="text-[9px] font-black uppercase tracking-wide text-slate-500 sm:text-[10px]">
+                                  Ong
+                                </span>
+                                {row.ongoing}
+                              </span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center sm:p-12">
+                        <p className="text-sm font-medium text-slate-500">
+                          No ranking yet. Join a queue or ask an admin to shuffle or mark a winner so Win /
+                          Loss / Ongoing counts show up here.
+                        </p>
                       </div>
-                    </div>
-                  ))
-                )}
+                    ))}
+
+                  {bidderLogSubTab === 'weekly' &&
+                    (bidderStateLogEntries.length === 0 ? (
+                      <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center sm:p-12">
+                        <p className="text-sm font-medium text-slate-500">
+                          No weekly log yet. After an admin runs <strong>Shuffle all queues</strong>, loss
+                          and ongoing rows are written here; a green check means a win (
+                          <code className="text-xs text-slate-400">bidder_state_log</code>).
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="flex w-full flex-col gap-3 sm:flex-row sm:flex-nowrap sm:items-center sm:gap-4">
+                          <div className="relative min-w-0 w-full sm:max-w-md">
+                            <Search
+                              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+                              aria-hidden
+                            />
+                            <input
+                              type="search"
+                              value={bidderLogSearch}
+                              onChange={(e) => setBidderLogSearch(e.target.value)}
+                              placeholder="Search IGN, item, type…"
+                              className="w-full rounded-xl border border-slate-700 bg-slate-900 py-2.5 pl-9 pr-3 text-sm text-white placeholder:text-slate-600 focus:border-blue-500/60 focus:outline-none focus:ring-2 focus:ring-blue-600/30"
+                              aria-label="Search weekly log"
+                            />
+                          </div>
+                          <div
+                            className="flex flex-wrap justify-end gap-2 self-end sm:ml-auto sm:self-center sm:shrink-0"
+                            role="group"
+                            aria-label="Filter weekly log by outcome"
+                          >
+                            {(
+                              [
+                                ['all', 'All'] as const,
+                                ['loss', 'Loss'] as const,
+                                ['win', 'Win'] as const,
+                              ] satisfies readonly [BidderLogStateFilter, string][]
+                            ).map(([id, label]) => (
+                              <button
+                                key={id}
+                                type="button"
+                                onClick={() => setBidderLogFilter(id)}
+                                className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-wide transition-colors sm:px-4 sm:text-xs ${
+                                  bidderLogFilter === id
+                                    ? 'border-blue-500 bg-blue-600 text-white shadow-md shadow-blue-900/25'
+                                    : 'border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-500 hover:bg-slate-800 hover:text-white'
+                                }`}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        {filteredBidderLogEntries.length === 0 ? (
+                          <p className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 py-10 text-center text-sm font-medium text-slate-500">
+                            No entries match this filter or search.
+                          </p>
+                        ) : (
+                          <ul className="space-y-2">
+                            {filteredBidderLogEntries.map((row, idx) => (
+                              <li
+                                key={
+                                  row.id ??
+                                  `${row.at}-${row.itemId}-${row.ign}-${row.state}-${idx}`
+                                }
+                                className="flex flex-col gap-1 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-5 sm:py-4"
+                              >
+                                <div className="flex min-w-0 items-center gap-3">
+                                  <div
+                                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border ${bidderStateBadgeClass(row.state)}`}
+                                  >
+                                    {row.state === BIDDER_STATE_WIN ? (
+                                      <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
+                                    ) : row.state === BIDDER_STATE_ONGOING ? (
+                                      <Clock className="h-4 w-4" aria-hidden />
+                                    ) : (
+                                      <XCircle className="h-4 w-4" aria-hidden />
+                                    )}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className="font-bold text-white">
+                                      <span className="text-amber-400">{row.ign}</span>
+                                      <span className="text-slate-500"> · </span>
+                                      <span className="text-slate-200">
+                                        {displayAuctionItemName(row.itemName)}
+                                      </span>
+                                    </p>
+                                    <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                                      {row.itemType}
+                                      <span className="text-slate-600"> · </span>
+                                      <span
+                                        className={`font-sans font-semibold tracking-wide ${
+                                          row.state === BIDDER_STATE_WIN
+                                            ? 'text-green-400'
+                                            : row.state === BIDDER_STATE_ONGOING
+                                              ? 'text-blue-300'
+                                              : 'text-rose-300'
+                                        }`}
+                                      >
+                                        {bidderStateLabel(row.state)}
+                                      </span>
+                                      {row.poolCap != null &&
+                                      row.queuePosition != null ? (
+                                        <>
+                                          <span className="text-slate-600"> · </span>
+                                          <span className="text-slate-500">
+                                            pool {row.poolCap} · #{row.queuePosition}
+                                          </span>
+                                        </>
+                                      ) : null}
+                                    </p>
+                                  </div>
+                                </div>
+                                <time
+                                  dateTime={new Date(row.at).toISOString()}
+                                  className="shrink-0 self-end text-right font-mono text-xs font-semibold text-slate-400 sm:self-auto sm:text-right"
+                                >
+                                  {formatAuctionLogTime(row.at)}
+                                </time>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    ))}
+                </section>
               </motion.div>
             )}
           </AnimatePresence>
@@ -495,9 +874,9 @@ function PublicQueueCard({
                   </div>
                   {shortlist ? (
                     <div
-                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-green-500 text-white shadow-sm shadow-green-900/40"
-                      title="Winner shortlist (same as admin)"
-                      aria-label="In winner shortlist"
+                      className="pointer-events-none flex h-8 w-8 shrink-0 cursor-default select-none items-center justify-center rounded-lg bg-green-600/85 text-white shadow-sm shadow-green-950/30"
+                      title="Shortlist slot after shuffle (read-only). Only an admin can mark winners in the dashboard."
+                      aria-hidden
                     >
                       <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
                     </div>

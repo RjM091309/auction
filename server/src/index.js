@@ -5,6 +5,10 @@ import {
   createPool,
   initSchema,
   migrateMembersActiveColumn,
+  migrateAuctionWinnerNamesJson,
+  migrateWinnerMarkLogTable,
+  migrateBidderStateLogTable,
+  migrateMembersIntPk,
   seedIfEmpty,
   verifyMysqlConnection,
 } from './db.js';
@@ -110,7 +114,7 @@ app.put('/api/state', requireAuth, async (req, res) => {
 
 app.delete('/api/members/:memberId', requireAuth, async (req, res) => {
   try {
-    const id = req.params.memberId;
+    const id = parseInt(String(req.params.memberId), 10);
     const before = await getFullState(pool);
     const m = before.members.find((x) => x.id === id);
     const state = await deactivateMember(pool, id);
@@ -128,6 +132,10 @@ async function main() {
   await verifyMysqlConnection(pool);
   await initSchema(pool);
   await migrateMembersActiveColumn(pool);
+  await migrateAuctionWinnerNamesJson(pool);
+  await migrateWinnerMarkLogTable(pool);
+  await migrateBidderStateLogTable(pool);
+  await migrateMembersIntPk(pool);
   await seedIfEmpty(pool);
   app.listen(PORT, () => {
     console.log(`rooc server http://127.0.0.1:${PORT}  (mysql: ${process.env.MYSQL_DATABASE ?? 'rooc'})`);

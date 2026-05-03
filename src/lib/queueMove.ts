@@ -1,17 +1,22 @@
 import type { DragEvent } from 'react';
 import type { AuctionState } from '../types';
+import { ignHasWeeklyTypeWin } from './weeklyTypeWins';
 
 export const QUEUE_DRAG_MIME = 'application/x-rooc-queue';
 
 export type QueueMovePayload = {
   fromItemId: string;
   toItemId: string;
-  memberId: string;
+  memberId: number;
   /** Insert before this member id; `null` = end of queue */
-  insertBeforeMemberId: string | null;
+  insertBeforeMemberId: number | null;
 };
 
-export type QueueMoveError = 'not_found' | 'name_conflict' | 'no_change';
+export type QueueMoveError =
+  | 'not_found'
+  | 'name_conflict'
+  | 'no_change'
+  | 'weekly_type_win';
 
 export function applyQueueMemberMove(
   s: AuctionState,
@@ -29,6 +34,13 @@ export function applyQueueMemberMove(
   }
   if (!fromItem.interestedMemberIds.includes(memberId)) {
     return { error: 'no_change' };
+  }
+
+  if (
+    fromItemId !== toItemId &&
+    ignHasWeeklyTypeWin(s.weeklyTypeWins, member.name, toItem.type)
+  ) {
+    return { error: 'weekly_type_win', toItemName: toItem.name };
   }
 
   const ignLower = member.name.trim().toLowerCase();
@@ -83,20 +95,25 @@ export function applyQueueMemberMove(
   };
 }
 
+function parseDragMemberId(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw > 0) return raw;
+  if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) {
+    const n = parseInt(raw.trim(), 10);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+  return null;
+}
+
 export function parseQueueDragPayload(
   e: DragEvent
-): { fromItemId: string; memberId: string } | null {
+): { fromItemId: string; memberId: number } | null {
   const raw = e.dataTransfer.getData(QUEUE_DRAG_MIME);
   if (!raw) return null;
   try {
-    const o = JSON.parse(raw) as { fromItemId?: string; memberId?: string };
-    if (
-      typeof o.fromItemId === 'string' &&
-      typeof o.memberId === 'string' &&
-      o.fromItemId &&
-      o.memberId
-    ) {
-      return { fromItemId: o.fromItemId, memberId: o.memberId };
+    const o = JSON.parse(raw) as { fromItemId?: string; memberId?: unknown };
+    const memberId = parseDragMemberId(o.memberId);
+    if (typeof o.fromItemId === 'string' && o.fromItemId && memberId != null) {
+      return { fromItemId: o.fromItemId, memberId };
     }
   } catch {
     /* ignore */

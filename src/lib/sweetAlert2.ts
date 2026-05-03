@@ -68,6 +68,50 @@ export function swal2QueueAlreadyOnAnotherItem(args: {
   }).then(() => undefined);
 }
 
+/** Naabot na ang max na maaaring i-green-check (VITE_AUCTION_WINNER_POOL_*). */
+export function swal2WinnerPoolFull(args: {
+  itemType: string;
+  pool: number;
+}): Promise<void> {
+  const t = escapeHtml(args.itemType);
+  const p = String(args.pool);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'warning',
+    title: 'Puno na ang winner slots',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Para sa <strong>${t}</strong>, hanggang <strong>${p}</strong> lang ang puwedeng i-check na panalo ngayong round (ayon sa <code style="font-size:12px">.env</code> <code style="font-size:12px">VITE_AUCTION_WINNER_POOL_*</code>). Mag-reset ng shuffle kung bagong round.</p>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** Weekly type lock: IGN already recorded as winner for this type (admin green check). */
+export function swal2AlreadyWonTypeThisWeek(args: {
+  ign: string;
+  itemName: string;
+}): Promise<void> {
+  const { ign, itemName } = args;
+  const i = escapeHtml(ign);
+  const n = escapeHtml(itemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'info',
+    title: 'Already a winner for this type',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Only <strong>winners</strong> are blocked from bidding again on the same item type (LND, TNS, …) this week — after the admin clicks the <strong>green check</strong>. Anyone <strong>not</strong> checked can still bid.</p>
+<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is recorded as a winner for:</p>
+<div style="margin-top:1rem;display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
+<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${n}</div>
+</div>
+<p style="margin:1rem 0 0;line-height:1.5;font-size:13px;color:#94a3b8">This limit resets every Monday.</p>
+</div>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
 /** Same character already listed on this card */
 export function swal2QueueAlreadyListed(args: {
   ign: string;
@@ -182,13 +226,26 @@ export function swal2ConfirmResetShuffleUnmark(): Promise<boolean> {
   }).then((r) => Boolean(r.isConfirmed));
 }
 
+function formatSaveErrorMessage(raw: string): string {
+  const s = raw.trim();
+  if (s.startsWith('{')) {
+    try {
+      const j = JSON.parse(s) as { error?: string };
+      if (typeof j.error === 'string' && j.error) return j.error;
+    } catch {
+      /* use raw */
+    }
+  }
+  return raw;
+}
+
 /** SweetAlert2 centered modal — save failed */
 export function swal2SaveError(message: string): Promise<void> {
   return Swal.fire({
     ...darkShell,
     icon: 'error',
     title: 'Could not save',
-    text: message,
+    text: formatSaveErrorMessage(message),
     confirmButtonText: 'OK',
   }).then(() => undefined);
 }

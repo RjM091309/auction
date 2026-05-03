@@ -15,7 +15,7 @@ export function pruneOrphanQueueMembers(s: AuctionState): AuctionState {
  * order then position); drop later duplicates (fixes legacy / bad rows).
  */
 export function dedupeIgnAcrossActiveQueues(s: AuctionState): AuctionState {
-  const canonical = new Map<string, { itemId: string; mid: string }>();
+  const canonical = new Map<string, { itemId: string; mid: number }>();
 
   for (const it of s.items) {
     if (it.status !== 'active') continue;

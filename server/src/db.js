@@ -1,5 +1,7 @@
 import mysql from 'mysql2/promise';
 import { DATA_VERSION, DEFAULT_AUCTION_ITEMS } from './defaults.js';
+import { migrateLegacyWinnerMarkMetaToTable } from './winnerMarkLog.js';
+import { backfillBidderStateLogFromWinnerMarks } from './bidderStateLog.js';
 
 /** Ping DB once and log when TCP/auth + DB selection succeed. */
 export async function verifyMysqlConnection(pool) {
@@ -37,7 +39,7 @@ export async function initSchema(pool) {
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS members (
-      id VARCHAR(64) NOT NULL PRIMARY KEY,
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
       role ENUM('Leader', 'Member') NOT NULL,
       active TINYINT(1) NOT NULL DEFAULT 1,
@@ -62,7 +64,7 @@ export async function initSchema(pool) {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS item_queue (
       item_id VARCHAR(64) NOT NULL,
-      member_id VARCHAR(64) NOT NULL,
+      member_id BIGINT UNSIGNED NOT NULL,
       position INT NOT NULL,
       PRIMARY KEY (item_id, position),
       CONSTRAINT fk_item_queue_item FOREIGN KEY (item_id) REFERENCES auction_items(id) ON DELETE CASCADE,
@@ -72,7 +74,169 @@ export async function initSchema(pool) {
   `);
 }
 
+/**
+ * Migrate `members.id` from VARCHAR UUID to BIGINT AUTO_INCREMENT and `item_queue.member_id` to BIGINT.
+ */
+export async function migrateMembersIntPk(pool) {
+  const [rows] = await pool.query(
+    `SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'members' AND COLUMN_NAME = 'id'`
+  );
+  const ty = String(rows[0]?.DATA_TYPE ?? '').toLowerCase();
+  if (ty === 'bigint' || ty === 'int' || ty === 'integer') return;
+
+  const [fkRows] = await pool.query(
+    `SELECT CONSTRAINT_NAME AS n FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'item_queue'
+     AND COLUMN_NAME = 'member_id' AND REFERENCED_TABLE_NAME = 'members'
+     LIMIT 1`
+  );
+  const fkName = fkRows[0]?.n;
+  if (!fkName) {
+    throw new Error('[migrateMembersIntPk] missing FK item_queue.member_id -> members');
+  }
+
+  const [oldQueue] = await pool.query(
+    `SELECT item_id AS itemId, member_id AS memberId, position FROM item_queue ORDER BY item_id, position`
+  );
+  const [oldMembers] = await pool.query(
+    `SELECT id, name, role, active FROM members ORDER BY id`
+  );
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(
+      `ALTER TABLE item_queue DROP FOREIGN KEY \`${String(fkName).replace(/`/g, '')}\``
+    );
+    await conn.query('TRUNCATE TABLE item_queue');
+    await conn.query('DROP TABLE members');
+    await conn.query(`
+      CREATE TABLE members (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        role ENUM('Leader', 'Member') NOT NULL,
+        active TINYINT(1) NOT NULL DEFAULT 1,
+        INDEX idx_members_name (name),
+        INDEX idx_members_active (active)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    const map = new Map();
+    for (const m of oldMembers) {
+      const [ins] = await conn.query(
+        `INSERT INTO members (name, role, active) VALUES (?, ?, ?)`,
+        [m.name, m.role, m.active]
+      );
+      map.set(String(m.id), Number(ins.insertId));
+    }
+
+    await conn.query(
+      `ALTER TABLE item_queue MODIFY COLUMN member_id BIGINT UNSIGNED NOT NULL`
+    );
+
+    for (const q of oldQueue) {
+      const newMid = map.get(String(q.memberId));
+      if (newMid == null) continue;
+      await conn.query(
+        `INSERT INTO item_queue (item_id, member_id, position) VALUES (?, ?, ?)`,
+        [q.itemId, newMid, q.position]
+      );
+    }
+
+    await conn.query(
+      `ALTER TABLE item_queue ADD CONSTRAINT fk_item_queue_member FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE`
+    );
+
+    await conn.commit();
+    console.log(
+      `[db] migrated members.id to AUTO_INCREMENT (${map.size} members, ${oldQueue.length} queue rows)`
+    );
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
 /** Add \`members.active\` on existing DBs created before soft-delete support. */
+export async function migrateAuctionWinnerNamesJson(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'auction_items' AND COLUMN_NAME = 'winner_names_json'`
+  );
+  if (Array.isArray(rows) && rows.length > 0) return;
+  await pool.query(
+    `ALTER TABLE auction_items ADD COLUMN winner_names_json TEXT NULL`
+  );
+}
+
+/** Readable wall time in phpMyAdmin; matches `at_ms` (FROM_UNIXTIME). */
+export async function migrateWinnerMarkLogLoggedAtColumn(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'winner_mark_log' AND COLUMN_NAME = 'logged_at'`
+  );
+  if (Array.isArray(rows) && rows.length > 0) return;
+  await pool.query(
+    `ALTER TABLE winner_mark_log ADD COLUMN logged_at DATETIME(3) NULL AFTER at_ms`
+  );
+  await pool.query(
+    `UPDATE winner_mark_log SET logged_at = TIMESTAMPADD(
+       MICROSECOND,
+       (at_ms % 1000) * 1000,
+       FROM_UNIXTIME(FLOOR(at_ms / 1000))
+     ) WHERE logged_at IS NULL`
+  );
+  await pool.query(
+    `ALTER TABLE winner_mark_log MODIFY logged_at DATETIME(3) NOT NULL`
+  );
+}
+
+/** Unified bidder outcome log (shuffle pool + wins). See `bidderStateLog.js`. */
+export async function migrateBidderStateLogTable(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bidder_state_log (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      at_ms BIGINT NOT NULL,
+      logged_at DATETIME(3) NOT NULL,
+      member_id BIGINT UNSIGNED NULL,
+      ign VARCHAR(255) NOT NULL,
+      item_id VARCHAR(64) NOT NULL,
+      item_name VARCHAR(512) NOT NULL,
+      item_type VARCHAR(64) NOT NULL,
+      state TINYINT NOT NULL COMMENT '0=loss 1=win 2=ongoing',
+      pool_cap INT NULL,
+      queue_position INT NULL,
+      shuffle_batch_at_ms BIGINT NULL,
+      INDEX idx_bs_at (at_ms),
+      INDEX idx_bs_item (item_id),
+      INDEX idx_bs_member (member_id),
+      INDEX idx_bs_state (state)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await backfillBidderStateLogFromWinnerMarks(pool);
+}
+
+export async function migrateWinnerMarkLogTable(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS winner_mark_log (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      at_ms BIGINT NOT NULL,
+      logged_at DATETIME(3) NOT NULL,
+      ign VARCHAR(255) NOT NULL,
+      item_id VARCHAR(64) NOT NULL,
+      item_name VARCHAR(512) NOT NULL,
+      item_type VARCHAR(64) NOT NULL,
+      INDEX idx_winner_mark_at (at_ms),
+      INDEX idx_winner_mark_logged (logged_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await migrateWinnerMarkLogLoggedAtColumn(pool);
+  await migrateLegacyWinnerMarkMetaToTable(pool);
+}
+
 export async function migrateMembersActiveColumn(pool) {
   const [rows] = await pool.query(
     `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -98,8 +262,8 @@ export async function seedIfEmpty(pool) {
     const now = Date.now();
     for (const it of DEFAULT_AUCTION_ITEMS) {
       await conn.query(
-        `INSERT INTO auction_items (id, name, type, winner_name, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO auction_items (id, name, type, winner_name, winner_names_json, status, created_at)
+         VALUES (?, ?, ?, ?, NULL, ?, ?)`,
         [it.id, it.name, it.type, it.winnerName, it.status, now]
       );
     }

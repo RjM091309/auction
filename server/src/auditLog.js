@@ -91,11 +91,14 @@ export function describeAdminStatePut(prev, body) {
       continue;
     }
 
+    const recPrev = JSON.stringify(pi.recordedWinnerNames ?? []);
+    const recNext = JSON.stringify(it.recordedWinnerNames ?? []);
     if (
       pi.name !== it.name ||
       pi.type !== it.type ||
       pi.status !== it.status ||
-      pi.winnerName !== it.winnerName
+      pi.winnerName !== it.winnerName ||
+      recPrev !== recNext
     ) {
       lines.push(`edit: item "${it.name}" (${it.id}) fields updated`);
     }

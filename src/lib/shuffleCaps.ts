@@ -57,7 +57,7 @@ export function maxQueueSlotsAfterShuffle(type: ItemType): number {
  * probability, so walang built-in bias sa user o sa puwesto — kung “laging” may #1,
  * hanggang swerte / law of large numbers lang iyon, hindi dahil sa algorithm.
  */
-export function shuffleQueueIdsForType(ids: string[], _type: ItemType): string[] {
+export function shuffleQueueIdsForType(ids: number[], _type: ItemType): number[] {
   const a = [...ids];
   for (let i = a.length - 1; i > 0; i -= 1) {
     const j = randomUintBelow(i + 1);

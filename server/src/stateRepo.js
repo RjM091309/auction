@@ -1,5 +1,21 @@
-import { randomUUID } from 'crypto';
 import { DATA_VERSION } from './defaults.js';
+import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
+import { maxRecordedWinnersForItemType } from './winnerPoolCaps.js';
+import {
+  rolloverWeeklyWinsIfNewWeek,
+  loadWeeklyTypeWins,
+  saveWeeklyTypeWins,
+  memberHasTypeWinThisWeek,
+  applyWeeklyWinnerDiff,
+  mergeCompletedItemWinsInto,
+  mergeRecordedWinnerNamesInto,
+  normalizeIgn,
+} from './weeklyTypeWins.js';
+import { loadWinnerMarkLog, appendWinnerMarkLog } from './winnerMarkLog.js';
+import {
+  loadBidderStateLog,
+  appendBidderStateLog,
+} from './bidderStateLog.js';
 
 function clientError(statusCode, message, opts = {}) {
   const err = new Error(message);
@@ -18,13 +34,77 @@ function isAuctionState(body) {
   );
 }
 
+/** Positive integer member id from client JSON, or null if temp/new (0, negative, non-numeric string). */
+function coerceMemberId(v) {
+  if (v == null) return null;
+  if (typeof v === 'number' && Number.isInteger(v) && v > 0) return v;
+  if (typeof v === 'string' && /^\d+$/.test(v.trim())) {
+    const n = parseInt(v.trim(), 10);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+  return null;
+}
+
+function resolveQueueMemberId(raw, idRemap) {
+  if (idRemap.has(raw)) return idRemap.get(raw);
+  const s = String(raw);
+  if (idRemap.has(s)) return idRemap.get(s);
+  return coerceMemberId(raw);
+}
+
+function parseWinnerNamesJson(raw) {
+  if (raw == null || raw === '') return [];
+  try {
+    const s = typeof raw === 'string' ? raw : String(raw);
+    const j = JSON.parse(s);
+    if (!Array.isArray(j)) return [];
+    return j
+      .filter((x) => typeof x === 'string')
+      .map((x) => x.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function serializeWinnerNamesJson(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const cleaned = arr
+    .filter((x) => typeof x === 'string')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (cleaned.length === 0) return null;
+  return JSON.stringify(cleaned);
+}
+
+function ignForRemappedMember(body, idRemap, resolvedId) {
+  for (const m of body.members) {
+    const r = idRemap.get(m.id) ?? idRemap.get(String(m.id));
+    if (r === resolvedId && typeof m.name === 'string') return m.name;
+  }
+  return '';
+}
+
+function resolveMemberIdFromIgn(body, idRemap, ign) {
+  const t = normalizeIgn(ign);
+  for (const m of body.members) {
+    if (normalizeIgn(m.name) === t) {
+      const r = idRemap.get(m.id) ?? idRemap.get(String(m.id));
+      if (typeof r === 'number' && r > 0 && !Number.isNaN(r)) return r;
+    }
+  }
+  return null;
+}
+
 export async function getFullState(pool) {
+  await rolloverWeeklyWinsIfNewWeek(pool);
+
   const [members] = await pool.query(
     'SELECT id, name, role FROM members WHERE active = 1 ORDER BY name'
   );
 
   const [itemRows] = await pool.query(
-    `SELECT id, name, type, winner_name AS winnerName, status, created_at AS createdAt
+    `SELECT id, name, type, winner_name AS winnerName, winner_names_json AS winnerNamesJson, status, created_at AS createdAt
      FROM auction_items
      ORDER BY created_at ASC`
   );
@@ -41,18 +121,22 @@ export async function getFullState(pool) {
   const queueByItem = new Map();
   for (const q of queueRows) {
     if (!queueByItem.has(q.itemId)) queueByItem.set(q.itemId, []);
-    queueByItem.get(q.itemId).push(q.memberId);
+    queueByItem.get(q.itemId).push(Number(q.memberId));
   }
 
-  const items = itemRows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    type: r.type,
-    winnerName: r.winnerName,
-    status: r.status,
-    createdAt: Number(r.createdAt),
-    interestedMemberIds: queueByItem.get(r.id) ?? [],
-  }));
+  const items = itemRows.map((r) => {
+    const recorded = parseWinnerNamesJson(r.winnerNamesJson);
+    return {
+      id: r.id,
+      name: r.name,
+      type: r.type,
+      winnerName: r.winnerName,
+      ...(recorded.length > 0 ? { recordedWinnerNames: recorded } : {}),
+      status: r.status,
+      createdAt: Number(r.createdAt),
+      interestedMemberIds: queueByItem.get(r.id) ?? [],
+    };
+  });
 
   let dataVersion = DATA_VERSION;
   const [metaRows] = await pool.query(
@@ -75,16 +159,23 @@ export async function getFullState(pool) {
   );
   if (shuffleLockRows[0]?.value === '1') shuffleLocked = true;
 
+  const weeklyTypeWins = await loadWeeklyTypeWins(pool);
+  const winnerMarkLog = await loadWinnerMarkLog(pool);
+  const bidderStateLog = await loadBidderStateLog(pool);
+
   return {
     items,
     members: members.map((m) => ({
-      id: m.id,
+      id: Number(m.id),
       name: m.name,
       role: m.role,
     })),
     dataVersion,
     winnerShortlistUiEnabled,
     shuffleLocked,
+    weeklyTypeWins,
+    winnerMarkLog,
+    bidderStateLog,
   };
 }
 
@@ -103,6 +194,7 @@ export async function publicAddBidToQueue(pool, body) {
   }
 
   const state = await getFullState(pool);
+  const weeklyWins = await loadWeeklyTypeWins(pool);
 
   if (state.shuffleLocked === true) {
     throw clientError(400, 'Queue signup is closed until the next reset', {
@@ -120,6 +212,10 @@ export async function publicAddBidToQueue(pool, body) {
   }
   if (card.status !== 'active') {
     throw clientError(400, 'This auction is not active');
+  }
+
+  if (isAuctionItemHiddenForPublic(card)) {
+    throw clientError(404, 'Item not found', { code: 'item_hidden' });
   }
 
   const queueHasThisIgn = (it) =>
@@ -149,7 +245,15 @@ export async function publicAddBidToQueue(pool, body) {
   const existing = state.members.find(
     (m) => m.name.toLowerCase() === ignLower
   );
-  const mid = existing?.id ?? randomUUID();
+  const mid = existing?.id ?? 0;
+
+  if (memberHasTypeWinThisWeek(weeklyWins, ignLower, card.type)) {
+    throw clientError(
+      400,
+      `You already won ${card.type} this week (marked with the green check). Losers can bid again; winners cannot until Monday.`,
+      { code: 'already_won_type_this_week', extra: { itemName: card.name } }
+    );
+  }
 
   const membersNext = existing
     ? state.members
@@ -177,8 +281,11 @@ export async function publicAddBidToQueue(pool, body) {
 
 /** Soft-delete member (active=0) and remove from all queues; returns fresh state. */
 export async function deactivateMember(pool, memberId) {
-  const id = typeof memberId === 'string' ? memberId.trim() : '';
-  if (!id) {
+  const id =
+    typeof memberId === 'number' && Number.isInteger(memberId)
+      ? memberId
+      : parseInt(String(memberId ?? '').trim(), 10);
+  if (!Number.isInteger(id) || id <= 0) {
     const err = new Error('Invalid member id');
     err.statusCode = 400;
     throw err;
@@ -218,7 +325,94 @@ export async function replaceFullState(pool, body) {
     throw err;
   }
 
+  await rolloverWeeklyWinsIfNewWeek(pool);
+
+  const [shuffleMetaPrev] = await pool.query(
+    "SELECT value FROM app_meta WHERE `key` = 'shuffle_locked' LIMIT 1"
+  );
+  const prevShuffleLocked =
+    Array.isArray(shuffleMetaPrev) &&
+    shuffleMetaPrev[0] &&
+    shuffleMetaPrev[0].value === '1';
+
+  const [oldItemRows] = await pool.query(
+    `SELECT id, name, type, status, winner_name AS winnerName, winner_names_json AS winnerNamesJson FROM auction_items`
+  );
+  const wins = await loadWeeklyTypeWins(pool);
+  const oldItems = oldItemRows.map((r) => ({
+    id: r.id,
+    type: r.type,
+    status: r.status,
+    winnerName: r.winnerName,
+  }));
+  let nextWeeklyWins = applyWeeklyWinnerDiff(oldItems, body.items, wins);
+  nextWeeklyWins = mergeCompletedItemWinsInto(body.items, nextWeeklyWins);
+  nextWeeklyWins = mergeRecordedWinnerNamesInto(body.items, nextWeeklyWins);
+
+  for (const it of body.items) {
+    const rec = it.recordedWinnerNames;
+    if (Array.isArray(rec) && rec.length > 0) {
+      const cap = maxRecordedWinnersForItemType(it.type);
+      if (rec.length > cap) {
+        const err = new Error(
+          `Too many marked winners on "${it.name}" (${it.type}): max ${cap} (set in .env VITE_AUCTION_WINNER_POOL_*)`
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+  }
+
+  for (const it of body.items) {
+    if (it.status !== 'active') continue;
+    const ids = Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : [];
+    for (const memberId of ids) {
+      if (memberId == null || memberId === '') continue;
+      const m = body.members.find(
+        (x) => String(x.id) === String(memberId)
+      );
+      const ignN = normalizeIgn(m?.name ?? '');
+      if (memberHasTypeWinThisWeek(nextWeeklyWins, ignN, it.type)) {
+        const label = m?.name ?? memberId;
+        const err = new Error(
+          `Cannot save: "${label}" already won ${it.type} this week (green check). Clears Monday.`
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+  }
+
   const dataVersion = body.dataVersion ?? DATA_VERSION;
+
+  const prevByItemId = new Map(oldItemRows.map((r) => [r.id, r]));
+  const newWinnerMarkEntries = [];
+  const markNow = Date.now();
+  for (const it of body.items) {
+    const row = prevByItemId.get(it.id);
+    const prevNames = parseWinnerNamesJson(row?.winnerNamesJson);
+    const prevLower = new Set(
+      prevNames.map((p) => String(p).trim().toLowerCase()).filter(Boolean)
+    );
+    const nextArr = Array.isArray(it.recordedWinnerNames) ? it.recordedWinnerNames : [];
+    const nextNames = nextArr
+      .filter((x) => typeof x === 'string')
+      .map((x) => x.trim())
+      .filter(Boolean);
+    for (const name of nextNames) {
+      const nl = name.toLowerCase();
+      if (prevLower.has(nl)) continue;
+      prevLower.add(nl);
+      newWinnerMarkEntries.push({
+        at: markNow,
+        ign: name,
+        itemId: it.id,
+        itemName: typeof it.name === 'string' ? it.name : '',
+        itemType: typeof it.type === 'string' ? it.type : '',
+      });
+    }
+  }
+
   const conn = await pool.getConnection();
 
   try {
@@ -226,17 +420,39 @@ export async function replaceFullState(pool, body) {
     await conn.query('DELETE FROM item_queue');
     await conn.query('DELETE FROM auction_items');
 
-    const memberIds = Array.isArray(body.members)
-      ? body.members.map((m) => m.id).filter((x) => typeof x === 'string' && x)
-      : [];
+    const idRemap = new Map();
 
     for (const m of body.members) {
-      await conn.query(
-        `INSERT INTO members (id, name, role, active) VALUES (?, ?, ?, 1)
-         ON DUPLICATE KEY UPDATE name = VALUES(name), role = VALUES(role), active = 1`,
-        [m.id, m.name, m.role]
-      );
+      const cid = coerceMemberId(m.id);
+      if (cid != null) {
+        await conn.query(
+          `INSERT INTO members (id, name, role, active) VALUES (?, ?, ?, 1)
+           ON DUPLICATE KEY UPDATE name = VALUES(name), role = VALUES(role), active = 1`,
+          [cid, m.name, m.role]
+        );
+        idRemap.set(m.id, cid);
+        idRemap.set(String(m.id), cid);
+      }
     }
+
+    for (const m of body.members) {
+      if (coerceMemberId(m.id) != null) continue;
+      const [ins] = await conn.query(
+        `INSERT INTO members (name, role, active) VALUES (?, ?, ?)`,
+        [m.name, m.role, 1]
+      );
+      const newId = Number(ins.insertId);
+      idRemap.set(m.id, newId);
+      idRemap.set(String(m.id), newId);
+    }
+
+    const memberIds = [
+      ...new Set(
+        body.members
+          .map((m) => idRemap.get(m.id) ?? idRemap.get(String(m.id)))
+          .filter((x) => typeof x === 'number' && !Number.isNaN(x) && x > 0)
+      ),
+    ];
 
     if (memberIds.length > 0) {
       const ph = memberIds.map(() => '?').join(',');
@@ -248,13 +464,14 @@ export async function replaceFullState(pool, body) {
 
     for (const it of body.items) {
       await conn.query(
-        `INSERT INTO auction_items (id, name, type, winner_name, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO auction_items (id, name, type, winner_name, winner_names_json, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           it.id,
           it.name,
           it.type,
           it.winnerName ?? null,
+          serializeWinnerNamesJson(it.recordedWinnerNames),
           it.status,
           Number(it.createdAt) || Date.now(),
         ]
@@ -264,9 +481,11 @@ export async function replaceFullState(pool, body) {
         : [];
       let pos = 0;
       for (const memberId of ids) {
+        const resolved = resolveQueueMemberId(memberId, idRemap);
+        if (resolved == null || resolved <= 0) continue;
         await conn.query(
           'INSERT INTO item_queue (item_id, member_id, position) VALUES (?, ?, ?)',
-          [it.id, memberId, pos]
+          [it.id, resolved, pos]
         );
         pos += 1;
       }
@@ -292,6 +511,60 @@ export async function replaceFullState(pool, body) {
         ['shuffle_locked', lockVal]
       );
     }
+
+    await saveWeeklyTypeWins(conn, nextWeeklyWins);
+
+    await appendWinnerMarkLog(conn, newWinnerMarkEntries);
+
+    const bidderStateRows = [];
+    if (!prevShuffleLocked && body.shuffleLocked === true) {
+      const batchAt = Date.now();
+      for (const it of body.items) {
+        if (it.status !== 'active') continue;
+        const poolCap = maxRecordedWinnersForItemType(it.type);
+        const ids = Array.isArray(it.interestedMemberIds)
+          ? it.interestedMemberIds
+          : [];
+        let idx = 0;
+        for (const rawMid of ids) {
+          const resolved = resolveQueueMemberId(rawMid, idRemap);
+          if (resolved == null || resolved <= 0) {
+            idx += 1;
+            continue;
+          }
+          const ign =
+            ignForRemappedMember(body, idRemap, resolved) || `#${resolved}`;
+          bidderStateRows.push({
+            at: batchAt,
+            memberId: resolved,
+            ign,
+            itemId: it.id,
+            itemName: typeof it.name === 'string' ? it.name : '',
+            itemType: typeof it.type === 'string' ? it.type : '',
+            state: idx < poolCap ? 2 : 0,
+            poolCap,
+            queuePosition: idx,
+            shuffleBatchAtMs: batchAt,
+          });
+          idx += 1;
+        }
+      }
+    }
+    for (const e of newWinnerMarkEntries) {
+      bidderStateRows.push({
+        at: e.at,
+        memberId: resolveMemberIdFromIgn(body, idRemap, e.ign),
+        ign: e.ign,
+        itemId: e.itemId,
+        itemName: e.itemName,
+        itemType: e.itemType,
+        state: 1,
+        poolCap: null,
+        queuePosition: null,
+        shuffleBatchAtMs: null,
+      });
+    }
+    await appendBidderStateLog(conn, bidderStateRows);
 
     await conn.commit();
   } catch (e) {

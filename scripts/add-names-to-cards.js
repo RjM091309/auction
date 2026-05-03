@@ -44,13 +44,14 @@
     members.map((m) => [m.name.toLowerCase(), m.id])
   );
 
+  let tempId = 0;
   function resolveMemberId(ign) {
     const key = ign.trim();
     if (!key) return null;
     const low = key.toLowerCase();
-    let id = nameToId.get(low);
-    if (id) return id;
-    id = crypto.randomUUID();
+    if (nameToId.has(low)) return nameToId.get(low);
+    tempId -= 1;
+    const id = tempId;
     members.push({ id, name: key, role: 'Member' });
     nameToId.set(low, id);
     return id;

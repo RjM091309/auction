@@ -7,15 +7,17 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   History,
   Trash2,
-  CheckCircle2,
   Check,
+  Clock,
   LayoutDashboard,
   Shuffle,
   RotateCcw,
+  Search,
   ListX,
   Pencil,
   GripVertical,
   LogOut,
+  XCircle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { AuctionItem, AuctionState, ItemType, GuildMember } from './types';
@@ -28,7 +30,9 @@ import {
   persistAuctionState,
 } from './lib/apiState';
 import { randomId } from './lib/randomId';
+import { nextTempMemberId } from './lib/tempMemberId';
 import {
+  swal2AlreadyWonTypeThisWeek,
   swal2QueueMemberAdded,
   swal2QueueAlreadyListed,
   swal2QueueAlreadyOnAnotherItem,
@@ -38,7 +42,9 @@ import {
   swal2ConfirmRemoveMember,
   swal2ConfirmClearAllQueues,
   swal2ConfirmResetShuffleUnmark,
+  swal2WinnerPoolFull,
 } from './lib/sweetAlert2';
+import { ignHasWeeklyTypeWin } from './lib/weeklyTypeWins';
 import {
   dedupeIgnAcrossActiveQueues,
   pruneOrphanQueueMembers,
@@ -51,6 +57,47 @@ import {
 } from './lib/queueMove';
 import { maxQueueSlotsAfterShuffle, shuffleQueueIdsForType } from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
+import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
+import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
+import {
+  BIDDER_STATE_LOSS,
+  BIDDER_STATE_ONGOING,
+  BIDDER_STATE_WIN,
+  type BidderLogStateFilter,
+  bidderLogEntryMatchesFilter,
+  bidderLogEntryMatchesSearch,
+  bidderStateBadgeClass,
+  bidderStateLabel,
+  countQueuedIgnByNormalized,
+  sortBidderStateLogNewestFirst,
+  summarizeBidderStateLog,
+} from './lib/bidderStateLogUi';
+
+/** How often the admin dashboard pulls server state so public joins show up without manual refresh. */
+const ADMIN_STATE_POLL_MS = 2000;
+
+/** Compare server vs local view so idle polls do not re-trigger persist. */
+function auctionPollSnapshot(s: AuctionState): string {
+  return JSON.stringify({
+    members: s.members,
+    items: s.items.map((it) => ({
+      id: it.id,
+      name: it.name,
+      type: it.type,
+      interestedMemberIds: it.interestedMemberIds,
+      recordedWinnerNames: it.recordedWinnerNames,
+      winnerName: it.winnerName,
+      status: it.status,
+      createdAt: it.createdAt,
+    })),
+    weeklyTypeWins: s.weeklyTypeWins,
+    winnerMarkLog: s.winnerMarkLog,
+    bidderStateLog: s.bidderStateLog,
+    shuffleLocked: s.shuffleLocked,
+    winnerShortlistUiEnabled: s.winnerShortlistUiEnabled,
+    dataVersion: s.dataVersion,
+  });
+}
 
 export default function AuctionDashboard({ onLogout }: { onLogout: () => void }) {
   const [state, setState] = useState<AuctionState | null>(null);
@@ -58,12 +105,17 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const skipInitialPersist = useRef(1);
   const latestState = useRef<AuctionState | null>(null);
   latestState.current = state;
+  /** True while the debounced persist timer is waiting (local state not yet on server). */
+  const persistDebouncePendingRef = useRef(false);
+  /** True while `persistAuctionState` HTTP is in flight. */
+  const persistInFlightRef = useRef(false);
   
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
   const [isAddItemOpen, setIsAddItemOpen] = useState(false);
   const [queueNameModalItemId, setQueueNameModalItemId] = useState<string | null>(null);
   const [queueNameInput, setQueueNameInput] = useState('');
-  const [editMemberId, setEditMemberId] = useState<string | null>(null);
+  const [queueAdminSubmitting, setQueueAdminSubmitting] = useState(false);
+  const [editMemberId, setEditMemberId] = useState<number | null>(null);
   const [editMemberNameInput, setEditMemberNameInput] = useState('');
 
   const [newItemName, setNewItemName] = useState('');
@@ -74,6 +126,12 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     active: false,
     pct: 0,
   });
+  const [bidderLogFilter, setBidderLogFilter] =
+    useState<BidderLogStateFilter>('all');
+  const [bidderLogSubTab, setBidderLogSubTab] = useState<'ranking' | 'weekly'>(
+    'ranking'
+  );
+  const [bidderLogSearch, setBidderLogSearch] = useState('');
   const shuffleRafRef = useRef<number | null>(null);
   const shuffleRunningRef = useRef(false);
   const shuffleUnmountRef = useRef(false);
@@ -119,6 +177,10 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   }, []);
 
   useEffect(() => {
+    setBidderLogFilter((f) => (f === 'ongoing' ? 'all' : f));
+  }, []);
+
+  useEffect(() => {
     if (!state) return;
     saveState(state);
   }, [state]);
@@ -129,21 +191,153 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       skipInitialPersist.current -= 1;
       return;
     }
+    persistDebouncePendingRef.current = true;
     const id = window.setTimeout(() => {
+      persistDebouncePendingRef.current = false;
       const snap = latestState.current;
       if (!snap) return;
-      persistAuctionState(snap).catch((e) => {
+      persistInFlightRef.current = true;
+      persistAuctionState(snap)
+        .then((server) => {
+          if (!server) return;
+          setState((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              winnerMarkLog: server.winnerMarkLog ?? prev.winnerMarkLog,
+              bidderStateLog: server.bidderStateLog ?? prev.bidderStateLog,
+              weeklyTypeWins: server.weeklyTypeWins ?? prev.weeklyTypeWins,
+            };
+          });
+        })
+        .catch(async (e) => {
           const msg = e instanceof Error ? e.message : String(e);
           console.error('[api] persist failed', e);
           void swal2SaveError(msg || 'Unknown error');
+          try {
+            const recovered = await fetchAuctionState();
+            if (recovered) {
+              setState(
+                dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(recovered))
+              );
+            }
+          } catch {
+            /* ignore */
+          }
+        })
+        .finally(() => {
+          persistInFlightRef.current = false;
         });
     }, 450);
-    return () => window.clearTimeout(id);
+    return () => {
+      window.clearTimeout(id);
+      persistDebouncePendingRef.current = false;
+    };
   }, [state]);
+
+  /** Merge in public (and other tab) queue changes while admin is idle; skip during debounce / save. */
+  useEffect(() => {
+    const applyRemote = async () => {
+      if (document.visibilityState === 'hidden') return;
+      if (!mayPersist.current) return;
+      if (
+        persistDebouncePendingRef.current ||
+        persistInFlightRef.current
+      ) {
+        return;
+      }
+      const remote = await fetchAuctionState();
+      if (
+        persistDebouncePendingRef.current ||
+        persistInFlightRef.current
+      ) {
+        return;
+      }
+      if (!remote) return;
+      const normalized = dedupeIgnAcrossActiveQueues(
+        pruneOrphanQueueMembers(remote)
+      );
+      setState((prev) => {
+        if (
+          persistDebouncePendingRef.current ||
+          persistInFlightRef.current
+        ) {
+          return prev;
+        }
+        if (!prev) return normalized;
+        if (auctionPollSnapshot(prev) === auctionPollSnapshot(normalized)) {
+          return prev;
+        }
+        return normalized;
+      });
+    };
+
+    const intervalId = window.setInterval(
+      () => void applyRemote(),
+      ADMIN_STATE_POLL_MS
+    );
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void applyRemote();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
 
   const activeAuctions = useMemo(
     () => state?.items.filter((item) => item.status === 'active') ?? [],
     [state]
+  );
+
+  const visibleActiveAuctions = useMemo(
+    () => activeAuctions.filter((item) => !isAuctionItemHidden(item)),
+    [activeAuctions]
+  );
+
+  /** Fewer visible cards than xl columns — center the row instead of hugging the left. */
+  const centerFewQueueCards =
+    visibleActiveAuctions.length > 0 && visibleActiveAuctions.length < 3;
+
+  const bidderStateLogEntries = state?.bidderStateLog ?? [];
+
+  const bidderStateLogEntriesSorted = useMemo(
+    () => sortBidderStateLogNewestFirst(bidderStateLogEntries),
+    [bidderStateLogEntries]
+  );
+
+  const queueIgnCounts = useMemo(
+    () =>
+      countQueuedIgnByNormalized(
+        state?.items ?? [],
+        state?.members ?? [],
+        isAuctionItemHidden
+      ),
+    [state?.items, state?.members]
+  );
+
+  const bidderStatsByIgn = useMemo(
+    () =>
+      summarizeBidderStateLog(
+        bidderStateLogEntriesSorted,
+        state?.shuffleLocked === true,
+        queueIgnCounts
+      ),
+    [bidderStateLogEntriesSorted, state?.shuffleLocked, queueIgnCounts]
+  );
+
+  /** Weekly list: win/loss only — ongoing rows stay in DB for ranking math but are not shown here. */
+  const filteredBidderLogEntries = useMemo(
+    () =>
+      bidderStateLogEntriesSorted.filter(
+        (row) =>
+          row.state !== BIDDER_STATE_ONGOING &&
+          bidderLogEntryMatchesFilter(row, bidderLogFilter) &&
+          bidderLogEntryMatchesSearch(row, bidderLogSearch)
+      ),
+    [bidderStateLogEntriesSorted, bidderLogFilter, bidderLogSearch]
   );
 
   const totalActiveQueueEntries = useMemo(
@@ -209,6 +403,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             if (item.status !== 'active') return item;
             return {
               ...item,
+              /** Bagong shuffle round — walang green check hanggang ma-mark ulit. */
+              recordedWinnerNames: [],
               interestedMemberIds: shuffleQueueIdsForType(
                 item.interestedMemberIds,
                 item.type
@@ -229,7 +425,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     if (!ok) return;
     setState((prev) => {
       if (!prev) return prev;
-      const ignKey = (memberId: string) => {
+      const ignKey = (memberId: number) => {
         const n = prev.members.find((m) => m.id === memberId)?.name?.trim() ?? '';
         return n.toLowerCase();
       };
@@ -242,6 +438,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             ...item,
             status: 'active' as const,
             winnerName: null,
+            recordedWinnerNames: [] as string[],
           };
           const ids = [...reopened.interestedMemberIds].sort((a, b) => {
             const ka = ignKey(a);
@@ -256,16 +453,52 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     });
   };
 
-  const handleQueueMove = (payload: QueueMovePayload) => {
+  const handleQueueMove = async (payload: QueueMovePayload) => {
     if (!state) return;
-    const next = applyQueueMemberMove(state, payload);
+    let base: AuctionState = dedupeIgnAcrossActiveQueues(
+      pruneOrphanQueueMembers(state)
+    );
+    try {
+      const remote = await fetchAuctionState();
+      if (remote) {
+        base = dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote));
+      }
+    } catch {
+      /* keep base from local */
+    }
+
+    const toItem = base.items.find((i) => i.id === payload.toItemId);
+    const member = base.members.find((m) => m.id === payload.memberId);
+    if (
+      member &&
+      toItem &&
+      payload.fromItemId !== payload.toItemId &&
+      ignHasWeeklyTypeWin(base.weeklyTypeWins, member.name, toItem.type)
+    ) {
+      setState(base);
+      void swal2AlreadyWonTypeThisWeek({
+        ign: member.name,
+        itemName: displayAuctionItemName(toItem.name),
+      });
+      return;
+    }
+
+    const next = applyQueueMemberMove(base, payload);
     if ('error' in next) {
+      setState(base);
       if (next.error === 'name_conflict' && next.toItemName) {
         const ign =
-          state.members.find((m) => m.id === payload.memberId)?.name ?? '';
+          base.members.find((m) => m.id === payload.memberId)?.name ?? '';
         void swal2QueueAlreadyOnAnotherItem({
           ign,
           otherItemName: displayAuctionItemName(next.toItemName),
+        });
+      } else if (next.error === 'weekly_type_win' && next.toItemName) {
+        const ign =
+          base.members.find((m) => m.id === payload.memberId)?.name ?? '';
+        void swal2AlreadyWonTypeThisWeek({
+          ign,
+          itemName: displayAuctionItemName(next.toItemName),
         });
       }
       return;
@@ -274,13 +507,44 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   };
 
   const handleCompleteAuction = (itemId: string, winnerName: string | null) => {
+    const trimmed = winnerName?.trim();
+    if (!trimmed || !state) return;
+
+    const item = state.items.find((i) => i.id === itemId);
+    if (!item || item.status !== 'active') return;
+
+    const pool = maxQueueSlotsAfterShuffle(item.type);
+    const existing = item.recordedWinnerNames ?? [];
+    if (existing.some((n) => n.trim().toLowerCase() === trimmed.toLowerCase())) {
+      return;
+    }
+    if (existing.length >= pool) {
+      void swal2WinnerPoolFull({ itemType: item.type, pool });
+      return;
+    }
+
     setState((prev) => {
       if (!prev) return prev;
+      const target = prev.items.find((i) => i.id === itemId);
+      if (!target || target.status !== 'active') return prev;
+      const ex = target.recordedWinnerNames ?? [];
+      if (ex.length >= pool) return prev;
+      const memberId = prev.members.find(
+        (m) => m.name.trim().toLowerCase() === trimmed.toLowerCase()
+      )?.id;
+
       return {
         ...prev,
-        items: prev.items.map((item) =>
-          item.id === itemId ? { ...item, status: 'completed', winnerName } : item
-        ),
+        items: prev.items.map((it) => {
+          if (it.id !== itemId) return it;
+          return {
+            ...it,
+            recordedWinnerNames: [...ex, trimmed],
+            interestedMemberIds: memberId
+              ? it.interestedMemberIds.filter((id) => id !== memberId)
+              : it.interestedMemberIds,
+          };
+        }),
       };
     });
   };
@@ -311,7 +575,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     });
   };
 
-  const handleDeactivateMember = async (memberId: string) => {
+  const handleDeactivateMember = async (memberId: number) => {
     if (!state) return;
     const m = state.members.find((x) => x.id === memberId);
     if (!m) return;
@@ -333,7 +597,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     setQueueNameInput('');
   };
 
-  const openEditMember = (memberId: string) => {
+  const openEditMember = (memberId: number) => {
     if (!state) return;
     const m = state.members.find((x) => x.id === memberId);
     if (!m) return;
@@ -380,77 +644,101 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     void swal2MemberNameUpdated({ previousName: prevName, newName: raw });
   };
 
-  const handleAddNameToQueue = (e: React.FormEvent) => {
+  const handleAddNameToQueue = async (e: React.FormEvent) => {
     e.preventDefault();
     const raw = queueNameInput.trim();
     const itemId = queueNameModalItemId;
-    if (!raw || !itemId || !state) return;
+    if (!raw || !itemId || queueAdminSubmitting) return;
 
-    const card = state.items.find((it) => it.id === itemId);
-    if (!card) return;
+    setQueueAdminSubmitting(true);
+    try {
+      const remote = await fetchAuctionState();
+      const base = remote
+        ? dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote))
+        : state
+          ? dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(state))
+          : null;
+      if (!base) {
+        void swal2SaveError('Could not load latest auction state.');
+        return;
+      }
 
-    const ignLower = raw.toLowerCase();
-    const queueHasThisIgn = (it: AuctionItem) =>
-      it.interestedMemberIds.some((mid) => {
-        const n = state.members.find((m) => m.id === mid)?.name;
-        return n != null && n.trim().toLowerCase() === ignLower;
-      });
+      const card = base.items.find((it) => it.id === itemId);
+      if (!card) {
+        void swal2SaveError('Auction card not found.');
+        setQueueNameModalItemId(null);
+        return;
+      }
 
-    if (queueHasThisIgn(card)) {
-      void swal2QueueAlreadyListed({
-        ign: raw,
-        itemName: displayAuctionItemName(card.name),
-      });
-      setQueueNameInput('');
-      setQueueNameModalItemId(null);
-      return;
-    }
+      const ignLower = raw.toLowerCase();
+      const queueHasThisIgn = (it: AuctionItem) =>
+        it.interestedMemberIds.some((mid) => {
+          const n = base.members.find((m) => m.id === mid)?.name;
+          return n != null && n.trim().toLowerCase() === ignLower;
+        });
 
-    const otherCard = state.items.find(
-      (it) =>
-        it.status === 'active' &&
-        it.id !== itemId &&
-        queueHasThisIgn(it)
-    );
-    if (otherCard) {
-      void swal2QueueAlreadyOnAnotherItem({
-        ign: raw,
-        otherItemName: displayAuctionItemName(otherCard.name),
-      });
-      setQueueNameInput('');
-      setQueueNameModalItemId(null);
-      return;
-    }
+      if (queueHasThisIgn(card)) {
+        setState(base);
+        void swal2QueueAlreadyListed({
+          ign: raw,
+          itemName: displayAuctionItemName(card.name),
+        });
+        setQueueNameInput('');
+        setQueueNameModalItemId(null);
+        return;
+      }
 
-    const existing = state.members.find(
-      (m) => m.name.toLowerCase() === ignLower
-    );
-    const memberId = existing?.id ?? randomId();
+      const otherCard = base.items.find(
+        (it) =>
+          it.status === 'active' &&
+          it.id !== itemId &&
+          queueHasThisIgn(it)
+      );
+      if (otherCard) {
+        setState(base);
+        void swal2QueueAlreadyOnAnotherItem({
+          ign: raw,
+          otherItemName: displayAuctionItemName(otherCard.name),
+        });
+        setQueueNameInput('');
+        setQueueNameModalItemId(null);
+        return;
+      }
 
-    setState((prev) => {
-      if (!prev) return prev;
-      const ex = prev.members.find((m) => m.name.toLowerCase() === ignLower);
+      if (ignHasWeeklyTypeWin(base.weeklyTypeWins, raw, card.type)) {
+        setState(base);
+        void swal2AlreadyWonTypeThisWeek({
+          ign: raw,
+          itemName: displayAuctionItemName(card.name),
+        });
+        setQueueNameInput('');
+        setQueueNameModalItemId(null);
+        return;
+      }
+
+      const existing = base.members.find((m) => m.name.toLowerCase() === ignLower);
+      const memberId = existing?.id ?? nextTempMemberId();
+      const ex = base.members.find((m) => m.name.toLowerCase() === ignLower);
       const mid = ex?.id ?? memberId;
       const members = ex
-        ? prev.members
-        : [...prev.members, { id: mid, name: raw, role: 'Member' as const }];
-
-      const items = prev.items.map((it) => {
+        ? base.members
+        : [...base.members, { id: mid, name: raw, role: 'Member' as const }];
+      const items = base.items.map((it) => {
         if (it.id !== itemId) return it;
         if (it.interestedMemberIds.includes(mid)) return it;
         return { ...it, interestedMemberIds: [...it.interestedMemberIds, mid] };
       });
 
-      return { ...prev, members, items };
-    });
-
-    void swal2QueueMemberAdded({
-      ign: raw,
-      itemName: displayAuctionItemName(card.name),
-    });
-
-    setQueueNameInput('');
-    setQueueNameModalItemId(null);
+      setState({ ...base, members, items });
+      void swal2QueueMemberAdded({
+        ign: raw,
+        itemName: displayAuctionItemName(card.name),
+      });
+      setQueueNameInput('');
+      setQueueNameModalItemId(null);
+    } finally {
+      setQueueAdminSubmitting(false);
+    }
   };
 
   if (!state) {
@@ -547,7 +835,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                 exit={{ opacity: 0, x: 10 }}
                 className="space-y-8"
               >
-                {activeAuctions.length > 0 && (
+                {visibleActiveAuctions.length > 0 && (
                   <div className="flex w-full min-w-0 flex-col items-stretch gap-3 sm:items-end">
                     <div className="flex w-full flex-wrap items-center justify-end gap-2">
                         <button
@@ -630,24 +918,42 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                     </AnimatePresence>
                   </div>
                 )}
-                <div className="grid grid-cols-1 items-start gap-8 md:grid-cols-2 xl:grid-cols-3 xl:gap-6 2xl:gap-8 min-w-0">
+                <div
+                  className={
+                    centerFewQueueCards
+                      ? 'flex w-full min-w-0 flex-wrap justify-center gap-8 md:gap-8 xl:gap-6 2xl:gap-8'
+                      : 'grid min-w-0 grid-cols-1 items-start gap-8 md:grid-cols-2 xl:grid-cols-3 xl:gap-6 2xl:gap-8'
+                  }
+                >
                   <AnimatePresence>
-                    {activeAuctions.map(item => (
-                      <QueueCard 
-                        key={item.id} 
-                        item={item} 
-                        members={state.members}
-                        showWinnerShortlist={state.winnerShortlistUiEnabled !== false}
-                        onOpenAddName={openQueueNameModal}
-                        onEditMember={openEditMember}
-                        onDeactivateMember={handleDeactivateMember}
-                        onMoveQueueMember={handleQueueMove}
-                        onComplete={handleCompleteAuction}
-                      />
+                    {visibleActiveAuctions.map((item) => (
+                      <div
+                        key={item.id}
+                        className={
+                          centerFewQueueCards
+                            ? visibleActiveAuctions.length === 1
+                              ? 'w-full min-w-0 max-w-xl shrink-0 sm:max-w-2xl'
+                              : 'w-full min-w-0 shrink-0 md:max-w-[calc(50%-1rem)] md:basis-[calc(50%-1rem)] xl:max-w-lg 2xl:max-w-xl'
+                            : 'min-w-0'
+                        }
+                      >
+                        <QueueCard
+                          item={item}
+                          members={state.members}
+                          showWinnerShortlist={
+                            state.winnerShortlistUiEnabled !== false
+                          }
+                          onOpenAddName={openQueueNameModal}
+                          onEditMember={openEditMember}
+                          onDeactivateMember={handleDeactivateMember}
+                          onMoveQueueMember={handleQueueMove}
+                          onComplete={handleCompleteAuction}
+                        />
+                      </div>
                     ))}
                   </AnimatePresence>
                 </div>
-                {activeAuctions.length === 0 && (
+                {visibleActiveAuctions.length === 0 && (
                   <div className="bg-slate-900/40 border border-dashed border-slate-800 rounded-[2rem] p-24 text-center">
                     <p className="text-slate-500 font-medium">No items listed. Use Add Item to get started.</p>
                   </div>
@@ -661,24 +967,208 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: 10 }}
-                className="space-y-6"
+                className="space-y-10"
               >
-                <h2 className="text-2xl font-bold text-white mb-8">Bidding History</h2>
-                {state.items.filter(i => i.status !== 'active').map(item => (
-                  <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-3xl p-6 flex justify-between items-center group transition-all hover:border-slate-700">
-                    <div className="flex items-center gap-8">
-                       <div className="p-4 bg-slate-800 rounded-2xl">
-                          <CheckCircle2 className="text-green-500 w-6 h-6" />
-                       </div>
-                       <div>
-                          <h3 className="text-xl font-bold text-white mb-1">
-                            {displayAuctionItemName(item.name)}
-                          </h3>
-                          <p className="text-[10px] font-black uppercase text-slate-500 tracking-[0.1em] font-mono">Won by: <span className="text-amber-400">{item.winnerName || 'No taker'}</span></p>
-                       </div>
-                    </div>
-                  </div>
-                ))}
+                <section className="space-y-4" aria-label="Bid outcomes">
+                  <nav
+                    className="mx-auto flex w-full min-w-0 max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-1 sm:mx-0"
+                    aria-label="Ranking and weekly log"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setBidderLogSubTab('ranking')}
+                      className={`flex min-h-10 min-w-0 flex-1 touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
+                        bidderLogSubTab === 'ranking'
+                          ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                          : 'text-slate-400 hover:bg-slate-800/80 hover:text-white'
+                      }`}
+                    >
+                      Ranking
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBidderLogSubTab('weekly')}
+                      className={`flex min-h-10 min-w-0 flex-1 touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
+                        bidderLogSubTab === 'weekly'
+                          ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                          : 'text-slate-400 hover:bg-slate-800/80 hover:text-white'
+                      }`}
+                    >
+                      Weekly logs
+                    </button>
+                  </nav>
+
+                  {bidderLogSubTab === 'ranking' &&
+                    (bidderStatsByIgn.length > 0 ? (
+                      <ul
+                        className="space-y-2"
+                        aria-label="Win and loss counts by bidder"
+                      >
+                        {bidderStatsByIgn.map((row) => (
+                          <li
+                            key={row.ign.toLowerCase()}
+                            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 sm:px-5 sm:py-3.5"
+                          >
+                            <span className="min-w-0 break-words font-bold text-amber-400">
+                              {row.ign}
+                            </span>
+                            <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+                              <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-green-400">
+                                <span className="text-[10px] font-black uppercase tracking-wide text-slate-500">
+                                  Win
+                                </span>
+                                {row.wins}
+                              </span>
+                              <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-rose-300">
+                                <span className="text-[10px] font-black uppercase tracking-wide text-slate-500">
+                                  Loss
+                                </span>
+                                {row.losses}
+                              </span>
+                              <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-blue-300">
+                                <span className="text-[10px] font-black uppercase tracking-wide text-slate-500">
+                                  Ong
+                                </span>
+                                {row.ongoing}
+                              </span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center">
+                        <p className="font-medium text-slate-500">
+                          No ranking yet. Run <strong>Shuffle all queues</strong> or mark a winner so Win /
+                          Loss / Ongoing counts show up here.
+                        </p>
+                      </div>
+                    ))}
+
+                  {bidderLogSubTab === 'weekly' &&
+                    (bidderStateLogEntries.length === 0 ? (
+                      <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center">
+                        <p className="font-medium text-slate-500">
+                          No weekly log yet. Run <strong>Shuffle all queues</strong> to record loss / ongoing
+                          rows; a green check means a win —{' '}
+                          <code className="text-xs text-slate-400">bidder_state_log</code>.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="flex w-full flex-col gap-3 sm:flex-row sm:flex-nowrap sm:items-center sm:gap-4">
+                          <div className="relative min-w-0 w-full sm:max-w-md">
+                            <Search
+                              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+                              aria-hidden
+                            />
+                            <input
+                              type="search"
+                              value={bidderLogSearch}
+                              onChange={(e) => setBidderLogSearch(e.target.value)}
+                              placeholder="Search IGN, item, type…"
+                              className="w-full rounded-xl border border-slate-700 bg-slate-900 py-2.5 pl-9 pr-3 text-sm text-white placeholder:text-slate-600 focus:border-blue-500/60 focus:outline-none focus:ring-2 focus:ring-blue-600/30"
+                              aria-label="Search weekly log"
+                            />
+                          </div>
+                          <div
+                            className="flex flex-wrap justify-end gap-2 self-end sm:ml-auto sm:self-center sm:shrink-0"
+                            role="group"
+                            aria-label="Filter weekly log by outcome"
+                          >
+                            {(
+                              [
+                                ['all', 'All'] as const,
+                                ['loss', 'Loss'] as const,
+                                ['win', 'Win'] as const,
+                              ] satisfies readonly [BidderLogStateFilter, string][]
+                            ).map(([id, label]) => (
+                              <button
+                                key={id}
+                                type="button"
+                                onClick={() => setBidderLogFilter(id)}
+                                className={`rounded-xl border px-4 py-2 text-[10px] font-black uppercase tracking-wide transition-colors sm:text-xs ${
+                                  bidderLogFilter === id
+                                    ? 'border-blue-500 bg-blue-600 text-white shadow-md shadow-blue-900/25'
+                                    : 'border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-500 hover:bg-slate-800 hover:text-white'
+                                }`}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        {filteredBidderLogEntries.length === 0 ? (
+                          <p className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 py-10 text-center font-medium text-slate-500">
+                            No entries match this filter or search.
+                          </p>
+                        ) : (
+                          <ul className="space-y-2">
+                            {filteredBidderLogEntries.map((row, idx) => (
+                              <li
+                                key={
+                                  row.id ??
+                                  `${row.at}-${row.itemId}-${row.ign}-${row.state}-${idx}`
+                                }
+                                className="flex flex-col gap-2 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-5 sm:py-4"
+                              >
+                                <div className="flex min-w-0 items-center gap-3">
+                                  <div
+                                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border ${bidderStateBadgeClass(row.state)}`}
+                                  >
+                                    {row.state === BIDDER_STATE_WIN ? (
+                                      <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
+                                    ) : row.state === BIDDER_STATE_ONGOING ? (
+                                      <Clock className="h-4 w-4" aria-hidden />
+                                    ) : (
+                                      <XCircle className="h-4 w-4" aria-hidden />
+                                    )}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className="font-bold text-white">
+                                      <span className="text-amber-400">{row.ign}</span>
+                                      <span className="text-slate-500"> · </span>
+                                      <span className="text-slate-200">
+                                        {displayAuctionItemName(row.itemName)}
+                                      </span>
+                                    </p>
+                                    <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                                      {row.itemType}
+                                      <span className="text-slate-600"> · </span>
+                                      <span
+                                        className={`font-sans font-semibold tracking-wide ${
+                                          row.state === BIDDER_STATE_WIN
+                                            ? 'text-green-400'
+                                            : row.state === BIDDER_STATE_ONGOING
+                                              ? 'text-blue-300'
+                                              : 'text-rose-300'
+                                        }`}
+                                      >
+                                        {bidderStateLabel(row.state)}
+                                      </span>
+                                      {row.poolCap != null && row.queuePosition != null ? (
+                                        <>
+                                          <span className="text-slate-600"> · </span>
+                                          <span className="text-slate-500">
+                                            pool {row.poolCap} · pos {row.queuePosition}
+                                          </span>
+                                        </>
+                                      ) : null}
+                                    </p>
+                                  </div>
+                                </div>
+                                <time
+                                  dateTime={new Date(row.at).toISOString()}
+                                  className="shrink-0 self-end text-right font-mono text-xs font-semibold text-slate-400 sm:self-auto sm:text-right"
+                                >
+                                  {formatAuctionLogTime(row.at)}
+                                </time>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    ))}
+                </section>
               </motion.div>
             )}
           </AnimatePresence>
@@ -717,9 +1207,10 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
               </div>
               <button
                 type="submit"
-                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-5 rounded-[1.25rem] shadow-xl shadow-blue-600/20 active:scale-[0.98] uppercase tracking-widest"
+                disabled={queueAdminSubmitting}
+                className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:pointer-events-none text-white font-black py-5 rounded-[1.25rem] shadow-xl shadow-blue-600/20 active:scale-[0.98] uppercase tracking-widest"
               >
-                Add to queue
+                {queueAdminSubmitting ? 'Checking…' : 'Add to queue'}
               </button>
             </form>
           </Modal>
@@ -822,8 +1313,8 @@ function QueueCard({
   /** When false, no shortlist row styling or green “mark winner” buttons (after Reset / Unmark). */
   showWinnerShortlist: boolean;
   onOpenAddName: (itemId: string) => void;
-  onEditMember: (memberId: string) => void;
-  onDeactivateMember: (memberId: string) => void | Promise<void>;
+  onEditMember: (memberId: number) => void;
+  onDeactivateMember: (memberId: number) => void | Promise<void>;
   onMoveQueueMember: (p: QueueMovePayload) => void;
   onComplete: (id: string, winner: string | null) => void;
 }) {
@@ -841,6 +1332,9 @@ function QueueCard({
   const shortlistSlots = showWinnerShortlist
     ? maxQueueSlotsAfterShuffle(item.type)
     : 0;
+  const poolCap = maxQueueSlotsAfterShuffle(item.type);
+  const recorded = item.recordedWinnerNames ?? [];
+  const canMarkMoreWinners = recorded.length < poolCap;
 
   return (
     <motion.div 
@@ -856,6 +1350,12 @@ function QueueCard({
         <h3 className="text-3xl font-black text-white mt-4 tracking-tight leading-none break-words">
           {displayAuctionItemName(item.name)}
         </h3>
+        {recorded.length > 0 ? (
+          <p className="mt-3 text-xs font-bold leading-snug text-green-400/95">
+            Marked winners ({recorded.length}/{poolCap}):{' '}
+            <span className="text-green-300">{recorded.join(', ')}</span>
+          </p>
+        ) : null}
       </div>
 
       <div
@@ -907,7 +1407,7 @@ function QueueCard({
               </p>
             </div>
           ) : (
-            <>
+            <div className="flex flex-col gap-2">
               {item.interestedMemberIds.map((mid, idx) => {
                 const m = members.find((member) => member.id === mid);
                 if (!m) return null;
@@ -937,13 +1437,13 @@ function QueueCard({
                         insertBeforeMemberId: mid,
                       });
                     }}
-                    className={`flex min-h-10 items-center justify-between gap-2 p-2.5 sm:p-3 rounded-2xl border ${
+                    className={`flex min-h-10 items-center justify-between gap-2 rounded-2xl border px-3 py-2.5 sm:gap-3 sm:px-3 sm:py-3 ${
                       idx < shortlistSlots
                         ? 'bg-blue-600/20 border-blue-500/50'
                         : 'bg-slate-900 border-slate-800'
                     } transition-all`}
                   >
-                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
                       <div className="flex shrink-0 items-center gap-2">
                         <div
                           draggable
@@ -1008,18 +1508,23 @@ function QueueCard({
                       >
                         <Trash2 className="h-4 w-4" aria-hidden />
                       </button>
-                      {idx < shortlistSlots && (
+                      {idx < shortlistSlots &&
+                        canMarkMoreWinners &&
+                        !recorded.some(
+                          (n) =>
+                            n.trim().toLowerCase() === m.name.trim().toLowerCase()
+                        ) && (
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
                             onComplete(item.id, m.name);
                           }}
-                          title="Mark this person as winner"
+                          title="Click to mark winner (weekly type lock). Saves immediately with your other changes."
                           aria-label={`Mark ${m.name} as winner`}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg bg-green-500 text-white hover:bg-green-400 transition-colors active:scale-95"
+                          className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg bg-green-500 text-white shadow-sm shadow-green-950/30 transition-colors hover:bg-green-400 active:scale-95"
                         >
-                          <Check className="h-4 w-4 stroke-[2.5]" />
+                          <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
                         </button>
                       )}
                     </div>
@@ -1027,7 +1532,7 @@ function QueueCard({
                 );
               })}
               <div
-                className="mt-1 flex min-h-8 items-center justify-center rounded-lg border border-dashed border-transparent py-2 text-[10px] font-bold uppercase tracking-wide text-slate-600 hover:border-slate-700"
+                className="mt-0 flex min-h-8 items-center justify-center rounded-lg border border-dashed border-transparent py-2 text-[10px] font-bold uppercase tracking-wide text-slate-600 hover:border-slate-700"
                 onDragOver={(e) => {
                   e.preventDefault();
                   e.dataTransfer.dropEffect = 'move';
@@ -1048,7 +1553,7 @@ function QueueCard({
               >
                 Drop at end of queue
               </div>
-            </>
+            </div>
           )}
         </AnimatePresence>
       </div>
