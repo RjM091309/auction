@@ -65,6 +65,7 @@ export interface AuctionState {
   /**
    * When false, winner shortlist UI is off: no green check, no blue “shortlist” row styling.
    * “Reset shuffle / Unmark all” sets false; “Shuffle all queues” sets true.
+   * Server: walang `app_meta` row o hindi `'1'` → off. Client: shortlist UI on lang kapag `true` (hindi “truthy”).
    */
   winnerShortlistUiEnabled?: boolean;
   /**

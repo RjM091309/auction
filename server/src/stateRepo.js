@@ -147,11 +147,12 @@ export async function getFullState(pool) {
     if (!Number.isNaN(v)) dataVersion = v;
   }
 
-  let winnerShortlistUiEnabled = true;
+  /** Walang row = bagong / na-reset na DB — walang shortlist chrome hanggang mag-Shuffle (nagsusulat ng '1'). */
+  let winnerShortlistUiEnabled = false;
   const [shortlistMeta] = await pool.query(
     "SELECT value FROM app_meta WHERE `key` = 'winner_shortlist_ui' LIMIT 1"
   );
-  if (shortlistMeta[0]?.value === '0') winnerShortlistUiEnabled = false;
+  if (shortlistMeta[0]?.value === '1') winnerShortlistUiEnabled = true;
 
   let shuffleLocked = false;
   const [shuffleLockRows] = await pool.query(
@@ -272,7 +273,7 @@ export async function publicAddBidToQueue(pool, body) {
     items: itemsNext,
     members: membersNext,
     dataVersion: state.dataVersion,
-    winnerShortlistUiEnabled: state.winnerShortlistUiEnabled !== false,
+    winnerShortlistUiEnabled: state.winnerShortlistUiEnabled === true,
     shuffleLocked: state.shuffleLocked === true,
   });
 

@@ -9,19 +9,76 @@
   body {
     @apply bg-slate-950 text-slate-100 antialiased;
   }
+
+  /**
+   * Themed scrollbars — document + overflow regions (Firefox + Chromium/WebKit).
+   * Track sits on slate-900 so it blends with panels; thumb uses blue-gray ramp.
+   */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(71 85 105) rgb(15 23 42);
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: rgb(15 23 42);
+    border-radius: 9999px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: linear-gradient(
+      180deg,
+      rgb(51 65 85) 0%,
+      rgb(30 41 59) 100%
+    );
+    border-radius: 9999px;
+    border: 2px solid rgb(15 23 42);
+    min-height: 40px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgb(71 85 105);
+    border-color: rgb(15 23 42);
+  }
+
+  *::-webkit-scrollbar-thumb:active {
+    background: rgb(100 116 139);
+  }
+
+  *::-webkit-scrollbar-corner {
+    background: rgb(15 23 42);
+  }
 }
 
 @layer utilities {
+  /** Narrower scrollbar for dense lists / modals; same palette as global. */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(71 85 105) rgb(15 23 42);
+  }
+
   .custom-scrollbar::-webkit-scrollbar {
-    width: 4px;
+    width: 7px;
+    height: 7px;
   }
 
   .custom-scrollbar::-webkit-scrollbar-track {
-    @apply bg-transparent;
+    background: rgb(15 23 42);
+    border-radius: 9999px;
   }
 
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    @apply bg-slate-800 rounded-full hover:bg-slate-700 transition-colors;
+    background: rgb(51 65 85);
+    border-radius: 9999px;
+    border: 1px solid rgb(15 23 42);
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgb(71 85 105);
   }
 }
 

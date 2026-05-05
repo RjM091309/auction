@@ -61,8 +61,8 @@ export function describeAdminStatePut(prev, body) {
   }
 
   if (Object.prototype.hasOwnProperty.call(body, 'winnerShortlistUiEnabled')) {
-    const w = body.winnerShortlistUiEnabled !== false;
-    const pw = prev.winnerShortlistUiEnabled !== false;
+    const w = body.winnerShortlistUiEnabled === true;
+    const pw = prev.winnerShortlistUiEnabled === true;
     if (w !== pw) {
       lines.push(`edit: winner shortlist UI ${pw} → ${w}`);
     }

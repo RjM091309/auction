@@ -69,6 +69,7 @@ export default function PublicAuctionView() {
   const [activeTab, setActiveTab] = useState<'queues' | 'logs'>('queues');
   const [queueNameModalItemId, setQueueNameModalItemId] = useState<string | null>(null);
   const [queueNameInput, setQueueNameInput] = useState('');
+  const [ignSuggestionsOpen, setIgnSuggestionsOpen] = useState(false);
   const [queueSubmitting, setQueueSubmitting] = useState(false);
   const [bidderLogFilter, setBidderLogFilter] =
     useState<BidderLogStateFilter>('all');
@@ -81,6 +82,29 @@ export default function PublicAuctionView() {
     () => state?.items.find((i) => i.id === queueNameModalItemId) ?? null,
     [state, queueNameModalItemId]
   );
+
+  /** Unique IGNs from guild roster (same `members` table / API as admin). */
+  const rosterIgnSuggestions = useMemo(() => {
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const m of state?.members ?? []) {
+      const n = m.name.trim();
+      if (!n) continue;
+      const key = n.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      names.push(n);
+    }
+    names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    return names;
+  }, [state?.members]);
+
+  const filteredIgnSuggestions = useMemo(() => {
+    const q = queueNameInput.trim().toLowerCase();
+    const src = rosterIgnSuggestions;
+    if (!q) return src.slice(0, 80);
+    return src.filter((n) => n.toLowerCase().includes(q)).slice(0, 80);
+  }, [rosterIgnSuggestions, queueNameInput]);
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = opts?.silent === true;
@@ -109,6 +133,7 @@ export default function PublicAuctionView() {
     if (state?.shuffleLocked === true) {
       setQueueNameModalItemId(null);
       setQueueNameInput('');
+      setIgnSuggestionsOpen(false);
     }
   }, [state?.shuffleLocked]);
 
@@ -480,7 +505,9 @@ export default function PublicAuctionView() {
                         <PublicQueueCard
                           item={item}
                           members={state?.members ?? []}
-                          showWinnerShortlist={state?.winnerShortlistUiEnabled !== false}
+                          showWinnerShortlist={
+                            state?.winnerShortlistUiEnabled === true
+                          }
                           showJoinQueue={state?.shuffleLocked !== true}
                           onRequestAddName={() => setQueueNameModalItemId(item.id)}
                         />
@@ -714,6 +741,7 @@ export default function PublicAuctionView() {
             onClose={() => {
               setQueueNameModalItemId(null);
               setQueueNameInput('');
+              setIgnSuggestionsOpen(false);
             }}
           >
             <form key={queueNameModalItemId} onSubmit={handlePublicAddToQueue} className="space-y-6">
@@ -731,11 +759,67 @@ export default function PublicAuctionView() {
                   autoFocus
                   required
                   placeholder="e.g. ShadowHunter"
+                  autoComplete="off"
+                  aria-autocomplete="list"
+                  aria-expanded={
+                    ignSuggestionsOpen &&
+                    (filteredIgnSuggestions.length > 0 || rosterIgnSuggestions.length === 0)
+                  }
+                  aria-controls="public-ign-suggestions"
                   className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
                   value={queueNameInput}
-                  onChange={(e) => setQueueNameInput(e.target.value)}
+                  onChange={(e) => {
+                    setQueueNameInput(e.target.value);
+                    // Stay open after pick+clear: blur/refocus does not run; only onFocus opened before.
+                    setIgnSuggestionsOpen(true);
+                  }}
+                  onFocus={() => setIgnSuggestionsOpen(true)}
+                  onBlur={() => {
+                    window.setTimeout(() => setIgnSuggestionsOpen(false), 180);
+                  }}
                   disabled={queueSubmitting}
                 />
+                {ignSuggestionsOpen &&
+                rosterIgnSuggestions.length > 0 &&
+                filteredIgnSuggestions.length > 0 ? (
+                  <ul
+                    id="public-ign-suggestions"
+                    role="listbox"
+                    className="max-h-52 overflow-y-auto rounded-2xl border border-slate-600 bg-slate-950 py-1 shadow-lg shadow-black/30"
+                  >
+                    {filteredIgnSuggestions.map((name) => (
+                      <li key={name.toLowerCase()} role="option">
+                        <button
+                          type="button"
+                          className="flex w-full px-4 py-2.5 text-left text-sm font-bold text-slate-200 transition-colors hover:bg-slate-800 hover:text-white"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setQueueNameInput(name);
+                            setIgnSuggestionsOpen(false);
+                          }}
+                        >
+                          {name}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : ignSuggestionsOpen && rosterIgnSuggestions.length === 0 ? (
+                  <p
+                    id="public-ign-suggestions"
+                    className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/95 px-4 py-3 text-xs font-medium text-slate-500"
+                  >
+                    No guild roster in state yet. Add members from the admin dashboard.
+                  </p>
+                ) : ignSuggestionsOpen &&
+                  rosterIgnSuggestions.length > 0 &&
+                  filteredIgnSuggestions.length === 0 ? (
+                  <p
+                    id="public-ign-suggestions"
+                    className="rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-xs font-medium text-slate-500"
+                  >
+                    No roster names match &quot;{queueNameInput.trim()}&quot;.
+                  </p>
+                ) : null}
               </div>
               <button
                 type="submit"

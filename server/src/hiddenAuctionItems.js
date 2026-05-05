@@ -1,6 +1,6 @@
 /** Keep in sync with `src/lib/hiddenAuctionItems.ts` */
-const HIDDEN_IDS = new Set(['m1']);
-const HIDDEN_NAMES = new Set(['Puppet Frag Card']);
+const HIDDEN_IDS = new Set();
+const HIDDEN_NAMES = new Set();
 
 export function isAuctionItemHiddenForPublic(item) {
   return (

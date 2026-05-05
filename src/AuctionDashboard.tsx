@@ -941,7 +941,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           item={item}
                           members={state.members}
                           showWinnerShortlist={
-                            state.winnerShortlistUiEnabled !== false
+                            state.winnerShortlistUiEnabled === true
                           }
                           onOpenAddName={openQueueNameModal}
                           onEditMember={openEditMember}

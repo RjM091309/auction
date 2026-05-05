@@ -81,7 +81,8 @@ export function parseAuctionState(json: unknown): AuctionState | null {
   const dataVersion =
     typeof dv === 'number' && !Number.isNaN(dv) ? dv : AUCTION_DATA_VERSION;
 
-  const winnerShortlistUiEnabled = o.winnerShortlistUiEnabled !== false;
+  /** Opt-in: `undefined`/absent = off (iwas lumang API o JSON na walang field). */
+  const winnerShortlistUiEnabled = o.winnerShortlistUiEnabled === true;
   const shuffleLocked = o.shuffleLocked === true;
 
   let weeklyTypeWins: WeeklyTypeWin[] = [];
@@ -332,7 +333,7 @@ export async function persistAuctionState(
     items: state.items,
     members: state.members,
     dataVersion: state.dataVersion ?? AUCTION_DATA_VERSION,
-    winnerShortlistUiEnabled: state.winnerShortlistUiEnabled !== false,
+    winnerShortlistUiEnabled: state.winnerShortlistUiEnabled === true,
     shuffleLocked: state.shuffleLocked === true,
   };
   const res = await fetch(apiUrl('/api/state'), {

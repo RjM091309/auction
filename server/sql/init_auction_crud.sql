@@ -2,7 +2,7 @@
 -- Also applied on API boot via `server/src/db.js` → `initSchema()`.
 -- Manual: mysql -u USER -p DATABASE < server/sql/init_auction_crud.sql
 
--- app_meta: data_version; winner_shortlist_ui; shuffle_locked;
+-- app_meta: data_version; winner_shortlist_ui ('1' after Shuffle, absent/'0' = no green shortlist UI); shuffle_locked;
 -- auction_week_monday (YYYY-MM-DD); weekly_type_wins (JSON [{ign, t}])
 -- winner_mark_log TABLE: one row per admin green-check (see server migrateWinnerMarkLogTable)
 -- = completed auction + winner_name lang (green check); natalo pwede ulit mag-bid
