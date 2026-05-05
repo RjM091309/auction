@@ -41,8 +41,10 @@ import {
   swal2SaveError,
   swal2ConfirmRemoveMember,
   swal2ConfirmClearAllQueues,
+  swal2ConfirmShuffleAllQueues,
   swal2ConfirmResetShuffleUnmark,
   swal2WinnerPoolFull,
+  swal2WinnerLimitsUpdated,
 } from './lib/sweetAlert2';
 import { ignHasWeeklyTypeWin } from './lib/weeklyTypeWins';
 import {
@@ -55,7 +57,11 @@ import {
   QUEUE_DRAG_MIME,
   type QueueMovePayload,
 } from './lib/queueMove';
-import { maxQueueSlotsAfterShuffle, shuffleQueueIdsForType } from './lib/shuffleCaps';
+import {
+  defaultWinnerPoolCapForType,
+  maxQueueSlotsAfterShuffle,
+  shuffleQueueIdsForType,
+} from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
@@ -117,21 +123,31 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const [queueAdminSubmitting, setQueueAdminSubmitting] = useState(false);
   const [editMemberId, setEditMemberId] = useState<number | null>(null);
   const [editMemberNameInput, setEditMemberNameInput] = useState('');
+  const [winnerSetLimitModalOpen, setWinnerSetLimitModalOpen] = useState(false);
+  const [winnerSetLimitForm, setWinnerSetLimitForm] = useState({
+    fragment: defaultWinnerPoolCapForType('Fragment Card'),
+    lnd: defaultWinnerPoolCapForType('LND'),
+    tns: defaultWinnerPoolCapForType('TNS'),
+  });
 
   const [newItemName, setNewItemName] = useState('');
   const [newItemType, setNewItemType] = useState<ItemType>('Fragment Card');
+  const [newItemWinnerPoolCap, setNewItemWinnerPoolCap] = useState<number>(
+    defaultWinnerPoolCapForType('Fragment Card')
+  );
 
   /** Full-width shuffle tension bar (0–100%) */
   const [shuffleUi, setShuffleUi] = useState<{ active: boolean; pct: number }>({
     active: false,
     pct: 0,
   });
-  const [bidderLogFilter, setBidderLogFilter] =
-    useState<BidderLogStateFilter>('all');
   const [bidderLogSubTab, setBidderLogSubTab] = useState<'ranking' | 'weekly'>(
     'ranking'
   );
   const [bidderLogSearch, setBidderLogSearch] = useState('');
+  const [weeklyLogFilter, setWeeklyLogFilter] = useState<
+    'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3'
+  >('all');
   const shuffleRafRef = useRef<number | null>(null);
   const shuffleRunningRef = useRef(false);
   const shuffleUnmountRef = useRef(false);
@@ -174,10 +190,6 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       }
       shuffleRunningRef.current = false;
     };
-  }, []);
-
-  useEffect(() => {
-    setBidderLogFilter((f) => (f === 'ongoing' ? 'all' : f));
   }, []);
 
   useEffect(() => {
@@ -330,14 +342,26 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
 
   /** Weekly list: win/loss only — ongoing rows stay in DB for ranking math but are not shown here. */
   const filteredBidderLogEntries = useMemo(
-    () =>
-      bidderStateLogEntriesSorted.filter(
+    () => {
+      const outcomeFilter: BidderLogStateFilter =
+        weeklyLogFilter === 'loss' || weeklyLogFilter === 'win' ? weeklyLogFilter : 'all';
+      const typeFilter: 'all' | 'm1' | 'm2' | 'm3' =
+        weeklyLogFilter === 'm1' || weeklyLogFilter === 'm2' || weeklyLogFilter === 'm3'
+          ? weeklyLogFilter
+          : 'all';
+
+      return bidderStateLogEntriesSorted.filter(
         (row) =>
           row.state !== BIDDER_STATE_ONGOING &&
-          bidderLogEntryMatchesFilter(row, bidderLogFilter) &&
+          (typeFilter === 'all' ||
+            (typeFilter === 'm1' && row.itemType === 'Fragment Card') ||
+            (typeFilter === 'm2' && row.itemType === 'LND') ||
+            (typeFilter === 'm3' && row.itemType === 'TNS')) &&
+          bidderLogEntryMatchesFilter(row, outcomeFilter) &&
           bidderLogEntryMatchesSearch(row, bidderLogSearch)
-      ),
-    [bidderStateLogEntriesSorted, bidderLogFilter, bidderLogSearch]
+      );
+    },
+    [bidderStateLogEntriesSorted, weeklyLogFilter, bidderLogSearch]
   );
 
   const totalActiveQueueEntries = useMemo(
@@ -353,6 +377,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       id: randomId(),
       name: newItemName,
       type: newItemType,
+      winnerPoolCap: Math.max(0, Math.floor(Number(newItemWinnerPoolCap) || 0)),
       winnerName: null,
       status: 'active',
       interestedMemberIds: [],
@@ -363,11 +388,29 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     );
     setIsAddItemOpen(false);
     setNewItemName('');
+    setNewItemWinnerPoolCap(defaultWinnerPoolCapForType(newItemType));
   };
 
-  const handleShuffleAllQueues = () => {
+  const handleShuffleAllQueues = async () => {
     if (!latestState.current || shuffleRunningRef.current) return;
     if (latestState.current.shuffleLocked === true) return;
+    const snapshot = latestState.current;
+    const activeItemsForShuffle = snapshot.items.filter((it) => it.status === 'active');
+    const totalParticipants = activeItemsForShuffle.reduce(
+      (sum, it) => sum + it.interestedMemberIds.length,
+      0
+    );
+    const typeLimit = (type: ItemType) => {
+      const ref = snapshot.items.find((it) => it.type === type);
+      return maxQueueSlotsAfterShuffle(type, ref?.winnerPoolCap);
+    };
+    const ok = await swal2ConfirmShuffleAllQueues({
+      totalParticipants,
+      fragmentLimit: typeLimit('Fragment Card'),
+      lndLimit: typeLimit('LND'),
+      tnsLimit: typeLimit('TNS'),
+    });
+    if (!ok) return;
     shuffleRunningRef.current = true;
     setShuffleUi({ active: true, pct: 0 });
 
@@ -513,7 +556,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     const item = state.items.find((i) => i.id === itemId);
     if (!item || item.status !== 'active') return;
 
-    const pool = maxQueueSlotsAfterShuffle(item.type);
+    const pool = maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap);
     const existing = item.recordedWinnerNames ?? [];
     if (existing.some((n) => n.trim().toLowerCase() === trimmed.toLowerCase())) {
       return;
@@ -595,6 +638,51 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     setEditMemberNameInput('');
     setQueueNameModalItemId(itemId);
     setQueueNameInput('');
+  };
+
+  const openWinnerSetLimitModal = () => {
+    if (!state) return;
+    const firstByType = (type: ItemType) => state.items.find((it) => it.type === type);
+    const fragmentItem = firstByType('Fragment Card');
+    const lndItem = firstByType('LND');
+    const tnsItem = firstByType('TNS');
+    setWinnerSetLimitForm({
+      fragment: maxQueueSlotsAfterShuffle(
+        'Fragment Card',
+        fragmentItem?.winnerPoolCap
+      ),
+      lnd: maxQueueSlotsAfterShuffle('LND', lndItem?.winnerPoolCap),
+      tns: maxQueueSlotsAfterShuffle('TNS', tnsItem?.winnerPoolCap),
+    });
+    setWinnerSetLimitModalOpen(true);
+  };
+
+  const handleSaveWinnerSetLimit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setState((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        items: prev.items.map((it) => {
+          if (it.type === 'Fragment Card') {
+            return { ...it, winnerPoolCap: winnerSetLimitForm.fragment };
+          }
+          if (it.type === 'LND') {
+            return { ...it, winnerPoolCap: winnerSetLimitForm.lnd };
+          }
+          if (it.type === 'TNS') {
+            return { ...it, winnerPoolCap: winnerSetLimitForm.tns };
+          }
+          return it;
+        }),
+      };
+    });
+    setWinnerSetLimitModalOpen(false);
+    void swal2WinnerLimitsUpdated({
+      fragment: winnerSetLimitForm.fragment,
+      lnd: winnerSetLimitForm.lnd,
+      tns: winnerSetLimitForm.tns,
+    });
   };
 
   const openEditMember = (memberId: number) => {
@@ -803,6 +891,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             </nav>
             <a
               href="/"
+              target="_blank"
+              rel="noreferrer"
               className="inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-xs font-black uppercase tracking-wide text-slate-300 transition-colors hover:border-slate-500 hover:bg-slate-800 hover:text-white sm:w-auto"
             >
               Public board
@@ -840,7 +930,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                     <div className="flex w-full flex-wrap items-center justify-end gap-2">
                         <button
                           type="button"
-                          onClick={handleShuffleAllQueues}
+                          onClick={() => void handleShuffleAllQueues()}
                           disabled={shuffleUi.active || state?.shuffleLocked === true}
                           aria-busy={shuffleUi.active}
                           title={
@@ -851,7 +941,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 text-[10px] font-black uppercase tracking-wide text-white transition-all hover:bg-blue-600 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
                         >
                           <Shuffle className="h-4 w-4 shrink-0" aria-hidden />
-                          {state?.shuffleLocked === true ? 'Shuffle used' : 'Shuffle all queues'}
+                          {state?.shuffleLocked === true ? 'Shuffle Used' : 'Start Shuffle'}
                         </button>
                         <button
                           type="button"
@@ -861,6 +951,14 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                         >
                           <RotateCcw className="h-4 w-4 shrink-0" aria-hidden />
                           Reset shuffle / Unmark all
+                        </button>
+                        <button
+                          type="button"
+                          onClick={openWinnerSetLimitModal}
+                          disabled={shuffleUi.active}
+                          className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 text-[10px] font-black uppercase tracking-wide text-white transition-all hover:bg-blue-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
+                        >
+                          Winner set limit
                         </button>
                         <button
                           type="button"
@@ -940,6 +1038,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                         <QueueCard
                           item={item}
                           members={state.members}
+                          isShuffling={shuffleUi.active}
                           showWinnerShortlist={
                             state.winnerShortlistUiEnabled === true
                           }
@@ -1080,14 +1179,20 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                                 ['all', 'All'] as const,
                                 ['loss', 'Loss'] as const,
                                 ['win', 'Win'] as const,
-                              ] satisfies readonly [BidderLogStateFilter, string][]
+                                ['m1', 'PFC'] as const,
+                                ['m2', 'LND'] as const,
+                                ['m3', 'TNS'] as const,
+                              ] satisfies readonly [
+                                'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3',
+                                string
+                              ][]
                             ).map(([id, label]) => (
                               <button
                                 key={id}
                                 type="button"
-                                onClick={() => setBidderLogFilter(id)}
+                                onClick={() => setWeeklyLogFilter(id)}
                                 className={`rounded-xl border px-4 py-2 text-[10px] font-black uppercase tracking-wide transition-colors sm:text-xs ${
-                                  bidderLogFilter === id
+                                  weeklyLogFilter === id
                                     ? 'border-blue-500 bg-blue-600 text-white shadow-md shadow-blue-900/25'
                                     : 'border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-500 hover:bg-slate-800 hover:text-white'
                                 }`}
@@ -1273,7 +1378,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                 <select 
                   className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold focus:outline-none focus:ring-2 focus:ring-blue-600/50 appearance-none"
                   value={newItemType}
-                  onChange={e => setNewItemType(e.target.value as ItemType)}
+                  onChange={(e) => {
+                    const nextType = e.target.value as ItemType;
+                    setNewItemType(nextType);
+                    setNewItemWinnerPoolCap(defaultWinnerPoolCapForType(nextType));
+                  }}
                 >
                   <option value="Fragment Card">Fragment Card</option>
                   <option value="LND">Light And Dark Feathers</option>
@@ -1282,11 +1391,118 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                   <option value="Other">Miscellaneous</option>
                 </select>
               </div>
+              <div className="space-y-2">
+                <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] font-mono ml-1">
+                  Winner limit
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
+                  value={newItemWinnerPoolCap}
+                  onChange={(e) =>
+                    setNewItemWinnerPoolCap(
+                      Math.max(0, Math.floor(Number(e.target.value) || 0))
+                    )
+                  }
+                />
+              </div>
               <button 
                 type="submit"
                 className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-5 rounded-[1.25rem] shadow-xl shadow-blue-600/20 active:scale-[0.98] uppercase tracking-widest"
               >
                 Confirm Add Item
+              </button>
+            </form>
+          </Modal>
+        )}
+
+        {winnerSetLimitModalOpen && (
+          <Modal
+            title="Winner set limit"
+            onClose={() => setWinnerSetLimitModalOpen(false)}
+          >
+            <form onSubmit={handleSaveWinnerSetLimit} className="space-y-6">
+              <div className="space-y-2">
+                <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
+                  Puppet Frag Card
+                </label>
+                <input
+                  autoFocus
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
+                  value={winnerSetLimitForm.fragment}
+                  onChange={(e) =>
+                    setWinnerSetLimitForm((prev) => ({
+                      ...prev,
+                      fragment: Math.max(
+                        0,
+                        Math.floor(
+                          Number((e.target.value || '0').replace(/[^\d]/g, '')) || 0
+                        )
+                      ),
+                    }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
+                  LND
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
+                  value={winnerSetLimitForm.lnd}
+                  onChange={(e) =>
+                    setWinnerSetLimitForm((prev) => ({
+                      ...prev,
+                      lnd: Math.max(
+                        0,
+                        Math.floor(
+                          Number((e.target.value || '0').replace(/[^\d]/g, '')) || 0
+                        )
+                      ),
+                    }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
+                  TNS
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
+                  value={winnerSetLimitForm.tns}
+                  onChange={(e) =>
+                    setWinnerSetLimitForm((prev) => ({
+                      ...prev,
+                      tns: Math.max(
+                        0,
+                        Math.floor(
+                          Number((e.target.value || '0').replace(/[^\d]/g, '')) || 0
+                        )
+                      ),
+                    }))
+                  }
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-5 rounded-[1.25rem] shadow-xl shadow-blue-600/20 active:scale-[0.98] uppercase tracking-widest"
+              >
+                Save winner limits
               </button>
             </form>
           </Modal>
@@ -1300,6 +1516,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
 function QueueCard({
   item,
   members,
+  isShuffling,
   showWinnerShortlist,
   onOpenAddName,
   onEditMember,
@@ -1310,6 +1527,8 @@ function QueueCard({
   key?: React.Key;
   item: AuctionItem;
   members: GuildMember[];
+  /** While shuffle animation runs, hide names and show loading skeletons. */
+  isShuffling: boolean;
   /** When false, no shortlist row styling or green “mark winner” buttons (after Reset / Unmark). */
   showWinnerShortlist: boolean;
   onOpenAddName: (itemId: string) => void;
@@ -1330,9 +1549,9 @@ function QueueCard({
 
   /** Rows that can be marked winner — Frag 2 / LND 6 / TNS 8; else top 1; 0 when shortlist UI is off after reset. */
   const shortlistSlots = showWinnerShortlist
-    ? maxQueueSlotsAfterShuffle(item.type)
+    ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
     : 0;
-  const poolCap = maxQueueSlotsAfterShuffle(item.type);
+  const poolCap = maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap);
   const recorded = item.recordedWinnerNames ?? [];
   const canMarkMoreWinners = recorded.length < poolCap;
 
@@ -1480,12 +1699,20 @@ function QueueCard({
                         title={m.name}
                         className="min-w-0 flex-1 break-words font-bold leading-normal text-slate-200 [overflow-wrap:anywhere]"
                       >
-                        {m.name}
+                        {isShuffling ? (
+                          <span
+                            aria-hidden
+                            className="block h-4 w-28 max-w-full animate-pulse rounded-md bg-slate-700/80"
+                          />
+                        ) : (
+                          m.name
+                        )}
                       </span>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
                       <button
                         type="button"
+                        disabled={isShuffling}
                         onClick={(e) => {
                           e.stopPropagation();
                           onEditMember(mid);
@@ -1498,6 +1725,7 @@ function QueueCard({
                       </button>
                       <button
                         type="button"
+                        disabled={isShuffling}
                         onClick={(e) => {
                           e.stopPropagation();
                           void onDeactivateMember(mid);
@@ -1509,6 +1737,7 @@ function QueueCard({
                         <Trash2 className="h-4 w-4" aria-hidden />
                       </button>
                       {idx < shortlistSlots &&
+                        !isShuffling &&
                         canMarkMoreWinners &&
                         !recorded.some(
                           (n) =>

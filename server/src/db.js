@@ -53,6 +53,7 @@ export async function initSchema(pool) {
       id VARCHAR(64) NOT NULL PRIMARY KEY,
       name VARCHAR(512) NOT NULL,
       type VARCHAR(64) NOT NULL,
+      winner_pool_cap INT NULL,
       winner_name VARCHAR(255) NULL,
       status ENUM('active', 'completed', 'cancelled') NOT NULL,
       created_at BIGINT NOT NULL,
@@ -172,6 +173,18 @@ export async function migrateAuctionWinnerNamesJson(pool) {
   );
 }
 
+/** Add per-item winner pool cap for dynamic limits (no .env edits needed). */
+export async function migrateAuctionWinnerPoolCapColumn(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'auction_items' AND COLUMN_NAME = 'winner_pool_cap'`
+  );
+  if (Array.isArray(rows) && rows.length > 0) return;
+  await pool.query(
+    `ALTER TABLE auction_items ADD COLUMN winner_pool_cap INT NULL AFTER type`
+  );
+}
+
 /** Readable wall time in phpMyAdmin; matches `at_ms` (FROM_UNIXTIME). */
 export async function migrateWinnerMarkLogLoggedAtColumn(pool) {
   const [rows] = await pool.query(
@@ -262,9 +275,9 @@ export async function seedIfEmpty(pool) {
     const now = Date.now();
     for (const it of DEFAULT_AUCTION_ITEMS) {
       await conn.query(
-        `INSERT INTO auction_items (id, name, type, winner_name, winner_names_json, status, created_at)
-         VALUES (?, ?, ?, ?, NULL, ?, ?)`,
-        [it.id, it.name, it.type, it.winnerName, it.status, now]
+        `INSERT INTO auction_items (id, name, type, winner_pool_cap, winner_name, winner_names_json, status, created_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+        [it.id, it.name, it.type, it.winnerPoolCap ?? null, it.winnerName, it.status, now]
       );
     }
     await conn.query(

@@ -6,6 +6,7 @@ import {
   initSchema,
   migrateMembersActiveColumn,
   migrateAuctionWinnerNamesJson,
+  migrateAuctionWinnerPoolCapColumn,
   migrateWinnerMarkLogTable,
   migrateBidderStateLogTable,
   migrateMembersIntPk,
@@ -133,6 +134,7 @@ async function main() {
   await initSchema(pool);
   await migrateMembersActiveColumn(pool);
   await migrateAuctionWinnerNamesJson(pool);
+  await migrateAuctionWinnerPoolCapColumn(pool);
   await migrateWinnerMarkLogTable(pool);
   await migrateBidderStateLogTable(pool);
   await migrateMembersIntPk(pool);

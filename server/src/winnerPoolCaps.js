@@ -1,25 +1,21 @@
-/**
- * Same caps as web `shuffleCaps.ts` — basahin ang VITE_* mula sa `.env` (dotenv sa server).
- */
+/** Default caps when item has no explicit override. */
 const DEFAULTS = {
   'Fragment Card': 2,
-  LND: 6,
-  TNS: 8,
+  LND: 7,
+  TNS: 12,
   'Ancient Item': 1,
   Other: 1,
 };
 
-const ENV_KEYS = {
-  'Fragment Card': 'VITE_AUCTION_WINNER_POOL_FRAGMENT',
-  LND: 'VITE_AUCTION_WINNER_POOL_LND',
-  TNS: 'VITE_AUCTION_WINNER_POOL_TNS',
-};
-
-export function maxRecordedWinnersForItemType(type) {
-  const key = ENV_KEYS[type];
+export function defaultWinnerPoolCapForType(type) {
   const fallback = DEFAULTS[type] ?? 1;
-  if (!key) return fallback;
-  const n = parseInt(String(process.env[key] ?? ''), 10);
-  if (!Number.isFinite(n) || n < 0) return fallback;
-  return n;
+  return fallback;
+}
+
+export function maxRecordedWinnersForItem(type, winnerPoolCap) {
+  if (winnerPoolCap != null && winnerPoolCap !== '') {
+    const n = Number(winnerPoolCap);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  return defaultWinnerPoolCapForType(type);
 }

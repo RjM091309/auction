@@ -55,9 +55,17 @@ export function parseAuctionState(json: unknown): AuctionState | null {
         .filter(Boolean);
       if (r.length > 0) recordedWinnerNames = r;
     }
+    const winnerPoolCapRaw = (it as unknown as Record<string, unknown>).winnerPoolCap;
+    const winnerPoolCap =
+      winnerPoolCapRaw == null || winnerPoolCapRaw === ''
+        ? null
+        : Number.isFinite(Number(winnerPoolCapRaw))
+          ? Math.max(0, Math.floor(Number(winnerPoolCapRaw)))
+          : null;
     return {
       ...it,
       ...(recordedWinnerNames ? { recordedWinnerNames } : {}),
+      winnerPoolCap,
       interestedMemberIds: Array.isArray(it.interestedMemberIds)
         ? (it.interestedMemberIds as unknown[])
             .map((x) => {

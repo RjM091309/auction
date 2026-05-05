@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS auction_items (
   id VARCHAR(64) NOT NULL PRIMARY KEY,
   name VARCHAR(512) NOT NULL,
   type VARCHAR(64) NOT NULL,
+  winner_pool_cap INT NULL,
   winner_name VARCHAR(255) NULL,
   winner_names_json TEXT NULL,
   status ENUM('active', 'completed', 'cancelled') NOT NULL,

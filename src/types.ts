@@ -4,11 +4,13 @@ export interface AuctionItem {
   id: string;
   name: string;
   type: ItemType;
+  /** Winner limit for this specific item (overrides type default when set). */
+  winnerPoolCap?: number | null;
   /** Legacy single winner; optional kung may `recordedWinnerNames` */
   winnerName: string | null;
   /**
    * Mga nanalo ngayong round (green check) habang `active` pa ang card.
-   * Hanggang `maxQueueSlotsAfterShuffle(type)` (VITE_AUCTION_WINNER_POOL_*).
+   * Hanggang `maxQueueSlotsAfterShuffle(type, winnerPoolCap)`.
    */
   recordedWinnerNames?: string[];
   status: 'active' | 'completed' | 'cancelled';

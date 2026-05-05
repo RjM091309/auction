@@ -1,6 +1,6 @@
 import { DATA_VERSION } from './defaults.js';
 import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
-import { maxRecordedWinnersForItemType } from './winnerPoolCaps.js';
+import { maxRecordedWinnersForItem } from './winnerPoolCaps.js';
 import {
   rolloverWeeklyWinsIfNewWeek,
   loadWeeklyTypeWins,
@@ -11,6 +11,7 @@ import {
   mergeRecordedWinnerNamesInto,
   normalizeIgn,
 } from './weeklyTypeWins.js';
+import { getAuctionWeekMondayKey } from './auctionWeek.js';
 import { loadWinnerMarkLog, appendWinnerMarkLog } from './winnerMarkLog.js';
 import {
   loadBidderStateLog,
@@ -104,7 +105,7 @@ export async function getFullState(pool) {
   );
 
   const [itemRows] = await pool.query(
-    `SELECT id, name, type, winner_name AS winnerName, winner_names_json AS winnerNamesJson, status, created_at AS createdAt
+    `SELECT id, name, type, winner_pool_cap AS winnerPoolCap, winner_name AS winnerName, winner_names_json AS winnerNamesJson, status, created_at AS createdAt
      FROM auction_items
      ORDER BY created_at ASC`
   );
@@ -130,6 +131,10 @@ export async function getFullState(pool) {
       id: r.id,
       name: r.name,
       type: r.type,
+      winnerPoolCap:
+        r.winnerPoolCap != null && r.winnerPoolCap !== ''
+          ? Number(r.winnerPoolCap)
+          : null,
       winnerName: r.winnerName,
       ...(recorded.length > 0 ? { recordedWinnerNames: recorded } : {}),
       status: r.status,
@@ -162,7 +167,10 @@ export async function getFullState(pool) {
 
   const weeklyTypeWins = await loadWeeklyTypeWins(pool);
   const winnerMarkLog = await loadWinnerMarkLog(pool);
-  const bidderStateLog = await loadBidderStateLog(pool);
+  const currentWeekMondayKey = getAuctionWeekMondayKey();
+  const bidderStateLog = (await loadBidderStateLog(pool)).filter(
+    (row) => getAuctionWeekMondayKey(row.at) === currentWeekMondayKey
+  );
 
   return {
     items,
@@ -353,10 +361,10 @@ export async function replaceFullState(pool, body) {
   for (const it of body.items) {
     const rec = it.recordedWinnerNames;
     if (Array.isArray(rec) && rec.length > 0) {
-      const cap = maxRecordedWinnersForItemType(it.type);
+      const cap = maxRecordedWinnersForItem(it.type, it.winnerPoolCap);
       if (rec.length > cap) {
         const err = new Error(
-          `Too many marked winners on "${it.name}" (${it.type}): max ${cap} (set in .env VITE_AUCTION_WINNER_POOL_*)`
+          `Too many marked winners on "${it.name}" (${it.type}): max ${cap} (winner limit for this item)`
         );
         err.statusCode = 400;
         throw err;
@@ -465,12 +473,15 @@ export async function replaceFullState(pool, body) {
 
     for (const it of body.items) {
       await conn.query(
-        `INSERT INTO auction_items (id, name, type, winner_name, winner_names_json, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO auction_items (id, name, type, winner_pool_cap, winner_name, winner_names_json, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           it.id,
           it.name,
           it.type,
+          it.winnerPoolCap != null && Number.isFinite(Number(it.winnerPoolCap))
+            ? Math.max(0, Math.floor(Number(it.winnerPoolCap)))
+            : null,
           it.winnerName ?? null,
           serializeWinnerNamesJson(it.recordedWinnerNames),
           it.status,
@@ -522,7 +533,7 @@ export async function replaceFullState(pool, body) {
       const batchAt = Date.now();
       for (const it of body.items) {
         if (it.status !== 'active') continue;
-        const poolCap = maxRecordedWinnersForItemType(it.type);
+        const poolCap = maxRecordedWinnersForItem(it.type, it.winnerPoolCap);
         const ids = Array.isArray(it.interestedMemberIds)
           ? it.interestedMemberIds
           : [];

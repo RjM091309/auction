@@ -27,11 +27,14 @@ export function PublicQueueCard({
   onRequestAddName: () => void;
 }) {
   const shortlistSlots = showWinnerShortlist
-    ? maxQueueSlotsAfterShuffle(item.type)
+    ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
     : 0;
 
   /** Same cap as admin shortlist rows after “Shuffle all queues”. */
-  const winnerPickPoolSize = maxQueueSlotsAfterShuffle(item.type);
+  const winnerPickPoolSize = maxQueueSlotsAfterShuffle(
+    item.type,
+    item.winnerPoolCap
+  );
 
   return (
     <motion.article

@@ -226,6 +226,39 @@ export function swal2ConfirmResetShuffleUnmark(): Promise<boolean> {
   }).then((r) => Boolean(r.isConfirmed));
 }
 
+/** Confirm before shuffling all active queues. */
+export function swal2ConfirmShuffleAllQueues(args: {
+  totalParticipants: number;
+  fragmentLimit: number;
+  lndLimit: number;
+  tnsLimit: number;
+}): Promise<boolean> {
+  const { totalParticipants, fragmentLimit, lndLimit, tnsLimit } = args;
+  return Swal.fire({
+    ...darkShell,
+    icon: 'question',
+    title: 'Shuffle all queues?',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">This randomizes every active queue for this round and locks shuffle until reset.</p>
+<div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box;margin-bottom:0.75rem">
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>Total bidders</span><strong>${totalParticipants}</strong></div>
+</div>
+<div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.5rem">Winner set limit</div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Puppet Frag Card</span><strong>${fragmentLimit}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>LND</span><strong>${lndLimit}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>TNS</span><strong>${tnsLimit}</strong></div>
+</div>
+</div>`,
+    showCancelButton: true,
+    confirmButtonText: 'Start Shuffle',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#2563eb',
+  }).then((r) => Boolean(r.isConfirmed));
+}
+
 function formatSaveErrorMessage(raw: string): string {
   const s = raw.trim();
   if (s.startsWith('{')) {
@@ -246,6 +279,33 @@ export function swal2SaveError(message: string): Promise<void> {
     icon: 'error',
     title: 'Could not save',
     text: formatSaveErrorMessage(message),
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** After updating winner limits in admin modal. */
+export function swal2WinnerLimitsUpdated(args: {
+  fragment: number;
+  lnd: number;
+  tns: number;
+}): Promise<void> {
+  const f = String(args.fragment);
+  const l = String(args.lnd);
+  const t = String(args.tns);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'success',
+    title: 'Winner limits saved',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Updated draw winner limits for this round.</p>
+<div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box">
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Puppet Frag Card</span><strong>${f}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>LND</span><strong>${l}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>TNS</span><strong>${t}</strong></div>
+</div>
+</div>`,
     confirmButtonText: 'OK',
   }).then(() => undefined);
 }

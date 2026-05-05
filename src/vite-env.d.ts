@@ -2,9 +2,6 @@
 
 interface ImportMetaEnv {
   readonly VITE_API_ORIGIN?: string;
-  /** Winner pick pool (top slots after shuffle). Optional; defaults in `shuffleCaps.ts`. */
-  readonly VITE_AUCTION_WINNER_POOL_FRAGMENT?: string;
-  readonly VITE_AUCTION_WINNER_POOL_LND?: string;
-  readonly VITE_AUCTION_WINNER_POOL_TNS?: string;
-  readonly VITE_AUCTION_WINNER_POOL_DEFAULT?: string;
+  /** Public board polling interval (ms). */
+  readonly VITE_PUBLIC_STATE_POLL_MS?: string;
 }

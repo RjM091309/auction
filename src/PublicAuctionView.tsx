@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   Clock,
@@ -62,21 +62,31 @@ const typeColors: Record<
   Other: 'text-slate-400 border-slate-700 bg-slate-800',
 };
 
+const PUBLIC_STATE_POLL_MS_RAW = Number(import.meta.env.VITE_PUBLIC_STATE_POLL_MS ?? 4000);
+const PUBLIC_STATE_POLL_MS =
+  Number.isFinite(PUBLIC_STATE_POLL_MS_RAW) && PUBLIC_STATE_POLL_MS_RAW >= 1000
+    ? Math.round(PUBLIC_STATE_POLL_MS_RAW)
+    : 4000;
+
 export default function PublicAuctionView() {
   const [state, setState] = useState<AuctionState | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [publicShuffleLoading, setPublicShuffleLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<'queues' | 'logs'>('queues');
   const [queueNameModalItemId, setQueueNameModalItemId] = useState<string | null>(null);
   const [queueNameInput, setQueueNameInput] = useState('');
   const [ignSuggestionsOpen, setIgnSuggestionsOpen] = useState(false);
   const [queueSubmitting, setQueueSubmitting] = useState(false);
-  const [bidderLogFilter, setBidderLogFilter] =
-    useState<BidderLogStateFilter>('all');
   const [bidderLogSubTab, setBidderLogSubTab] = useState<'ranking' | 'weekly'>(
     'ranking'
   );
   const [bidderLogSearch, setBidderLogSearch] = useState('');
+  const [weeklyLogFilter, setWeeklyLogFilter] = useState<
+    'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3'
+  >('all');
+  const prevShuffleLockedRef = useRef<boolean>(false);
+  const publicShuffleTimerRef = useRef<number | null>(null);
 
   const queueModalItem = useMemo(
     () => state?.items.find((i) => i.id === queueNameModalItemId) ?? null,
@@ -113,7 +123,19 @@ export default function PublicAuctionView() {
     try {
       const remote = await fetchAuctionState();
       if (remote) {
-        setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote)));
+        const normalized = dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote));
+        if (!prevShuffleLockedRef.current && normalized.shuffleLocked === true) {
+          setPublicShuffleLoading(true);
+          if (publicShuffleTimerRef.current != null) {
+            window.clearTimeout(publicShuffleTimerRef.current);
+          }
+          publicShuffleTimerRef.current = window.setTimeout(() => {
+            setPublicShuffleLoading(false);
+            publicShuffleTimerRef.current = null;
+          }, 1400);
+        }
+        prevShuffleLockedRef.current = normalized.shuffleLocked === true;
+        setState(normalized);
       } else if (!silent) {
         setState(null);
       }
@@ -125,8 +147,14 @@ export default function PublicAuctionView() {
 
   useEffect(() => {
     void load();
-    const id = window.setInterval(() => void load({ silent: true }), 12_000);
-    return () => window.clearInterval(id);
+    const id = window.setInterval(() => void load({ silent: true }), PUBLIC_STATE_POLL_MS);
+    return () => {
+      window.clearInterval(id);
+      if (publicShuffleTimerRef.current != null) {
+        window.clearTimeout(publicShuffleTimerRef.current);
+        publicShuffleTimerRef.current = null;
+      }
+    };
   }, [load]);
 
   useEffect(() => {
@@ -136,10 +164,6 @@ export default function PublicAuctionView() {
       setIgnSuggestionsOpen(false);
     }
   }, [state?.shuffleLocked]);
-
-  useEffect(() => {
-    setBidderLogFilter((f) => (f === 'ongoing' ? 'all' : f));
-  }, []);
 
   /** Kapag binuksan ang join modal, i-refresh ang state para hindi stale ang `weeklyTypeWins`. */
   useEffect(() => {
@@ -360,14 +384,26 @@ export default function PublicAuctionView() {
 
   /** Weekly list: win/loss only — ongoing rows stay in DB for ranking math but are not shown here. */
   const filteredBidderLogEntries = useMemo(
-    () =>
-      bidderStateLogEntriesSorted.filter(
+    () => {
+      const outcomeFilter: BidderLogStateFilter =
+        weeklyLogFilter === 'loss' || weeklyLogFilter === 'win' ? weeklyLogFilter : 'all';
+      const typeFilter: 'all' | 'm1' | 'm2' | 'm3' =
+        weeklyLogFilter === 'm1' || weeklyLogFilter === 'm2' || weeklyLogFilter === 'm3'
+          ? weeklyLogFilter
+          : 'all';
+
+      return bidderStateLogEntriesSorted.filter(
         (row) =>
           row.state !== BIDDER_STATE_ONGOING &&
-          bidderLogEntryMatchesFilter(row, bidderLogFilter) &&
+          (typeFilter === 'all' ||
+            (typeFilter === 'm1' && row.itemType === 'Fragment Card') ||
+            (typeFilter === 'm2' && row.itemType === 'LND') ||
+            (typeFilter === 'm3' && row.itemType === 'TNS')) &&
+          bidderLogEntryMatchesFilter(row, outcomeFilter) &&
           bidderLogEntryMatchesSearch(row, bidderLogSearch)
-      ),
-    [bidderStateLogEntriesSorted, bidderLogFilter, bidderLogSearch]
+      );
+    },
+    [bidderStateLogEntriesSorted, weeklyLogFilter, bidderLogSearch]
   );
 
   if (loading && !state) {
@@ -465,10 +501,6 @@ export default function PublicAuctionView() {
 
       <main className="px-4 py-6 sm:px-6 sm:py-8 md:py-10 lg:px-8 lg:py-12">
         <div className="mx-auto max-w-screen-2xl space-y-5 sm:space-y-6 lg:space-y-8">
-          <p className="px-1 text-center text-[9px] font-medium uppercase leading-relaxed tracking-wide text-slate-500 sm:text-[10px]">
-            Data updates automatically about every 12 seconds.
-          </p>
-
           <AnimatePresence mode="wait">
             {activeTab === 'queues' && (
               <motion.div
@@ -505,6 +537,7 @@ export default function PublicAuctionView() {
                         <PublicQueueCard
                           item={item}
                           members={state?.members ?? []}
+                          isShuffling={publicShuffleLoading}
                           showWinnerShortlist={
                             state?.winnerShortlistUiEnabled === true
                           }
@@ -638,14 +671,20 @@ export default function PublicAuctionView() {
                                 ['all', 'All'] as const,
                                 ['loss', 'Loss'] as const,
                                 ['win', 'Win'] as const,
-                              ] satisfies readonly [BidderLogStateFilter, string][]
+                                ['m1', 'PFC'] as const,
+                                ['m2', 'LND'] as const,
+                                ['m3', 'TNS'] as const,
+                              ] satisfies readonly [
+                                'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3',
+                                string
+                              ][]
                             ).map(([id, label]) => (
                               <button
                                 key={id}
                                 type="button"
-                                onClick={() => setBidderLogFilter(id)}
+                                onClick={() => setWeeklyLogFilter(id)}
                                 className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-wide transition-colors sm:px-4 sm:text-xs ${
-                                  bidderLogFilter === id
+                                  weeklyLogFilter === id
                                     ? 'border-blue-500 bg-blue-600 text-white shadow-md shadow-blue-900/25'
                                     : 'border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-500 hover:bg-slate-800 hover:text-white'
                                 }`}
@@ -870,12 +909,14 @@ function PublicAddNameModal({
 function PublicQueueCard({
   item,
   members,
+  isShuffling,
   showWinnerShortlist,
   showJoinQueue,
   onRequestAddName,
 }: {
   item: AuctionItem;
   members: GuildMember[];
+  isShuffling: boolean;
   /** Same as admin: off after Reset / Unmark until Shuffle again. */
   showWinnerShortlist: boolean;
   /** Hidden after admin runs “Shuffle all queues” until Reset shuffle. */
@@ -883,11 +924,14 @@ function PublicQueueCard({
   onRequestAddName: () => void;
 }) {
   const shortlistSlots = showWinnerShortlist
-    ? maxQueueSlotsAfterShuffle(item.type)
+    ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
     : 0;
 
   /** Same cap as admin shortlist rows after “Shuffle all queues”. */
-  const winnerPickPoolSize = maxQueueSlotsAfterShuffle(item.type);
+  const winnerPickPoolSize = maxQueueSlotsAfterShuffle(
+    item.type,
+    item.winnerPoolCap
+  );
 
   return (
     <motion.article
@@ -953,7 +997,14 @@ function PublicQueueCard({
                       {idx + 1}
                     </span>
                     <span className="min-w-0 flex-1 break-words font-bold leading-normal text-slate-200 [overflow-wrap:anywhere]">
-                      {m.name}
+                      {isShuffling ? (
+                        <span
+                          aria-hidden
+                          className="block h-4 w-24 max-w-full animate-pulse rounded-md bg-slate-700/80"
+                        />
+                      ) : (
+                        m.name
+                      )}
                     </span>
                   </div>
                   {shortlist ? (
