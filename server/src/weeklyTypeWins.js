@@ -71,9 +71,6 @@ export async function rolloverWeeklyWinsIfNewWeek(q) {
   const stored = rows[0]?.value != null ? String(rows[0].value) : '';
   if (stored === mondayKey) return;
 
-  const [[{ bidderStateLogRows }]] = await q.query(
-    'SELECT COUNT(*) AS bidderStateLogRows FROM bidder_state_log'
-  );
   const [[{ winnerMarkLogRows }]] = await q.query(
     'SELECT COUNT(*) AS winnerMarkLogRows FROM winner_mark_log'
   );
@@ -86,12 +83,10 @@ export async function rolloverWeeklyWinsIfNewWeek(q) {
     `INSERT INTO app_meta (\`key\`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)`,
     [META_WEEKLY_TYPE_WINS, '[]']
   );
-  /** New auction week starts every Monday: clear weekly bidder outcome log (win/loss/ongoing history). */
-  await q.query(`DELETE FROM bidder_state_log`);
   console.info(
-    `[audit] weekly rollover week=${stored || '(none)'} -> ${mondayKey} tz=${timeZone} reset weekly_type_wins + bidder_state_log_rows=${Number(
-      bidderStateLogRows
-    )} winner_mark_log_rows_kept=${Number(winnerMarkLogRows)}`
+    `[audit] weekly rollover week=${stored || '(none)'} -> ${mondayKey} tz=${timeZone} reset weekly_type_wins + bidder_state_log_rows_kept=all winner_mark_log_rows_kept=${Number(
+      winnerMarkLogRows
+    )}`
   );
 }
 

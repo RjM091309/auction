@@ -167,10 +167,7 @@ export async function getFullState(pool) {
 
   const weeklyTypeWins = await loadWeeklyTypeWins(pool);
   const winnerMarkLog = await loadWinnerMarkLog(pool);
-  const currentWeekMondayKey = getAuctionWeekMondayKey();
-  const bidderStateLog = (await loadBidderStateLog(pool)).filter(
-    (row) => getAuctionWeekMondayKey(row.at) === currentWeekMondayKey
-  );
+  const bidderStateLog = await loadBidderStateLog(pool);
 
   return {
     items,

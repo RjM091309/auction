@@ -229,11 +229,22 @@ export function swal2ConfirmResetShuffleUnmark(): Promise<boolean> {
 /** Confirm before shuffling all active queues. */
 export function swal2ConfirmShuffleAllQueues(args: {
   totalParticipants: number;
+  fragmentParticipants: number;
+  lndParticipants: number;
+  tnsParticipants: number;
   fragmentLimit: number;
   lndLimit: number;
   tnsLimit: number;
 }): Promise<boolean> {
-  const { totalParticipants, fragmentLimit, lndLimit, tnsLimit } = args;
+  const {
+    totalParticipants,
+    fragmentParticipants,
+    lndParticipants,
+    tnsParticipants,
+    fragmentLimit,
+    lndLimit,
+    tnsLimit,
+  } = args;
   return Swal.fire({
     ...darkShell,
     icon: 'question',
@@ -243,6 +254,11 @@ export function swal2ConfirmShuffleAllQueues(args: {
     html: `<div style="text-align:center;margin:0;padding:0">
 <p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">This randomizes every active queue for this round and locks shuffle until reset.</p>
 <div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box;margin-bottom:0.75rem">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.5rem">Bidder breakdown</div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Puppet Frag Card</span><strong>${fragmentParticipants}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>LND</span><strong>${lndParticipants}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>TNS</span><strong>${tnsParticipants}</strong></div>
+<div style="height:1px;background:#334155;margin:0.5rem 0"></div>
 <div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>Total bidders</span><strong>${totalParticipants}</strong></div>
 </div>
 <div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box">

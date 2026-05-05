@@ -36,6 +36,7 @@ import {
 import { maxQueueSlotsAfterShuffle } from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
+import { getAuctionWeekMondayKey } from './lib/auctionWeek';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import {
   BIDDER_STATE_LOSS,
@@ -385,6 +386,7 @@ export default function PublicAuctionView() {
   /** Weekly list: win/loss only — ongoing rows stay in DB for ranking math but are not shown here. */
   const filteredBidderLogEntries = useMemo(
     () => {
+      const weekKey = getAuctionWeekMondayKey();
       const outcomeFilter: BidderLogStateFilter =
         weeklyLogFilter === 'loss' || weeklyLogFilter === 'win' ? weeklyLogFilter : 'all';
       const typeFilter: 'all' | 'm1' | 'm2' | 'm3' =
@@ -394,6 +396,7 @@ export default function PublicAuctionView() {
 
       return bidderStateLogEntriesSorted.filter(
         (row) =>
+          getAuctionWeekMondayKey(row.at) === weekKey &&
           row.state !== BIDDER_STATE_ONGOING &&
           (typeFilter === 'all' ||
             (typeFilter === 'm1' && row.itemType === 'Fragment Card') ||
@@ -568,7 +571,7 @@ export default function PublicAuctionView() {
                     <button
                       type="button"
                       onClick={() => setBidderLogSubTab('ranking')}
-                      className={`flex min-h-10 min-w-0 flex-1 touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
+                      className={`flex min-h-10 min-w-0 flex-1 cursor-pointer touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
                         bidderLogSubTab === 'ranking'
                           ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
                           : 'text-slate-400 hover:bg-slate-800/80 hover:text-white'
@@ -579,7 +582,7 @@ export default function PublicAuctionView() {
                     <button
                       type="button"
                       onClick={() => setBidderLogSubTab('weekly')}
-                      className={`flex min-h-10 min-w-0 flex-1 touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
+                      className={`flex min-h-10 min-w-0 flex-1 cursor-pointer touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
                         bidderLogSubTab === 'weekly'
                           ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
                           : 'text-slate-400 hover:bg-slate-800/80 hover:text-white'
@@ -683,7 +686,7 @@ export default function PublicAuctionView() {
                                 key={id}
                                 type="button"
                                 onClick={() => setWeeklyLogFilter(id)}
-                                className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-wide transition-colors sm:px-4 sm:text-xs ${
+                                className={`cursor-pointer rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-wide transition-colors sm:px-4 sm:text-xs ${
                                   weeklyLogFilter === id
                                     ? 'border-blue-500 bg-blue-600 text-white shadow-md shadow-blue-900/25'
                                     : 'border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-500 hover:bg-slate-800 hover:text-white'
