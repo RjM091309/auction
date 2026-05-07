@@ -45,6 +45,7 @@ import {
   type BidderLogStateFilter,
   bidderLogEntryMatchesFilter,
   bidderLogEntryMatchesSearch,
+  bidderRankingRowMatchesSearch,
   bidderStateBadgeClass,
   bidderStateLabel,
   countQueuedIgnByNormalized,
@@ -83,6 +84,7 @@ export default function PublicAuctionView() {
     'ranking'
   );
   const [bidderLogSearch, setBidderLogSearch] = useState('');
+  const [bidderRankingSearch, setBidderRankingSearch] = useState('');
   const [weeklyLogFilter, setWeeklyLogFilter] = useState<
     'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3'
   >('all');
@@ -383,6 +385,14 @@ export default function PublicAuctionView() {
     [bidderStateLogEntriesSorted, state?.shuffleLocked, queueIgnCounts]
   );
 
+  const filteredBidderRankingRows = useMemo(
+    () =>
+      bidderStatsByIgn.filter((row) =>
+        bidderRankingRowMatchesSearch(row, bidderRankingSearch)
+      ),
+    [bidderStatsByIgn, bidderRankingSearch]
+  );
+
   /** Weekly list: win/loss only — ongoing rows stay in DB for ranking math but are not shown here. */
   const filteredBidderLogEntries = useMemo(
     () => {
@@ -594,41 +604,65 @@ export default function PublicAuctionView() {
 
                   {bidderLogSubTab === 'ranking' &&
                     (bidderStatsByIgn.length > 0 ? (
-                      <ul
-                        className="space-y-2"
-                        aria-label="Win and loss counts by bidder"
-                      >
-                        {bidderStatsByIgn.map((row) => (
-                          <li
-                            key={row.ign.toLowerCase()}
-                            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 sm:px-5 sm:py-3.5"
+                      <div className="space-y-3">
+                        <div className="flex w-full flex-col gap-3 sm:flex-row sm:justify-start">
+                          <div className="relative min-w-0 w-full sm:max-w-md">
+                            <Search
+                              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+                              aria-hidden
+                            />
+                            <input
+                              type="search"
+                              value={bidderRankingSearch}
+                              onChange={(e) => setBidderRankingSearch(e.target.value)}
+                              placeholder="Search IGN, counts…"
+                              className="w-full rounded-xl border border-slate-700 bg-slate-900 py-2.5 pl-9 pr-3 text-sm text-white placeholder:text-slate-600 focus:border-blue-500/60 focus:outline-none focus:ring-2 focus:ring-blue-600/30"
+                              aria-label="Search ranking"
+                            />
+                          </div>
+                        </div>
+                        {filteredBidderRankingRows.length === 0 ? (
+                          <p className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 py-10 text-center text-sm font-medium text-slate-500">
+                            No entries match this search.
+                          </p>
+                        ) : (
+                          <ul
+                            className="space-y-2"
+                            aria-label="Win and loss counts by bidder"
                           >
-                            <span className="min-w-0 break-words font-bold text-amber-400">
-                              {row.ign}
-                            </span>
-                            <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 text-xs sm:text-sm">
-                              <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-green-400">
-                                <span className="text-[9px] font-black uppercase tracking-wide text-slate-500 sm:text-[10px]">
-                                  Win
+                            {filteredBidderRankingRows.map((row) => (
+                              <li
+                                key={row.ign.toLowerCase()}
+                                className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 sm:px-5 sm:py-3.5"
+                              >
+                                <span className="min-w-0 break-words font-bold text-amber-400">
+                                  {row.ign}
                                 </span>
-                                {row.wins}
-                              </span>
-                              <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-rose-300">
-                                <span className="text-[9px] font-black uppercase tracking-wide text-slate-500 sm:text-[10px]">
-                                  Loss
-                                </span>
-                                {row.losses}
-                              </span>
-                              <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-blue-300">
-                                <span className="text-[9px] font-black uppercase tracking-wide text-slate-500 sm:text-[10px]">
-                                  Ong
-                                </span>
-                                {row.ongoing}
-                              </span>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
+                                <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 text-xs sm:text-sm">
+                                  <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-green-400">
+                                    <span className="text-[9px] font-black uppercase tracking-wide text-slate-500 sm:text-[10px]">
+                                      Win
+                                    </span>
+                                    {row.wins}
+                                  </span>
+                                  <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-rose-300">
+                                    <span className="text-[9px] font-black uppercase tracking-wide text-slate-500 sm:text-[10px]">
+                                      Loss
+                                    </span>
+                                    {row.losses}
+                                  </span>
+                                  <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-blue-300">
+                                    <span className="text-[9px] font-black uppercase tracking-wide text-slate-500 sm:text-[10px]">
+                                      Ong
+                                    </span>
+                                    {row.ongoing}
+                                  </span>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
                     ) : (
                       <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center sm:p-12">
                         <p className="text-sm font-medium text-slate-500">

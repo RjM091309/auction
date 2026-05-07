@@ -89,6 +89,32 @@ export type BidderSummaryRow = {
   ongoing: number;
 };
 
+/** Same token rules as `bidderLogEntryMatchesSearch` — IGN plus Win/Loss/Ongoing counts and labels. */
+export function bidderRankingRowMatchesSearch(
+  row: BidderSummaryRow,
+  query: string
+): boolean {
+  const tokens = query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length === 0) return true;
+  const blob = [
+    row.ign,
+    String(row.wins),
+    String(row.losses),
+    String(row.ongoing),
+    bidderStateLabel(BIDDER_STATE_WIN),
+    bidderStateLabel(BIDDER_STATE_LOSS),
+    bidderStateLabel(BIDDER_STATE_ONGOING),
+    'ong',
+  ]
+    .join(' ')
+    .toLowerCase();
+  return tokens.every((t) => blob.includes(t));
+}
+
 /**
  * Active queues → normalized IGN → display name + how many cards they’re on (visible items only).
  */
