@@ -74,11 +74,11 @@ import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
 import { getAuctionWeekMondayKey } from './lib/auctionWeek';
 import {
-  computeWinnerAssignmentLabels,
-  freePageInfoForTypeByRank,
-  freeItemsForTypeByRank,
+  computeWinnerAssignmentLabelsFromItems,
+  freeItemsFromTotalItems,
   GUILD_RANK_OPTIONS,
   totalItemsForTypeByRank,
+  winnerSlotsFromTotalItems,
 } from './lib/pageAssignment';
 import {
   BIDDER_STATE_LOSS,
@@ -119,6 +119,7 @@ function auctionPollSnapshot(s: AuctionState): string {
     winnerShortlistUiEnabled: s.winnerShortlistUiEnabled,
     eventMode: s.eventMode,
     rewardRank: s.rewardRank,
+    rewardItemCounts: s.rewardItemCounts,
     dataVersion: s.dataVersion,
   });
 }
@@ -160,10 +161,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     tns: defaultWinnerPoolCapForType('TNS'),
   });
   const winnerSlotsFromItems = (type: ItemType, items: number): number => {
-    const n = Math.max(0, Math.floor(items));
-    if (type === 'LND' || type === 'TNS') return Math.max(0, Math.floor(n / 4));
-    if (type === 'Fragment Card') return n;
-    return Math.max(1, Math.ceil(n / 4));
+    return winnerSlotsFromTotalItems(type, items);
   };
   const winnerSplitPreview = useMemo(() => {
     const queuedByType = (type: ItemType) =>
@@ -172,11 +170,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         .reduce((sum, it) => sum + it.interestedMemberIds.length, 0);
     const build = (type: ItemType, items: number, bidders: number) => {
       const pages = winnerSlotsFromItems(type, items);
-      const labels = computeWinnerAssignmentLabels(
+      const labels = computeWinnerAssignmentLabelsFromItems(
         type,
-        winnerSetLimitForm.rank,
-        1,
-        bidders
+        items,
+        bidders,
+        1
       );
       const winners = labels.length;
       const sample = labels.slice(0, 3).join(', ');
@@ -404,7 +402,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const centerFewQueueCards =
     visibleActiveAuctions.length > 0 && visibleActiveAuctions.length < 3;
   const featherPageStartByItemId = useMemo(() => {
-    const rank = state?.rewardRank ?? 'Bronze';
+    const counts = state?.rewardItemCounts ?? rankPresetLimits(state?.rewardRank ?? 'Bronze');
     const featherItems = (state?.items ?? [])
       .filter((it) => it.status === 'active' && (it.type === 'LND' || it.type === 'TNS'))
       .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
@@ -412,10 +410,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     let nextPage = 1;
     for (const it of featherItems) {
       out[it.id] = nextPage;
-      nextPage += computeWinnerAssignmentLabels(it.type, rank, nextPage).length;
+      const totalItems = it.type === 'LND' ? counts.lnd : counts.tns;
+      nextPage += winnerSlotsFromTotalItems(it.type, totalItems);
     }
     return out;
-  }, [state?.items, state?.rewardRank]);
+  }, [state?.items, state?.rewardRank, state?.rewardItemCounts]);
 
   const bidderStateLogEntries = state?.bidderStateLog ?? [];
 
@@ -858,7 +857,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const openWinnerSetLimitModal = () => {
     if (!state) return;
     const rank = state.rewardRank ?? 'Bronze';
-    const preset = rankPresetLimits(rank);
+    const preset = state.rewardItemCounts ?? rankPresetLimits(rank);
     setWinnerSetLimitForm({
       rank,
       fragment: preset.fragment,
@@ -868,40 +867,51 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     setWinnerSetLimitModalOpen(true);
   };
 
-  const handleSaveWinnerSetLimit = (e: React.FormEvent) => {
+  const handleSaveWinnerSetLimit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setState((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        rewardRank: winnerSetLimitForm.rank,
-        items: prev.items.map((it) => {
-          if (it.type === 'Fragment Card') {
-            return {
-              ...it,
-              winnerPoolCap: winnerSlotsFromItems(
-                'Fragment Card',
-                winnerSetLimitForm.fragment
-              ),
-            };
-          }
-          if (it.type === 'LND') {
-            return {
-              ...it,
-              winnerPoolCap: winnerSlotsFromItems('LND', winnerSetLimitForm.lnd),
-            };
-          }
-          if (it.type === 'TNS') {
-            return {
-              ...it,
-              winnerPoolCap: winnerSlotsFromItems('TNS', winnerSetLimitForm.tns),
-            };
-          }
-          return it;
-        }),
-      };
-    });
+    if (!state) return;
+    const nextState: AuctionState = {
+      ...state,
+      rewardRank: winnerSetLimitForm.rank,
+      rewardItemCounts: {
+        fragment: winnerSetLimitForm.fragment,
+        lnd: winnerSetLimitForm.lnd,
+        tns: winnerSetLimitForm.tns,
+      },
+      items: state.items.map((it) => {
+        if (it.type === 'Fragment Card') {
+          return {
+            ...it,
+            winnerPoolCap: winnerSlotsFromItems(
+              'Fragment Card',
+              winnerSetLimitForm.fragment
+            ),
+          };
+        }
+        if (it.type === 'LND') {
+          return {
+            ...it,
+            winnerPoolCap: winnerSlotsFromItems('LND', winnerSetLimitForm.lnd),
+          };
+        }
+        if (it.type === 'TNS') {
+          return {
+            ...it,
+            winnerPoolCap: winnerSlotsFromItems('TNS', winnerSetLimitForm.tns),
+          };
+        }
+        return it;
+      }),
+    };
+    setState(nextState);
     setWinnerSetLimitModalOpen(false);
+    try {
+      const server = await persistAuctionState(nextState);
+      setState(server ?? nextState);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      void swal2SaveError(msg || 'Could not save winner set limit');
+    }
     void swal2WinnerLimitsUpdated({
       fragmentWinners: winnerSplitPreview.fragment.winners,
       lndWinners: winnerSplitPreview.lnd.winners,
@@ -1258,6 +1268,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           item={item}
                           members={state.members}
                           rewardRank={state.rewardRank ?? 'Bronze'}
+                          rewardItemCounts={
+                            state.rewardItemCounts ?? rankPresetLimits(state.rewardRank ?? 'Bronze')
+                          }
                           featherPageStart={featherPageStartByItemId[item.id]}
                           isShuffling={shuffleUi.active}
                           showWinnerShortlist={
@@ -1814,6 +1827,7 @@ function QueueCard({
   item,
   members,
   rewardRank,
+  rewardItemCounts,
   featherPageStart,
   isShuffling,
   showWinnerShortlist,
@@ -1831,6 +1845,7 @@ function QueueCard({
   item: AuctionItem;
   members: GuildMember[];
   rewardRank: GuildRank;
+  rewardItemCounts: { fragment: number; lnd: number; tns: number };
   /** Shared page numbering within Feathers tab (LND + TNS). */
   featherPageStart?: number;
   /** While shuffle animation runs, hide names and show loading skeletons. */
@@ -1882,22 +1897,39 @@ function QueueCard({
    *   (example: limit=8, winners=4 => 2 pages each: P1-2, P3-4, P5-6, P7-8)
    */
   const winnerPageRanges = (() => {
+    const totalItems =
+      item.type === 'Fragment Card'
+        ? rewardItemCounts.fragment
+        : item.type === 'LND'
+          ? rewardItemCounts.lnd
+          : item.type === 'TNS'
+            ? rewardItemCounts.tns
+            : 1;
     const pageStart =
       item.type === 'LND' || item.type === 'TNS'
         ? featherPageStart ?? 1
         : 1;
-    return computeWinnerAssignmentLabels(
+    return computeWinnerAssignmentLabelsFromItems(
       item.type,
-      rewardRank,
-      pageStart,
-      displayIds.length
+      totalItems,
+      displayIds.length,
+      pageStart
     );
   })();
-  const freeItems = freeItemsForTypeByRank(item.type, rewardRank);
+  const freeItems =
+    item.type === 'LND'
+      ? freeItemsFromTotalItems(item.type, rewardItemCounts.lnd)
+      : item.type === 'TNS'
+        ? freeItemsFromTotalItems(item.type, rewardItemCounts.tns)
+        : 0;
   const freePageInfo = (() => {
     if (item.type !== 'LND' && item.type !== 'TNS') return null;
     const pageStart = featherPageStart ?? 1;
-    return freePageInfoForTypeByRank(item.type, rewardRank, pageStart);
+    const totalItems = item.type === 'LND' ? rewardItemCounts.lnd : rewardItemCounts.tns;
+    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems);
+    return freeItems > 0
+      ? { pageLabel: `P${pageStart + fullPages}`, freeItems }
+      : null;
   })();
   const resolvedRevealCount =
     typeof shuffleRevealCount === 'number' && Number.isInteger(shuffleRevealCount)

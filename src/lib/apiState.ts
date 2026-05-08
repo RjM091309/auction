@@ -3,6 +3,7 @@ import type {
   AuctionState,
   BidderStateLogEntry,
   GuildRank,
+  RewardItemCounts,
   GuildMember,
   WeeklyTypeWin,
   WeeklyEventType,
@@ -227,6 +228,18 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     v === 'Silver' || v === 'Gold' ? v : 'Bronze';
   const eventMode = parseEventType(o.eventMode);
   const rewardRank = parseRank(o.rewardRank);
+  const parseCount = (v: unknown, fallback: number) =>
+    Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : fallback;
+  const rawCounts = o.rewardItemCounts;
+  const rewardItemCountsObj =
+    rawCounts && typeof rawCounts === 'object'
+      ? (rawCounts as Record<string, unknown>)
+      : {};
+  const rewardItemCounts: RewardItemCounts = {
+    fragment: parseCount(rewardItemCountsObj.fragment, 2),
+    lnd: parseCount(rewardItemCountsObj.lnd, 30),
+    tns: parseCount(rewardItemCountsObj.tns, 50),
+  };
 
   return {
     items,
@@ -237,6 +250,7 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     weeklyTypeWins,
     eventMode,
     rewardRank,
+    rewardItemCounts,
     ...(winnerMarkLog ? { winnerMarkLog } : {}),
     ...(bidderStateLog ? { bidderStateLog } : {}),
   };
@@ -356,6 +370,7 @@ export async function persistAuctionState(
     shuffleLocked: state.shuffleLocked === true,
     eventMode: state.eventMode ?? 'Emperium Overrun',
     rewardRank: state.rewardRank ?? 'Bronze',
+    rewardItemCounts: state.rewardItemCounts ?? { fragment: 2, lnd: 30, tns: 50 },
   };
   const res = await fetch(apiUrl('/api/state'), {
     ...cred,

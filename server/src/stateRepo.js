@@ -20,6 +20,7 @@ import {
 
 const EVENT_MODE_META_KEY = 'event_mode';
 const REWARD_RANK_META_KEY = 'reward_rank';
+const REWARD_ITEM_COUNTS_META_KEY = 'reward_item_counts_json';
 
 function defaultEventMode() {
   return 'Emperium Overrun';
@@ -42,6 +43,24 @@ function sanitizeRewardRank(v) {
 function parseRewardRank(raw) {
   if (raw == null || raw === '') return defaultRewardRank();
   return sanitizeRewardRank(typeof raw === 'string' ? raw : String(raw));
+}
+function parseRewardItemCounts(raw) {
+  const fallback = { fragment: 2, lnd: 30, tns: 50 };
+  if (raw == null || raw === '') return fallback;
+  try {
+    const s = typeof raw === 'string' ? raw : String(raw);
+    const j = JSON.parse(s);
+    if (!j || typeof j !== 'object') return fallback;
+    const toInt = (v, d) =>
+      Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d;
+    return {
+      fragment: toInt(j.fragment, fallback.fragment),
+      lnd: toInt(j.lnd, fallback.lnd),
+      tns: toInt(j.tns, fallback.tns),
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 function clientError(statusCode, message, opts = {}) {
@@ -204,6 +223,11 @@ export async function getFullState(pool) {
     [REWARD_RANK_META_KEY]
   );
   const rewardRank = parseRewardRank(rankRows[0]?.value);
+  const [countRows] = await pool.query(
+    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
+    [REWARD_ITEM_COUNTS_META_KEY]
+  );
+  const rewardItemCounts = parseRewardItemCounts(countRows[0]?.value);
 
   return {
     items,
@@ -220,6 +244,7 @@ export async function getFullState(pool) {
     bidderStateLog,
     eventMode,
     rewardRank,
+    rewardItemCounts,
   };
 }
 
@@ -320,6 +345,7 @@ export async function publicAddBidToQueue(pool, body) {
     shuffleLocked: state.shuffleLocked === true,
     eventMode: state.eventMode ?? defaultEventMode(),
     rewardRank: state.rewardRank ?? defaultRewardRank(),
+    rewardItemCounts: state.rewardItemCounts ?? { fragment: 2, lnd: 30, tns: 50 },
   });
 
   return getFullState(pool);
@@ -573,6 +599,13 @@ export async function replaceFullState(pool, body) {
       await conn.query(
         'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
         [REWARD_RANK_META_KEY, nextRank]
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'rewardItemCounts')) {
+      const counts = parseRewardItemCounts(JSON.stringify(body.rewardItemCounts));
+      await conn.query(
+        'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+        [REWARD_ITEM_COUNTS_META_KEY, JSON.stringify(counts)]
       );
     }
 

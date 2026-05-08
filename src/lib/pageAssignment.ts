@@ -62,6 +62,47 @@ export function freePageInfoForTypeByRank(
   return { pageLabel: `P${freePage}`, freeItems };
 }
 
+export function winnerSlotsFromTotalItems(type: ItemType, totalItems: number): number {
+  const n = Math.max(0, Math.floor(totalItems));
+  if (type === 'LND' || type === 'TNS') return Math.max(0, Math.floor(n / 4));
+  if (type === 'Fragment Card') return n;
+  return Math.max(1, Math.ceil(n / 4));
+}
+
+export function freeItemsFromTotalItems(type: ItemType, totalItems: number): number {
+  if (type !== 'LND' && type !== 'TNS') return 0;
+  const n = Math.max(0, Math.floor(totalItems));
+  return n % 4;
+}
+
+export function computeWinnerAssignmentLabelsFromItems(
+  type: ItemType,
+  totalItems: number,
+  bidderCount: number,
+  pageStart = 1
+): string[] {
+  const bidders = Math.max(0, Math.floor(bidderCount));
+  if (bidders <= 0) return [];
+  if (type === 'LND' || type === 'TNS') {
+    const totalPages = winnerSlotsFromTotalItems(type, totalItems);
+    const winningBidders = Math.min(totalPages, bidders);
+    if (winningBidders <= 0) return [];
+    const ranges = computeWinnerPageRanges(totalPages, winningBidders);
+    return ranges.map((r) =>
+      r.start === r.end
+        ? `P${pageStart + r.start - 1}`
+        : `P${pageStart + r.start - 1}-${pageStart + r.end - 1}`
+    );
+  }
+  if (type === 'Fragment Card') {
+    const winners = Math.min(winnerSlotsFromTotalItems(type, totalItems), bidders);
+    return Array.from({ length: winners }, (_v, i) => `I${i + 1}`);
+  }
+  const totalPages = winnerSlotsFromTotalItems(type, totalItems);
+  const winners = Math.min(totalPages, bidders);
+  return Array.from({ length: winners }, (_v, i) => `P${pageStart + i}`);
+}
+
 export function computeWinnerPageRanges(
   totalPages: number,
   winnerCount: number

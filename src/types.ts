@@ -62,6 +62,12 @@ export interface BidderStateLogEntry {
 export type WeeklyEventType = 'Guild League' | 'Emperium Overrun';
 export type GuildRank = 'Bronze' | 'Silver' | 'Gold';
 
+export interface RewardItemCounts {
+  fragment: number;
+  lnd: number;
+  tns: number;
+}
+
 export interface AuctionState {
   items: AuctionItem[];
   members: GuildMember[];
@@ -88,4 +94,6 @@ export interface AuctionState {
   eventMode?: WeeklyEventType;
   /** Rank basis for auction reward/page distribution. */
   rewardRank?: GuildRank;
+  /** Actual configured item counts used for winner/page/free computations. */
+  rewardItemCounts?: RewardItemCounts;
 }

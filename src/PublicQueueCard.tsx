@@ -11,15 +11,17 @@ import { maxQueueSlotsAfterShuffle } from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { auctionItemTypeColors } from './lib/auctionItemTypeColors';
 import {
-  computeWinnerAssignmentLabels,
-  freePageInfoForTypeByRank,
-  freeItemsForTypeByRank,
+  computeWinnerAssignmentLabelsFromItems,
+  freeItemsFromTotalItems,
+  totalItemsForTypeByRank,
+  winnerSlotsFromTotalItems,
 } from './lib/pageAssignment';
 
 export function PublicQueueCard({
   item,
   members,
   rewardRank = 'Bronze',
+  rewardItemCounts,
   featherPageStart,
   isShuffling = false,
   showWinnerShortlist,
@@ -29,6 +31,7 @@ export function PublicQueueCard({
   item: AuctionItem;
   members: GuildMember[];
   rewardRank?: GuildRank;
+  rewardItemCounts?: { fragment: number; lnd: number; tns: number };
   featherPageStart?: number;
   /** Optional visual loading phase; hide page assignment until final result is shown. */
   isShuffling?: boolean;
@@ -47,23 +50,43 @@ export function PublicQueueCard({
     item.type,
     item.winnerPoolCap
   );
+  const counts = rewardItemCounts ?? {
+    fragment: totalItemsForTypeByRank('Fragment Card', rewardRank),
+    lnd: totalItemsForTypeByRank('LND', rewardRank),
+    tns: totalItemsForTypeByRank('TNS', rewardRank),
+  };
   const winnerPageRanges = (() => {
+    const totalItems =
+      item.type === 'Fragment Card'
+        ? counts.fragment
+        : item.type === 'LND'
+          ? counts.lnd
+          : item.type === 'TNS'
+            ? counts.tns
+            : 1;
     const pageStart =
       item.type === 'LND' || item.type === 'TNS'
         ? featherPageStart ?? 1
         : 1;
-    return computeWinnerAssignmentLabels(
+    return computeWinnerAssignmentLabelsFromItems(
       item.type,
-      rewardRank,
-      pageStart,
-      item.interestedMemberIds.length
+      totalItems,
+      item.interestedMemberIds.length,
+      pageStart
     );
   })();
-  const freeItems = freeItemsForTypeByRank(item.type, rewardRank);
+  const freeItems =
+    item.type === 'LND'
+      ? freeItemsFromTotalItems(item.type, counts.lnd)
+      : item.type === 'TNS'
+        ? freeItemsFromTotalItems(item.type, counts.tns)
+        : 0;
   const freePageInfo = (() => {
     if (item.type !== 'LND' && item.type !== 'TNS') return null;
     const pageStart = featherPageStart ?? 1;
-    return freePageInfoForTypeByRank(item.type, rewardRank, pageStart);
+    const totalItems = item.type === 'LND' ? counts.lnd : counts.tns;
+    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems);
+    return freeItems > 0 ? { pageLabel: `P${pageStart + fullPages}`, freeItems } : null;
   })();
 
   return (
@@ -101,7 +124,7 @@ export function PublicQueueCard({
             <span className="mt-0.5 block font-semibold text-slate-500 [text-decoration:none]">
               after shuffle
             </span>
-            {freeItems > 0 && (
+            {!isShuffling && showWinnerShortlist && freeItems > 0 && (
               <span className="mt-0.5 block font-semibold text-amber-400 [text-decoration:none]">
                 {freePageInfo
                   ? `+ FREE ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
@@ -127,14 +150,18 @@ export function PublicQueueCard({
                   : null;
               return (
                 <li
-                  key={mid}
+                  key={isShuffling ? `slot-${item.id}-${idx}` : mid}
                   className={`flex items-center justify-between gap-2 rounded-2xl border px-3 py-2.5 sm:gap-3 sm:px-3 sm:py-3 ${
-                    shortlist ? 'border-blue-500/50 bg-blue-600/20' : 'border-slate-800 bg-slate-900'
+                    shortlist
+                      ? 'border-blue-500/50 bg-blue-600/20'
+                      : isShuffling
+                        ? 'border-blue-400/60 bg-blue-500/15'
+                        : 'border-slate-800 bg-slate-900'
                   }`}
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-3">
                     <span className="min-w-0 flex-1 break-words font-bold leading-normal text-slate-200 [overflow-wrap:anywhere]">
-                      {m.name}
+                      {isShuffling ? <span className="animate-pulse text-white">{m.name}</span> : m.name}
                     </span>
                     {pageLabel ? (
                       <span
