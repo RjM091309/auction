@@ -16,7 +16,13 @@ import {
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import Swal from 'sweetalert2';
-import type { AuctionItem, AuctionState, GuildMember, ItemType } from './types';
+import type {
+  AuctionItem,
+  AuctionState,
+  GuildMember,
+  GuildRank,
+  ItemType,
+} from './types';
 import {
   PublicAddBidError,
   fetchAuctionState,
@@ -33,11 +39,19 @@ import {
   dedupeIgnAcrossActiveQueues,
   pruneOrphanQueueMembers,
 } from './lib/dedupeIgnAcrossQueues';
-import { maxQueueSlotsAfterShuffle } from './lib/shuffleCaps';
+import {
+  maxQueueSlotsAfterShuffle,
+  shuffleQueueIdsForType,
+} from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
 import { getAuctionWeekMondayKey } from './lib/auctionWeek';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
+import {
+  computeWinnerAssignmentLabels,
+  freePageInfoForTypeByRank,
+  freeItemsForTypeByRank,
+} from './lib/pageAssignment';
 import {
   BIDDER_STATE_LOSS,
   BIDDER_STATE_ONGOING,
@@ -69,12 +83,29 @@ const PUBLIC_STATE_POLL_MS =
   Number.isFinite(PUBLIC_STATE_POLL_MS_RAW) && PUBLIC_STATE_POLL_MS_RAW >= 1000
     ? Math.round(PUBLIC_STATE_POLL_MS_RAW)
     : 4000;
+const PUBLIC_SHUFFLE_VISUAL_MS_RAW = Number(
+  import.meta.env.VITE_PUBLIC_SHUFFLE_VISUAL_MS ?? 20_000
+);
+const PUBLIC_SHUFFLE_VISUAL_MS =
+  Number.isFinite(PUBLIC_SHUFFLE_VISUAL_MS_RAW) && PUBLIC_SHUFFLE_VISUAL_MS_RAW >= 1000
+    ? Math.round(PUBLIC_SHUFFLE_VISUAL_MS_RAW)
+    : 20_000;
 
 export default function PublicAuctionView() {
   const [state, setState] = useState<AuctionState | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [publicShuffleLoading, setPublicShuffleLoading] = useState(false);
+  const [publicShuffleUi, setPublicShuffleUi] = useState<{
+    active: boolean;
+    spinOffsetByItemId: Record<string, number>;
+    revealCountByItemId: Record<string, number>;
+    previewQueueByItemId: Record<string, number[]>;
+  }>({
+    active: false,
+    spinOffsetByItemId: {},
+    revealCountByItemId: {},
+    previewQueueByItemId: {},
+  });
   const [activeTab, setActiveTab] = useState<'queues' | 'logs'>('queues');
   const [queueNameModalItemId, setQueueNameModalItemId] = useState<string | null>(null);
   const [queueNameInput, setQueueNameInput] = useState('');
@@ -89,7 +120,104 @@ export default function PublicAuctionView() {
     'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3'
   >('all');
   const prevShuffleLockedRef = useRef<boolean>(false);
-  const publicShuffleTimerRef = useRef<number | null>(null);
+  const hasInitialShuffleStateRef = useRef<boolean>(false);
+  const publicShuffleRafRef = useRef<number | null>(null);
+  const publicShuffleRunningRef = useRef(false);
+
+  const startPublicShuffleVisual = useCallback((snapshot: AuctionState) => {
+    if (publicShuffleRunningRef.current) return;
+    publicShuffleRunningRef.current = true;
+    const activeItems = snapshot.items.filter((it) => it.status === 'active');
+    const previewQueueByItemId: Record<string, number[]> = {};
+    for (const it of activeItems) {
+      previewQueueByItemId[it.id] = shuffleQueueIdsForType(
+        it.interestedMemberIds,
+        it.type
+      );
+    }
+    setPublicShuffleUi({
+      active: true,
+      spinOffsetByItemId: {},
+      revealCountByItemId: {},
+      previewQueueByItemId,
+    });
+
+    const t0 = performance.now();
+    const activeItemIds = activeItems.map((it) => it.id);
+    const spinOffsetByItemIdLocal: Record<string, number> = {};
+    let lastPickAt = 0;
+    const revealWindowForType = (
+      type: ItemType
+    ): { start: number; end: number } => {
+      if (type === 'TNS') return { start: 0.18, end: 0.5 };
+      if (type === 'LND') return { start: 0.5, end: 0.78 };
+      if (type === 'Fragment Card') return { start: 0.78, end: 1.0 };
+      return { start: 0.55, end: 1.0 };
+    };
+
+    const tick = (now: number) => {
+      const raw = Math.min(1, (now - t0) / PUBLIC_SHUFFLE_VISUAL_MS);
+      const pickIntervalMs = Math.round(75 + raw * 190);
+      if (lastPickAt === 0 || now - lastPickAt >= pickIntervalMs) {
+        const spinOffsetByItemId: Record<string, number> = {};
+        const revealCountByItemId: Record<string, number> = {};
+        for (const itemId of activeItemIds) {
+          const item = snapshot.items.find((it) => it.id === itemId);
+          const previewIds = previewQueueByItemId[itemId] ?? [];
+          const len = previewIds.length;
+          if (len <= 0) continue;
+          const winnerSlots = Math.max(
+            0,
+            item ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap) : 0
+          );
+          const window = item ? revealWindowForType(item.type) : { start: 0.55, end: 1.0 };
+          const revealProgress =
+            raw <= window.start
+              ? 0
+              : raw >= window.end
+                ? 1
+                : (raw - window.start) / Math.max(0.001, window.end - window.start);
+          const revealCount = Math.min(
+            winnerSlots,
+            Math.max(0, Math.floor(revealProgress * winnerSlots))
+          );
+          revealCountByItemId[itemId] = revealCount;
+          const remaining = Math.max(0, len - revealCount);
+          const done = revealCount >= winnerSlots;
+          if (!done && remaining > 0) {
+            const prev = spinOffsetByItemIdLocal[itemId] ?? 0;
+            const step = Math.max(1, Math.floor(Math.random() * 3) + 1);
+            const next = (prev + step) % remaining;
+            spinOffsetByItemIdLocal[itemId] = next;
+            spinOffsetByItemId[itemId] = next;
+          } else {
+            spinOffsetByItemIdLocal[itemId] = 0;
+            spinOffsetByItemId[itemId] = 0;
+          }
+        }
+        lastPickAt = now;
+        setPublicShuffleUi({
+          active: true,
+          spinOffsetByItemId,
+          revealCountByItemId,
+          previewQueueByItemId,
+        });
+      }
+      if (raw < 1) {
+        publicShuffleRafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      publicShuffleRafRef.current = null;
+      publicShuffleRunningRef.current = false;
+      setPublicShuffleUi({
+        active: false,
+        spinOffsetByItemId: {},
+        revealCountByItemId: {},
+        previewQueueByItemId: {},
+      });
+    };
+    publicShuffleRafRef.current = requestAnimationFrame(tick);
+  }, []);
 
   const queueModalItem = useMemo(
     () => state?.items.find((i) => i.id === queueNameModalItemId) ?? null,
@@ -127,17 +255,18 @@ export default function PublicAuctionView() {
       const remote = await fetchAuctionState();
       if (remote) {
         const normalized = dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote));
-        if (!prevShuffleLockedRef.current && normalized.shuffleLocked === true) {
-          setPublicShuffleLoading(true);
-          if (publicShuffleTimerRef.current != null) {
-            window.clearTimeout(publicShuffleTimerRef.current);
-          }
-          publicShuffleTimerRef.current = window.setTimeout(() => {
-            setPublicShuffleLoading(false);
-            publicShuffleTimerRef.current = null;
-          }, 1400);
+        const nowLocked = normalized.shuffleLocked === true;
+        if (!hasInitialShuffleStateRef.current) {
+          // First load (or page refresh): capture baseline only, no visual trigger.
+          prevShuffleLockedRef.current = nowLocked;
+          hasInitialShuffleStateRef.current = true;
+        } else if (!prevShuffleLockedRef.current && nowLocked) {
+          // Only play visual on actual in-session transition false -> true.
+          startPublicShuffleVisual(normalized);
+          prevShuffleLockedRef.current = nowLocked;
+        } else {
+          prevShuffleLockedRef.current = nowLocked;
         }
-        prevShuffleLockedRef.current = normalized.shuffleLocked === true;
         setState(normalized);
       } else if (!silent) {
         setState(null);
@@ -146,17 +275,18 @@ export default function PublicAuctionView() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [startPublicShuffleVisual]);
 
   useEffect(() => {
     void load();
     const id = window.setInterval(() => void load({ silent: true }), PUBLIC_STATE_POLL_MS);
     return () => {
       window.clearInterval(id);
-      if (publicShuffleTimerRef.current != null) {
-        window.clearTimeout(publicShuffleTimerRef.current);
-        publicShuffleTimerRef.current = null;
+      if (publicShuffleRafRef.current != null) {
+        cancelAnimationFrame(publicShuffleRafRef.current);
+        publicShuffleRafRef.current = null;
       }
+      publicShuffleRunningRef.current = false;
     };
   }, [load]);
 
@@ -357,6 +487,19 @@ export default function PublicAuctionView() {
   /** Match admin: if Fragment (etc.) is hidden, center 1–2 cards instead of a sparse grid. */
   const centerFewPublicQueueCards =
     activeItems.length > 0 && activeItems.length < 3;
+  const featherPageStartByItemId = useMemo(() => {
+    const rank = state?.rewardRank ?? 'Bronze';
+    const featherItems = (state?.items ?? [])
+      .filter((it) => it.status === 'active' && (it.type === 'LND' || it.type === 'TNS'))
+      .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
+    const out: Record<string, number> = {};
+    let nextPage = 1;
+    for (const it of featherItems) {
+      out[it.id] = nextPage;
+      nextPage += computeWinnerAssignmentLabels(it.type, rank, nextPage).length;
+    }
+    return out;
+  }, [state?.items, state?.rewardRank]);
 
   const bidderStateLogEntries = state?.bidderStateLog ?? [];
 
@@ -550,7 +693,16 @@ export default function PublicAuctionView() {
                         <PublicQueueCard
                           item={item}
                           members={state?.members ?? []}
-                          isShuffling={publicShuffleLoading}
+                          rewardRank={state?.rewardRank ?? 'Bronze'}
+                          featherPageStart={featherPageStartByItemId[item.id]}
+                          isShuffling={publicShuffleUi.active}
+                          shuffleSpinOffset={publicShuffleUi.spinOffsetByItemId[item.id]}
+                          shuffleRevealCount={publicShuffleUi.revealCountByItemId[item.id]}
+                          shufflePreviewIds={publicShuffleUi.previewQueueByItemId[item.id]}
+                          shuffleDone={
+                            (publicShuffleUi.revealCountByItemId[item.id] ?? 0) >=
+                            maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
+                          }
                           showWinnerShortlist={
                             state?.winnerShortlistUiEnabled === true
                           }
@@ -946,20 +1098,36 @@ function PublicAddNameModal({
 function PublicQueueCard({
   item,
   members,
+  rewardRank,
+  featherPageStart,
   isShuffling,
+  shuffleSpinOffset,
+  shuffleRevealCount,
+  shufflePreviewIds,
+  shuffleDone,
   showWinnerShortlist,
   showJoinQueue,
   onRequestAddName,
 }: {
   item: AuctionItem;
   members: GuildMember[];
+  rewardRank: GuildRank;
+  featherPageStart?: number;
   isShuffling: boolean;
+  shuffleSpinOffset?: number;
+  shuffleRevealCount?: number;
+  shufflePreviewIds?: number[];
+  shuffleDone?: boolean;
   /** Same as admin: off after Reset / Unmark until Shuffle again. */
   showWinnerShortlist: boolean;
   /** Hidden after admin runs “Shuffle all queues” until Reset shuffle. */
   showJoinQueue: boolean;
   onRequestAddName: () => void;
 }) {
+  const displayIds =
+    isShuffling && Array.isArray(shufflePreviewIds)
+      ? shufflePreviewIds
+      : item.interestedMemberIds;
   const shortlistSlots = showWinnerShortlist
     ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
     : 0;
@@ -969,6 +1137,42 @@ function PublicQueueCard({
     item.type,
     item.winnerPoolCap
   );
+  const winnerPageRanges = (() => {
+    const pageStart =
+      item.type === 'LND' || item.type === 'TNS'
+        ? featherPageStart ?? 1
+        : 1;
+    return computeWinnerAssignmentLabels(
+      item.type,
+      rewardRank,
+      pageStart,
+      item.interestedMemberIds.length
+    );
+  })();
+  const freeItems = freeItemsForTypeByRank(item.type, rewardRank);
+  const freePageInfo = (() => {
+    if (item.type !== 'LND' && item.type !== 'TNS') return null;
+    const pageStart = featherPageStart ?? 1;
+    return freePageInfoForTypeByRank(item.type, rewardRank, pageStart);
+  })();
+  const resolvedRevealCount =
+    typeof shuffleRevealCount === 'number' && Number.isInteger(shuffleRevealCount)
+      ? Math.max(0, Math.min(shuffleRevealCount, displayIds.length))
+      : 0;
+  const resolvedSpinOffset =
+    typeof shuffleSpinOffset === 'number' && Number.isInteger(shuffleSpinOffset)
+      ? Math.max(0, Math.min(shuffleSpinOffset, Math.max(0, displayIds.length - 1)))
+      : 0;
+  const rotatedDisplayIds = (() => {
+    if (!isShuffling || shuffleDone) return displayIds;
+    const reveal = resolvedRevealCount;
+    const head = displayIds.slice(0, reveal);
+    const tail = displayIds.slice(reveal);
+    if (tail.length <= 1) return displayIds;
+    const offset = resolvedSpinOffset % tail.length;
+    const rotatedTail = tail.slice(offset).concat(tail.slice(0, offset));
+    return head.concat(rotatedTail);
+  })();
 
   return (
     <motion.article
@@ -1005,19 +1209,31 @@ function PublicQueueCard({
             <span className="mt-0.5 block font-semibold text-slate-500 [text-decoration:none]">
               after shuffle
             </span>
+            {freeItems > 0 && (
+              <span className="mt-0.5 block font-semibold text-amber-400 [text-decoration:none]">
+                {freePageInfo
+                  ? `+ FREE ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
+                  : `+${freeItems} free item${freeItems === 1 ? '' : 's'}`}
+              </span>
+            )}
           </span>
         </div>
       </div>
 
       <div className="rounded-2xl border border-slate-800 bg-slate-950 p-3 sm:rounded-3xl sm:p-4">
-        {item.interestedMemberIds.length === 0 ? (
+        {displayIds.length === 0 ? (
           <p className="py-10 text-center text-xs font-bold text-slate-500">No bidders in this queue yet.</p>
         ) : (
           <ul className="flex flex-col gap-2">
-            {item.interestedMemberIds.map((mid, idx) => {
+            {displayIds.map((slotMid, idx) => {
+              const mid = isShuffling ? (rotatedDisplayIds[idx] ?? slotMid) : slotMid;
               const m = members.find((x) => x.id === mid);
               if (!m) return null;
-              const shortlist = idx < shortlistSlots;
+              const shortlist = isShuffling ? idx < resolvedRevealCount : idx < shortlistSlots;
+              const pageLabel =
+                !isShuffling && shortlist && idx < winnerPageRanges.length
+                  ? winnerPageRanges[idx]
+                  : null;
               return (
                 <li
                   key={mid}
@@ -1026,13 +1242,6 @@ function PublicQueueCard({
                   }`}
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-3">
-                    <span
-                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[10px] font-black ${
-                        shortlist ? 'bg-blue-500 text-white' : 'bg-slate-800 text-slate-500'
-                      }`}
-                    >
-                      {idx + 1}
-                    </span>
                     <span className="min-w-0 flex-1 break-words font-bold leading-normal text-slate-200 [overflow-wrap:anywhere]">
                       {isShuffling ? (
                         <span
@@ -1043,6 +1252,18 @@ function PublicQueueCard({
                         m.name
                       )}
                     </span>
+                    {pageLabel ? (
+                      <span
+                        title={
+                          pageLabel.startsWith('I')
+                            ? `Assigned item slot ${pageLabel.slice(1)}`
+                            : `Assigned page ${pageLabel.slice(1)}`
+                        }
+                        className="shrink-0 rounded-lg border border-blue-500/60 bg-blue-500/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-blue-200"
+                      >
+                        {pageLabel}
+                      </span>
+                    ) : null}
                   </div>
                   {shortlist ? (
                     <div
@@ -1056,6 +1277,13 @@ function PublicQueueCard({
                 </li>
               );
             })}
+            {!isShuffling && showWinnerShortlist && freeItems > 0 && (
+              <li className="flex items-center justify-center rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[10px] font-black uppercase tracking-wide text-amber-300 sm:px-3 sm:py-3">
+                {freePageInfo
+                  ? `FREE: ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
+                  : `FREE items: ${freeItems}`}
+              </li>
+            )}
           </ul>
         )}
       </div>

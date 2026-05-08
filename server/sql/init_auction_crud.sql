@@ -78,3 +78,18 @@ CREATE TABLE IF NOT EXISTS bidder_state_log (
   INDEX idx_bs_member (member_id),
   INDEX idx_bs_state (state)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Emperium Overrun Auction rewards payout runs (one row per Sunday payout).
+CREATE TABLE IF NOT EXISTS overrun_rewards_runs (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  sunday_key VARCHAR(10) NOT NULL,
+  created_at_ms BIGINT NOT NULL,
+  created_at DATETIME(3) NOT NULL,
+  status ENUM('ok', 'skipped', 'error') NOT NULL,
+  message TEXT NULL,
+  config_json TEXT NOT NULL,
+  ranking_json TEXT NOT NULL,
+  payouts_json TEXT NOT NULL,
+  UNIQUE KEY uniq_overrun_sunday (sunday_key),
+  INDEX idx_overrun_created (created_at_ms)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

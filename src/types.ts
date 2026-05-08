@@ -59,6 +59,9 @@ export interface BidderStateLogEntry {
   shuffleBatchAtMs?: number | null;
 }
 
+export type WeeklyEventType = 'Guild League' | 'Emperium Overrun';
+export type GuildRank = 'Bronze' | 'Silver' | 'Gold';
+
 export interface AuctionState {
   items: AuctionItem[];
   members: GuildMember[];
@@ -81,4 +84,8 @@ export interface AuctionState {
   winnerMarkLog?: WinnerMarkLogEntry[];
   /** Newest first; shuffle lock + winner marks (see `BidderStateLogEntry.state`). */
   bidderStateLog?: BidderStateLogEntry[];
+  /** Admin-selected active event mode. */
+  eventMode?: WeeklyEventType;
+  /** Rank basis for auction reward/page distribution. */
+  rewardRank?: GuildRank;
 }

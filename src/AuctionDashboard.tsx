@@ -20,7 +20,14 @@ import {
   XCircle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { AuctionItem, AuctionState, ItemType, GuildMember } from './types';
+import {
+  AuctionItem,
+  AuctionState,
+  GuildRank,
+  GuildMember,
+  ItemType,
+  WeeklyEventType,
+} from './types';
 import { saveState } from './lib/storage';
 import { AUCTION_DATA_VERSION } from './data/auctionDefaults';
 import {
@@ -67,6 +74,13 @@ import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
 import { getAuctionWeekMondayKey } from './lib/auctionWeek';
 import {
+  computeWinnerAssignmentLabels,
+  freePageInfoForTypeByRank,
+  freeItemsForTypeByRank,
+  GUILD_RANK_OPTIONS,
+  totalItemsForTypeByRank,
+} from './lib/pageAssignment';
+import {
   BIDDER_STATE_LOSS,
   BIDDER_STATE_ONGOING,
   BIDDER_STATE_WIN,
@@ -103,8 +117,21 @@ function auctionPollSnapshot(s: AuctionState): string {
     bidderStateLog: s.bidderStateLog,
     shuffleLocked: s.shuffleLocked,
     winnerShortlistUiEnabled: s.winnerShortlistUiEnabled,
+    eventMode: s.eventMode,
+    rewardRank: s.rewardRank,
     dataVersion: s.dataVersion,
   });
+}
+
+const DEFAULT_EVENT_MODE: WeeklyEventType = 'Emperium Overrun';
+
+function rankPresetLimits(rank: GuildRank): { fragment: number; lnd: number; tns: number } {
+  return {
+    // Winner set limit inputs are item totals from game rank rewards.
+    fragment: totalItemsForTypeByRank('Fragment Card', rank),
+    lnd: totalItemsForTypeByRank('LND', rank),
+    tns: totalItemsForTypeByRank('TNS', rank),
+  };
 }
 
 export default function AuctionDashboard({ onLogout }: { onLogout: () => void }) {
@@ -127,10 +154,57 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const [editMemberNameInput, setEditMemberNameInput] = useState('');
   const [winnerSetLimitModalOpen, setWinnerSetLimitModalOpen] = useState(false);
   const [winnerSetLimitForm, setWinnerSetLimitForm] = useState({
+    rank: 'Bronze' as GuildRank,
     fragment: defaultWinnerPoolCapForType('Fragment Card'),
     lnd: defaultWinnerPoolCapForType('LND'),
     tns: defaultWinnerPoolCapForType('TNS'),
   });
+  const winnerSlotsFromItems = (type: ItemType, items: number): number => {
+    const n = Math.max(0, Math.floor(items));
+    if (type === 'LND' || type === 'TNS') return Math.max(0, Math.floor(n / 4));
+    if (type === 'Fragment Card') return n;
+    return Math.max(1, Math.ceil(n / 4));
+  };
+  const winnerSplitPreview = useMemo(() => {
+    const queuedByType = (type: ItemType) =>
+      (state?.items ?? [])
+        .filter((it) => it.status === 'active' && it.type === type)
+        .reduce((sum, it) => sum + it.interestedMemberIds.length, 0);
+    const build = (type: ItemType, items: number, bidders: number) => {
+      const pages = winnerSlotsFromItems(type, items);
+      const labels = computeWinnerAssignmentLabels(
+        type,
+        winnerSetLimitForm.rank,
+        1,
+        bidders
+      );
+      const winners = labels.length;
+      const sample = labels.slice(0, 3).join(', ');
+      return { winners, pages, sample, hasMore: labels.length > 3 };
+    };
+    const fragmentBidders = queuedByType('Fragment Card');
+    const lndBidders = queuedByType('LND');
+    const tnsBidders = queuedByType('TNS');
+    return {
+      fragment: {
+        bidders: fragmentBidders,
+        ...build('Fragment Card', winnerSetLimitForm.fragment, fragmentBidders),
+      },
+      lnd: {
+        bidders: lndBidders,
+        ...build('LND', winnerSetLimitForm.lnd, lndBidders),
+      },
+      tns: {
+        bidders: tnsBidders,
+        ...build('TNS', winnerSetLimitForm.tns, tnsBidders),
+      },
+    };
+  }, [
+    state?.items,
+    winnerSetLimitForm.fragment,
+    winnerSetLimitForm.lnd,
+    winnerSetLimitForm.tns,
+  ]);
 
   const [newItemName, setNewItemName] = useState('');
   const [newItemType, setNewItemType] = useState<ItemType>('Fragment Card');
@@ -139,9 +213,16 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   );
 
   /** Full-width shuffle tension bar (0–100%) */
-  const [shuffleUi, setShuffleUi] = useState<{ active: boolean; pct: number }>({
+  const [shuffleUi, setShuffleUi] = useState<{
+    active: boolean;
+    spinOffsetByItemId: Record<string, number>;
+    revealCountByItemId: Record<string, number>;
+    previewQueueByItemId: Record<string, number[]>;
+  }>({
     active: false,
-    pct: 0,
+    spinOffsetByItemId: {},
+    revealCountByItemId: {},
+    previewQueueByItemId: {},
   });
   const [bidderLogSubTab, setBidderLogSubTab] = useState<'ranking' | 'weekly'>(
     'ranking'
@@ -151,6 +232,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const [weeklyLogFilter, setWeeklyLogFilter] = useState<
     'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3'
   >('all');
+  const [eventModeDraft, setEventModeDraft] = useState<WeeklyEventType>(DEFAULT_EVENT_MODE);
+  const [eventModeSaving, setEventModeSaving] = useState(false);
+  const eventModeActive = state?.eventMode ?? DEFAULT_EVENT_MODE;
   const shuffleRafRef = useRef<number | null>(null);
   const shuffleRunningRef = useRef(false);
   const shuffleUnmountRef = useRef(false);
@@ -182,6 +266,10 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    setEventModeDraft(eventModeActive);
+  }, [eventModeActive]);
 
   useEffect(() => {
     shuffleUnmountRef.current = false;
@@ -315,6 +403,19 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   /** Fewer visible cards than xl columns — center the row instead of hugging the left. */
   const centerFewQueueCards =
     visibleActiveAuctions.length > 0 && visibleActiveAuctions.length < 3;
+  const featherPageStartByItemId = useMemo(() => {
+    const rank = state?.rewardRank ?? 'Bronze';
+    const featherItems = (state?.items ?? [])
+      .filter((it) => it.status === 'active' && (it.type === 'LND' || it.type === 'TNS'))
+      .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
+    const out: Record<string, number> = {};
+    let nextPage = 1;
+    for (const it of featherItems) {
+      out[it.id] = nextPage;
+      nextPage += computeWinnerAssignmentLabels(it.type, rank, nextPage).length;
+    }
+    return out;
+  }, [state?.items, state?.rewardRank]);
 
   const bidderStateLogEntries = state?.bidderStateLog ?? [];
 
@@ -404,6 +505,21 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     setNewItemWinnerPoolCap(defaultWinnerPoolCapForType(newItemType));
   };
 
+  const handleSaveEventMode = async () => {
+    if (!state || eventModeDraft === eventModeActive || eventModeSaving) return;
+    setEventModeSaving(true);
+    try {
+      const nextState: AuctionState = { ...state, eventMode: eventModeDraft };
+      const server = await persistAuctionState(nextState);
+      setState(server ?? nextState);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      void swal2SaveError(msg || 'Could not save event mode');
+    } finally {
+      setEventModeSaving(false);
+    }
+  };
+
   const handleShuffleAllQueues = async () => {
     if (!latestState.current || shuffleRunningRef.current) return;
     if (latestState.current.shuffleLocked === true) return;
@@ -435,22 +551,94 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     });
     if (!ok) return;
     shuffleRunningRef.current = true;
-    setShuffleUi({ active: true, pct: 0 });
+    const previewQueueByItemId: Record<string, number[]> = {};
+    for (const it of activeItemsForShuffle) {
+      previewQueueByItemId[it.id] = shuffleQueueIdsForType(
+        it.interestedMemberIds,
+        it.type
+      );
+    }
+    setShuffleUi({
+      active: true,
+      spinOffsetByItemId: {},
+      revealCountByItemId: {},
+      previewQueueByItemId,
+    });
 
-    const durationMs = 2400;
+    const durationMs = 20_000;
     const t0 = performance.now();
+    const activeItemIds = activeItemsForShuffle.map((it) => it.id);
+    let lastPickAt = 0;
+    const spinOffsetByItemIdLocal: Record<string, number> = {};
+    const revealWindowForType = (
+      type: ItemType
+    ): { start: number; end: number } => {
+      if (type === 'TNS') return { start: 0.18, end: 0.50 };
+      if (type === 'LND') return { start: 0.50, end: 0.78 };
+      if (type === 'Fragment Card') return { start: 0.78, end: 1.0 };
+      return { start: 0.55, end: 1.0 };
+    };
 
     const tick = (now: number) => {
       if (shuffleUnmountRef.current) {
         shuffleRunningRef.current = false;
         shuffleRafRef.current = null;
-        setShuffleUi({ active: false, pct: 0 });
+        setShuffleUi({
+          active: false,
+          spinOffsetByItemId: {},
+          revealCountByItemId: {},
+          previewQueueByItemId: {},
+        });
         return;
       }
       const raw = Math.min(1, (now - t0) / durationMs);
-      const eased = 1 - Math.pow(1 - raw, 2.8);
-      const pct = Math.min(100, Math.round(eased * 100));
-      setShuffleUi({ active: true, pct });
+      // Spin quickly first, then slow down while revealing winners one-by-one.
+      const pickIntervalMs = Math.round(75 + raw * 190);
+      if (lastPickAt === 0 || now - lastPickAt >= pickIntervalMs) {
+        const spinOffsetByItemId: Record<string, number> = {};
+        const revealCountByItemId: Record<string, number> = {};
+        for (const itemId of activeItemIds) {
+          const item = snapshot.items.find((it) => it.id === itemId);
+          const previewIds = previewQueueByItemId[itemId] ?? [];
+          const len = previewIds.length;
+          if (len <= 0) continue;
+          const winnerSlots = Math.max(
+            0,
+            item ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap) : 0
+          );
+          const window = item ? revealWindowForType(item.type) : { start: 0.55, end: 1.0 };
+          const revealProgress =
+            raw <= window.start
+              ? 0
+              : raw >= window.end
+                ? 1
+                : (raw - window.start) / Math.max(0.001, window.end - window.start);
+          const revealCount = Math.min(
+            winnerSlots,
+            Math.max(0, Math.floor(revealProgress * winnerSlots))
+          );
+          revealCountByItemId[itemId] = revealCount;
+          const remaining = Math.max(0, len - revealCount);
+          const done = revealCount >= winnerSlots;
+          if (!done && remaining > 0) {
+            const prev = spinOffsetByItemIdLocal[itemId] ?? 0;
+            const step = Math.max(1, Math.floor(Math.random() * 3) + 1);
+            const next = (prev + step) % remaining;
+            spinOffsetByItemIdLocal[itemId] = next;
+            spinOffsetByItemId[itemId] = next;
+          } else {
+            spinOffsetByItemIdLocal[itemId] = 0;
+            spinOffsetByItemId[itemId] = 0;
+          }
+        }
+        lastPickAt = now;
+        setShuffleUi({
+          active: true,
+          spinOffsetByItemId,
+          revealCountByItemId,
+          previewQueueByItemId,
+        });
+      }
 
       if (raw < 1) {
         shuffleRafRef.current = requestAnimationFrame(tick);
@@ -471,15 +659,19 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
               ...item,
               /** Bagong shuffle round — walang green check hanggang ma-mark ulit. */
               recordedWinnerNames: [],
-              interestedMemberIds: shuffleQueueIdsForType(
-                item.interestedMemberIds,
-                item.type
-              ),
+              interestedMemberIds:
+                previewQueueByItemId[item.id] ??
+                shuffleQueueIdsForType(item.interestedMemberIds, item.type),
             };
           }),
         };
       });
-      setShuffleUi({ active: false, pct: 0 });
+      setShuffleUi({
+        active: false,
+        spinOffsetByItemId: {},
+        revealCountByItemId: {},
+        previewQueueByItemId: {},
+      });
     };
 
     shuffleRafRef.current = requestAnimationFrame(tick);
@@ -665,17 +857,13 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
 
   const openWinnerSetLimitModal = () => {
     if (!state) return;
-    const firstByType = (type: ItemType) => state.items.find((it) => it.type === type);
-    const fragmentItem = firstByType('Fragment Card');
-    const lndItem = firstByType('LND');
-    const tnsItem = firstByType('TNS');
+    const rank = state.rewardRank ?? 'Bronze';
+    const preset = rankPresetLimits(rank);
     setWinnerSetLimitForm({
-      fragment: maxQueueSlotsAfterShuffle(
-        'Fragment Card',
-        fragmentItem?.winnerPoolCap
-      ),
-      lnd: maxQueueSlotsAfterShuffle('LND', lndItem?.winnerPoolCap),
-      tns: maxQueueSlotsAfterShuffle('TNS', tnsItem?.winnerPoolCap),
+      rank,
+      fragment: preset.fragment,
+      lnd: preset.lnd,
+      tns: preset.tns,
     });
     setWinnerSetLimitModalOpen(true);
   };
@@ -686,15 +874,28 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       if (!prev) return prev;
       return {
         ...prev,
+        rewardRank: winnerSetLimitForm.rank,
         items: prev.items.map((it) => {
           if (it.type === 'Fragment Card') {
-            return { ...it, winnerPoolCap: winnerSetLimitForm.fragment };
+            return {
+              ...it,
+              winnerPoolCap: winnerSlotsFromItems(
+                'Fragment Card',
+                winnerSetLimitForm.fragment
+              ),
+            };
           }
           if (it.type === 'LND') {
-            return { ...it, winnerPoolCap: winnerSetLimitForm.lnd };
+            return {
+              ...it,
+              winnerPoolCap: winnerSlotsFromItems('LND', winnerSetLimitForm.lnd),
+            };
           }
           if (it.type === 'TNS') {
-            return { ...it, winnerPoolCap: winnerSetLimitForm.tns };
+            return {
+              ...it,
+              winnerPoolCap: winnerSlotsFromItems('TNS', winnerSetLimitForm.tns),
+            };
           }
           return it;
         }),
@@ -702,9 +903,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     });
     setWinnerSetLimitModalOpen(false);
     void swal2WinnerLimitsUpdated({
-      fragment: winnerSetLimitForm.fragment,
-      lnd: winnerSetLimitForm.lnd,
-      tns: winnerSetLimitForm.tns,
+      fragmentWinners: winnerSplitPreview.fragment.winners,
+      lndWinners: winnerSplitPreview.lnd.winners,
+      tnsWinners: winnerSplitPreview.tns.winners,
     });
   };
 
@@ -950,6 +1151,38 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
               >
                 {visibleActiveAuctions.length > 0 && (
                   <div className="flex w-full min-w-0 flex-col items-stretch gap-3 sm:items-end">
+                    <div className="w-full">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                        <div className="inline-flex w-fit rounded-xl border border-slate-700 bg-slate-900 p-1">
+                          {(['Guild League', 'Emperium Overrun'] as const).map((mode) => (
+                            <button
+                              key={mode}
+                              type="button"
+                              onClick={() => setEventModeDraft(mode)}
+                              disabled={eventModeSaving}
+                              className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs font-black uppercase tracking-wide transition-colors disabled:cursor-not-allowed ${
+                                eventModeDraft === mode
+                                  ? 'bg-blue-600 text-white'
+                                  : 'text-slate-300 hover:bg-slate-800'
+                              }`}
+                            >
+                              {mode}
+                            </button>
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveEventMode()}
+                          disabled={
+                            eventModeSaving ||
+                            eventModeDraft === eventModeActive
+                          }
+                          className="inline-flex cursor-pointer items-center justify-center rounded-xl bg-blue-600 px-4 py-2 text-xs font-black uppercase tracking-wide text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {eventModeSaving ? 'Saving...' : 'Save Event Mode'}
+                        </button>
+                      </div>
+                    </div>
                     <div className="flex w-full flex-wrap items-center justify-end gap-2">
                         <button
                           type="button"
@@ -1000,43 +1233,6 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           Clear all lists
                         </button>
                     </div>
-                    <AnimatePresence>
-                      {shuffleUi.active && (
-                        <motion.div
-                          key="shuffle-progress"
-                          role="progressbar"
-                          aria-valuenow={shuffleUi.pct}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          aria-label="Shuffling auction queues"
-                          initial={{ opacity: 0, height: 0 }}
-                          animate={{ opacity: 1, height: 'auto' }}
-                          exit={{ opacity: 0, height: 0 }}
-                          transition={{ duration: 0.22 }}
-                          className="w-full overflow-hidden rounded-2xl border border-blue-500/50 bg-slate-950/95 px-4 py-3 shadow-[0_0_32px_rgba(37,99,235,0.35)] ring-1 ring-blue-400/20"
-                        >
-                          <div className="mb-2 flex items-baseline justify-between gap-3">
-                            <span className="text-[10px] font-black uppercase tracking-[0.25em] text-blue-300">
-                              Shuffling queues
-                            </span>
-                            <span className="font-mono text-sm font-black tabular-nums text-white">
-                              {shuffleUi.pct}
-                              <span className="text-blue-400">%</span>
-                            </span>
-                          </div>
-                          <div className="relative h-3.5 w-full overflow-hidden rounded-full bg-slate-900 shadow-inner">
-                            <div
-                              className="h-full rounded-full bg-gradient-to-r from-blue-700 via-cyan-400 to-blue-500 shadow-[0_0_20px_rgba(34,211,238,0.65)]"
-                              style={{ width: `${shuffleUi.pct}%` }}
-                            />
-                            <div
-                              className="pointer-events-none absolute inset-0 animate-pulse rounded-full bg-gradient-to-r from-transparent via-white/25 to-transparent"
-                              aria-hidden
-                            />
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
                   </div>
                 )}
                 <div
@@ -1061,6 +1257,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                         <QueueCard
                           item={item}
                           members={state.members}
+                          rewardRank={state.rewardRank ?? 'Bronze'}
+                          featherPageStart={featherPageStartByItemId[item.id]}
                           isShuffling={shuffleUi.active}
                           showWinnerShortlist={
                             state.winnerShortlistUiEnabled === true
@@ -1070,6 +1268,13 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           onDeactivateMember={handleDeactivateMember}
                           onMoveQueueMember={handleQueueMove}
                           onComplete={handleCompleteAuction}
+                          shuffleSpinOffset={shuffleUi.spinOffsetByItemId[item.id]}
+                          shuffleRevealCount={shuffleUi.revealCountByItemId[item.id]}
+                          shufflePreviewIds={shuffleUi.previewQueueByItemId[item.id]}
+                          shuffleDone={
+                            (shuffleUi.revealCountByItemId[item.id] ?? 0) >=
+                            maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
+                          }
                         />
                       </div>
                     ))}
@@ -1474,6 +1679,33 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             <form onSubmit={handleSaveWinnerSetLimit} className="space-y-6">
               <div className="space-y-2">
                 <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
+                  Rank
+                </label>
+                <div className="inline-flex w-full rounded-xl border border-slate-700 bg-slate-900 p-1">
+                  {GUILD_RANK_OPTIONS.map((rank) => (
+                    <button
+                      key={rank}
+                      type="button"
+                      onClick={() =>
+                        setWinnerSetLimitForm((prev) => ({
+                          ...prev,
+                          rank,
+                          ...rankPresetLimits(rank),
+                        }))
+                      }
+                      className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-black uppercase tracking-wide transition-colors ${
+                        winnerSetLimitForm.rank === rank
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-300 hover:bg-slate-800'
+                      }`}
+                    >
+                      {rank}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
                   Puppet Frag Card
                 </label>
                 <input
@@ -1496,6 +1728,12 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                     }))
                   }
                 />
+                <p className="text-[11px] font-semibold text-slate-400">
+                  Bidders: {winnerSplitPreview.fragment.bidders} · Pages: {winnerSplitPreview.fragment.pages} · Winning bidders: {winnerSplitPreview.fragment.winners}
+                  {winnerSplitPreview.fragment.sample
+                    ? ` · Split: ${winnerSplitPreview.fragment.sample}${winnerSplitPreview.fragment.hasMore ? ', ...' : ''}`
+                    : ''}
+                </p>
               </div>
               <div className="space-y-2">
                 <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
@@ -1520,6 +1758,12 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                     }))
                   }
                 />
+                <p className="text-[11px] font-semibold text-slate-400">
+                  Bidders: {winnerSplitPreview.lnd.bidders} · Pages: {winnerSplitPreview.lnd.pages} · Winning bidders: {winnerSplitPreview.lnd.winners}
+                  {winnerSplitPreview.lnd.sample
+                    ? ` · Split: ${winnerSplitPreview.lnd.sample}${winnerSplitPreview.lnd.hasMore ? ', ...' : ''}`
+                    : ''}
+                </p>
               </div>
               <div className="space-y-2">
                 <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
@@ -1544,6 +1788,12 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                     }))
                   }
                 />
+                <p className="text-[11px] font-semibold text-slate-400">
+                  Bidders: {winnerSplitPreview.tns.bidders} · Pages: {winnerSplitPreview.tns.pages} · Winning bidders: {winnerSplitPreview.tns.winners}
+                  {winnerSplitPreview.tns.sample
+                    ? ` · Split: ${winnerSplitPreview.tns.sample}${winnerSplitPreview.tns.hasMore ? ', ...' : ''}`
+                    : ''}
+                </p>
               </div>
               <button
                 type="submit"
@@ -1563,6 +1813,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
 function QueueCard({
   item,
   members,
+  rewardRank,
+  featherPageStart,
   isShuffling,
   showWinnerShortlist,
   onOpenAddName,
@@ -1570,10 +1822,17 @@ function QueueCard({
   onDeactivateMember,
   onMoveQueueMember,
   onComplete,
+  shuffleSpinOffset,
+  shuffleRevealCount,
+  shufflePreviewIds,
+  shuffleDone,
 }: {
   key?: React.Key;
   item: AuctionItem;
   members: GuildMember[];
+  rewardRank: GuildRank;
+  /** Shared page numbering within Feathers tab (LND + TNS). */
+  featherPageStart?: number;
   /** While shuffle animation runs, hide names and show loading skeletons. */
   isShuffling: boolean;
   /** When false, no shortlist row styling or green “mark winner” buttons (after Reset / Unmark). */
@@ -1583,8 +1842,20 @@ function QueueCard({
   onDeactivateMember: (memberId: number) => void | Promise<void>;
   onMoveQueueMember: (p: QueueMovePayload) => void;
   onComplete: (id: string, winner: string | null) => void;
+  /** While shuffling, rotation offset for unrevealed queue names. */
+  shuffleSpinOffset?: number;
+  /** While shuffling, how many winners are already revealed from top. */
+  shuffleRevealCount?: number;
+  /** Preview shuffled queue shown while spin is running. */
+  shufflePreviewIds?: number[];
+  /** True when this card has already completed its reveal stage. */
+  shuffleDone?: boolean;
 }) {
   const [dropHighlight, setDropHighlight] = useState(false);
+  const displayIds =
+    isShuffling && Array.isArray(shufflePreviewIds)
+      ? shufflePreviewIds
+      : item.interestedMemberIds;
 
   const typeColors = {
     'Fragment Card': 'text-purple-400 border-purple-500/30 bg-purple-500/10',
@@ -1601,6 +1872,52 @@ function QueueCard({
   const poolCap = maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap);
   const recorded = item.recordedWinnerNames ?? [];
   const canMarkMoreWinners = recorded.length < poolCap;
+
+  /**
+   * Auto-assign game auction pages to winners.
+   * Rules:
+   * - Total pages == winner limit (`poolCap`)
+   * - Winners == top `min(poolCap, queued)` rows
+   * - Pages are split as evenly as possible, sequentially
+   *   (example: limit=8, winners=4 => 2 pages each: P1-2, P3-4, P5-6, P7-8)
+   */
+  const winnerPageRanges = (() => {
+    const pageStart =
+      item.type === 'LND' || item.type === 'TNS'
+        ? featherPageStart ?? 1
+        : 1;
+    return computeWinnerAssignmentLabels(
+      item.type,
+      rewardRank,
+      pageStart,
+      displayIds.length
+    );
+  })();
+  const freeItems = freeItemsForTypeByRank(item.type, rewardRank);
+  const freePageInfo = (() => {
+    if (item.type !== 'LND' && item.type !== 'TNS') return null;
+    const pageStart = featherPageStart ?? 1;
+    return freePageInfoForTypeByRank(item.type, rewardRank, pageStart);
+  })();
+  const resolvedRevealCount =
+    typeof shuffleRevealCount === 'number' && Number.isInteger(shuffleRevealCount)
+      ? Math.max(0, Math.min(shuffleRevealCount, displayIds.length))
+      : 0;
+  const resolvedSpinOffset =
+    typeof shuffleSpinOffset === 'number' && Number.isInteger(shuffleSpinOffset)
+      ? Math.max(0, Math.min(shuffleSpinOffset, Math.max(0, displayIds.length - 1)))
+      : 0;
+  const rotatedDisplayIds = (() => {
+    if (!isShuffling || shuffleDone) return displayIds;
+    const reveal = resolvedRevealCount;
+    const head = displayIds.slice(0, reveal);
+    const tail = displayIds.slice(reveal);
+    if (tail.length <= 1) return displayIds;
+    const offset =
+      resolvedSpinOffset >= 0 ? resolvedSpinOffset % tail.length : 0;
+    const rotatedTail = tail.slice(offset).concat(tail.slice(0, offset));
+    return head.concat(rotatedTail);
+  })();
 
   return (
     <motion.div 
@@ -1644,7 +1961,7 @@ function QueueCard({
         }}
       >
         <AnimatePresence mode="popLayout">
-          {item.interestedMemberIds.length === 0 ? (
+          {displayIds.length === 0 ? (
             <div
               className="flex min-h-[120px] flex-col items-center justify-center gap-2 p-8"
               onDragOver={(e) => {
@@ -1674,16 +1991,30 @@ function QueueCard({
             </div>
           ) : (
             <div className="flex flex-col gap-2">
-              {item.interestedMemberIds.map((mid, idx) => {
+              {displayIds.map((slotMid, idx) => {
+                const mid = isShuffling
+                  ? (rotatedDisplayIds[idx] ?? slotMid)
+                  : slotMid;
                 const m = members.find((member) => member.id === mid);
                 if (!m) return null;
+                const isRevealedWinner =
+                  isShuffling ? idx < resolvedRevealCount : idx < shortlistSlots;
+                const pageLabel =
+                  !isShuffling && idx < shortlistSlots && idx < winnerPageRanges.length
+                    ? winnerPageRanges[idx]
+                    : null;
                 return (
                   <motion.div
                     layout
-                    key={mid}
+                    key={isShuffling ? `slot-${item.id}-${idx}` : mid}
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, scale: 0.9 }}
+                    transition={{
+                      layout: { duration: 0.22, ease: 'easeOut' },
+                      opacity: { duration: 0.16 },
+                      x: { duration: 0.16 },
+                    }}
                     onDragOver={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
@@ -1704,9 +2035,11 @@ function QueueCard({
                       });
                     }}
                     className={`flex min-h-10 items-center justify-between gap-2 rounded-2xl border px-3 py-2.5 sm:gap-3 sm:px-3 sm:py-3 ${
-                      idx < shortlistSlots
+                      isRevealedWinner
                         ? 'bg-blue-600/20 border-blue-500/50'
-                        : 'bg-slate-900 border-slate-800'
+                        : isShuffling
+                          ? 'bg-blue-500/15 border-blue-400/60'
+                          : 'bg-slate-900 border-slate-800'
                     } transition-all`}
                   >
                     <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -1732,15 +2065,6 @@ function QueueCard({
                         >
                           <GripVertical className="h-4 w-4" aria-hidden />
                         </div>
-                        <span
-                          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[10px] font-black ${
-                            idx < shortlistSlots
-                              ? 'bg-blue-500 text-white'
-                              : 'bg-slate-800 text-slate-500'
-                          }`}
-                        >
-                          {idx + 1}
-                        </span>
                       </div>
                       <span
                         title={m.name}
@@ -1748,13 +2072,30 @@ function QueueCard({
                       >
                         {isShuffling ? (
                           <span
-                            aria-hidden
-                            className="block h-4 w-28 max-w-full animate-pulse rounded-md bg-slate-700/80"
-                          />
+                            className={
+                              !shuffleDone && idx >= resolvedRevealCount
+                                ? 'animate-pulse text-white'
+                                : ''
+                            }
+                          >
+                            {m.name}
+                          </span>
                         ) : (
                           m.name
                         )}
                       </span>
+                      {pageLabel && (
+                        <span
+                          title={
+                            pageLabel.startsWith('I')
+                              ? `Assigned item slot ${pageLabel.slice(1)}`
+                              : `Assigned page ${pageLabel.slice(1)}`
+                          }
+                          className="shrink-0 rounded-lg border border-blue-500/60 bg-blue-500/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-blue-200"
+                        >
+                          {pageLabel}
+                        </span>
+                      )}
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
                       <button
@@ -1783,6 +2124,15 @@ function QueueCard({
                       >
                         <Trash2 className="h-4 w-4" aria-hidden />
                       </button>
+                      {isShuffling && isRevealedWinner ? (
+                        <div
+                          className="pointer-events-none flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-lg bg-green-500 text-white shadow-sm shadow-green-950/30"
+                          title="Winner revealed during shuffle draw"
+                          aria-hidden
+                        >
+                          <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
+                        </div>
+                      ) : null}
                       {idx < shortlistSlots &&
                         !isShuffling &&
                         canMarkMoreWinners &&
@@ -1790,19 +2140,19 @@ function QueueCard({
                           (n) =>
                             n.trim().toLowerCase() === m.name.trim().toLowerCase()
                         ) && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onComplete(item.id, m.name);
-                          }}
-                          title="Click to mark winner (weekly type lock). Saves immediately with your other changes."
-                          aria-label={`Mark ${m.name} as winner`}
-                          className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg bg-green-500 text-white shadow-sm shadow-green-950/30 transition-colors hover:bg-green-400 active:scale-95"
-                        >
-                          <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
-                        </button>
-                      )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onComplete(item.id, m.name);
+                            }}
+                            title="Click to mark winner (weekly type lock). Saves immediately with your other changes."
+                            aria-label={`Mark ${m.name} as winner`}
+                            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg bg-green-500 text-white shadow-sm shadow-green-950/30 transition-colors hover:bg-green-400 active:scale-95"
+                          >
+                            <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
+                          </button>
+                        )}
                     </div>
                   </motion.div>
                 );
@@ -1829,6 +2179,13 @@ function QueueCard({
               >
                 Drop at end of queue
               </div>
+              {!isShuffling && showWinnerShortlist && freeItems > 0 && (
+                <div className="flex items-center justify-center rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-amber-300">
+                  {freePageInfo
+                    ? `FREE: ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
+                    : `FREE items: ${freeItems}`}
+                </div>
+              )}
             </div>
           )}
         </AnimatePresence>

@@ -301,13 +301,13 @@ export function swal2SaveError(message: string): Promise<void> {
 
 /** After updating winner limits in admin modal. */
 export function swal2WinnerLimitsUpdated(args: {
-  fragment: number;
-  lnd: number;
-  tns: number;
+  fragmentWinners: number;
+  lndWinners: number;
+  tnsWinners: number;
 }): Promise<void> {
-  const f = String(args.fragment);
-  const l = String(args.lnd);
-  const t = String(args.tns);
+  const f = String(args.fragmentWinners);
+  const l = String(args.lndWinners);
+  const t = String(args.tnsWinners);
   return Swal.fire({
     ...darkShell,
     icon: 'success',
@@ -315,11 +315,11 @@ export function swal2WinnerLimitsUpdated(args: {
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
     html: `<div style="text-align:center;margin:0;padding:0">
-<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Updated draw winner limits for this round.</p>
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Updated winning bidder slots for this round.</p>
 <div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box">
-<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Puppet Frag Card</span><strong>${f}</strong></div>
-<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>LND</span><strong>${l}</strong></div>
-<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>TNS</span><strong>${t}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Puppet Frag Card winners</span><strong>${f}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>LND winners</span><strong>${l}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>TNS winners</span><strong>${t}</strong></div>
 </div>
 </div>`,
     confirmButtonText: 'OK',

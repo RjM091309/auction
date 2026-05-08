@@ -18,6 +18,32 @@ import {
   appendBidderStateLog,
 } from './bidderStateLog.js';
 
+const EVENT_MODE_META_KEY = 'event_mode';
+const REWARD_RANK_META_KEY = 'reward_rank';
+
+function defaultEventMode() {
+  return 'Emperium Overrun';
+}
+function defaultRewardRank() {
+  return 'Bronze';
+}
+
+function sanitizeEventName(v) {
+  return v === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
+}
+
+function parseEventMode(raw) {
+  if (raw == null || raw === '') return defaultEventMode();
+  return sanitizeEventName(typeof raw === 'string' ? raw : String(raw));
+}
+function sanitizeRewardRank(v) {
+  return v === 'Silver' || v === 'Gold' ? v : 'Bronze';
+}
+function parseRewardRank(raw) {
+  if (raw == null || raw === '') return defaultRewardRank();
+  return sanitizeRewardRank(typeof raw === 'string' ? raw : String(raw));
+}
+
 function clientError(statusCode, message, opts = {}) {
   const err = new Error(message);
   err.statusCode = statusCode;
@@ -168,6 +194,16 @@ export async function getFullState(pool) {
   const weeklyTypeWins = await loadWeeklyTypeWins(pool);
   const winnerMarkLog = await loadWinnerMarkLog(pool);
   const bidderStateLog = await loadBidderStateLog(pool);
+  const [eventRows] = await pool.query(
+    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
+    [EVENT_MODE_META_KEY]
+  );
+  const eventMode = parseEventMode(eventRows[0]?.value);
+  const [rankRows] = await pool.query(
+    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
+    [REWARD_RANK_META_KEY]
+  );
+  const rewardRank = parseRewardRank(rankRows[0]?.value);
 
   return {
     items,
@@ -182,6 +218,8 @@ export async function getFullState(pool) {
     weeklyTypeWins,
     winnerMarkLog,
     bidderStateLog,
+    eventMode,
+    rewardRank,
   };
 }
 
@@ -280,6 +318,8 @@ export async function publicAddBidToQueue(pool, body) {
     dataVersion: state.dataVersion,
     winnerShortlistUiEnabled: state.winnerShortlistUiEnabled === true,
     shuffleLocked: state.shuffleLocked === true,
+    eventMode: state.eventMode ?? defaultEventMode(),
+    rewardRank: state.rewardRank ?? defaultRewardRank(),
   });
 
   return getFullState(pool);
@@ -518,6 +558,21 @@ export async function replaceFullState(pool, body) {
       await conn.query(
         'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
         ['shuffle_locked', lockVal]
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'eventMode')) {
+      const nextMode = sanitizeEventName(body.eventMode);
+      await conn.query(
+        'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+        [EVENT_MODE_META_KEY, nextMode]
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'rewardRank')) {
+      const nextRank = sanitizeRewardRank(body.rewardRank);
+      await conn.query(
+        'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+        [REWARD_RANK_META_KEY, nextRank]
       );
     }
 

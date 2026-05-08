@@ -2,8 +2,10 @@ import type {
   AuctionItem,
   AuctionState,
   BidderStateLogEntry,
+  GuildRank,
   GuildMember,
   WeeklyTypeWin,
+  WeeklyEventType,
   WinnerMarkLogEntry,
 } from '../types';
 import { AUCTION_DATA_VERSION } from '../data/auctionDefaults';
@@ -219,6 +221,13 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     if (blog.length > 0) bidderStateLog = sortBidderStateLogNewestFirst(blog);
   }
 
+  const parseEventType = (v: unknown): WeeklyEventType =>
+    v === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
+  const parseRank = (v: unknown): GuildRank =>
+    v === 'Silver' || v === 'Gold' ? v : 'Bronze';
+  const eventMode = parseEventType(o.eventMode);
+  const rewardRank = parseRank(o.rewardRank);
+
   return {
     items,
     members,
@@ -226,6 +235,8 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     winnerShortlistUiEnabled,
     shuffleLocked,
     weeklyTypeWins,
+    eventMode,
+    rewardRank,
     ...(winnerMarkLog ? { winnerMarkLog } : {}),
     ...(bidderStateLog ? { bidderStateLog } : {}),
   };
@@ -343,6 +354,8 @@ export async function persistAuctionState(
     dataVersion: state.dataVersion ?? AUCTION_DATA_VERSION,
     winnerShortlistUiEnabled: state.winnerShortlistUiEnabled === true,
     shuffleLocked: state.shuffleLocked === true,
+    eventMode: state.eventMode ?? 'Emperium Overrun',
+    rewardRank: state.rewardRank ?? 'Bronze',
   };
   const res = await fetch(apiUrl('/api/state'), {
     ...cred,

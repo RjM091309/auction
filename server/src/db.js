@@ -292,3 +292,22 @@ export async function seedIfEmpty(pool) {
     conn.release();
   }
 }
+
+/** Sunday Emperium Overrun reward history (admin-controlled payouts). */
+export async function migrateOverrunRewardsRunsTable(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS overrun_rewards_runs (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      sunday_key VARCHAR(10) NOT NULL,
+      created_at_ms BIGINT NOT NULL,
+      created_at DATETIME(3) NOT NULL,
+      status ENUM('ok', 'skipped', 'error') NOT NULL,
+      message TEXT NULL,
+      config_json TEXT NOT NULL,
+      ranking_json TEXT NOT NULL,
+      payouts_json TEXT NOT NULL,
+      UNIQUE KEY uniq_overrun_sunday (sunday_key),
+      INDEX idx_overrun_created (created_at_ms)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+}

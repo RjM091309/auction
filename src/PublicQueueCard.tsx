@@ -6,20 +6,32 @@
 import React from 'react';
 import { Check, UserPlus } from 'lucide-react';
 import { motion } from 'motion/react';
-import type { AuctionItem, GuildMember } from './types';
+import type { AuctionItem, GuildMember, GuildRank } from './types';
 import { maxQueueSlotsAfterShuffle } from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { auctionItemTypeColors } from './lib/auctionItemTypeColors';
+import {
+  computeWinnerAssignmentLabels,
+  freePageInfoForTypeByRank,
+  freeItemsForTypeByRank,
+} from './lib/pageAssignment';
 
 export function PublicQueueCard({
   item,
   members,
+  rewardRank = 'Bronze',
+  featherPageStart,
+  isShuffling = false,
   showWinnerShortlist,
   showJoinQueue,
   onRequestAddName,
 }: {
   item: AuctionItem;
   members: GuildMember[];
+  rewardRank?: GuildRank;
+  featherPageStart?: number;
+  /** Optional visual loading phase; hide page assignment until final result is shown. */
+  isShuffling?: boolean;
   /** Same as admin: off after Reset / Unmark until Shuffle again. */
   showWinnerShortlist: boolean;
   /** Hidden after admin runs “Shuffle all queues” until Reset shuffle. */
@@ -35,6 +47,24 @@ export function PublicQueueCard({
     item.type,
     item.winnerPoolCap
   );
+  const winnerPageRanges = (() => {
+    const pageStart =
+      item.type === 'LND' || item.type === 'TNS'
+        ? featherPageStart ?? 1
+        : 1;
+    return computeWinnerAssignmentLabels(
+      item.type,
+      rewardRank,
+      pageStart,
+      item.interestedMemberIds.length
+    );
+  })();
+  const freeItems = freeItemsForTypeByRank(item.type, rewardRank);
+  const freePageInfo = (() => {
+    if (item.type !== 'LND' && item.type !== 'TNS') return null;
+    const pageStart = featherPageStart ?? 1;
+    return freePageInfoForTypeByRank(item.type, rewardRank, pageStart);
+  })();
 
   return (
     <motion.article
@@ -71,6 +101,13 @@ export function PublicQueueCard({
             <span className="mt-0.5 block font-semibold text-slate-500 [text-decoration:none]">
               after shuffle
             </span>
+            {freeItems > 0 && (
+              <span className="mt-0.5 block font-semibold text-amber-400 [text-decoration:none]">
+                {freePageInfo
+                  ? `+ FREE ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
+                  : `+${freeItems} free item${freeItems === 1 ? '' : 's'}`}
+              </span>
+            )}
           </span>
         </div>
       </div>
@@ -84,6 +121,10 @@ export function PublicQueueCard({
               const m = members.find((x) => x.id === mid);
               if (!m) return null;
               const shortlist = idx < shortlistSlots;
+              const pageLabel =
+                !isShuffling && shortlist && idx < winnerPageRanges.length
+                  ? winnerPageRanges[idx]
+                  : null;
               return (
                 <li
                   key={mid}
@@ -92,16 +133,21 @@ export function PublicQueueCard({
                   }`}
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-3">
-                    <span
-                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[10px] font-black ${
-                        shortlist ? 'bg-blue-500 text-white' : 'bg-slate-800 text-slate-500'
-                      }`}
-                    >
-                      {idx + 1}
-                    </span>
                     <span className="min-w-0 flex-1 break-words font-bold leading-normal text-slate-200 [overflow-wrap:anywhere]">
                       {m.name}
                     </span>
+                    {pageLabel ? (
+                      <span
+                        title={
+                          pageLabel.startsWith('I')
+                            ? `Assigned item slot ${pageLabel.slice(1)}`
+                            : `Assigned page ${pageLabel.slice(1)}`
+                        }
+                        className="shrink-0 rounded-lg border border-blue-500/60 bg-blue-500/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-blue-200"
+                      >
+                        {pageLabel}
+                      </span>
+                    ) : null}
                   </div>
                   {shortlist ? (
                     <div
@@ -115,6 +161,13 @@ export function PublicQueueCard({
                 </li>
               );
             })}
+            {!isShuffling && showWinnerShortlist && freeItems > 0 && (
+              <li className="flex items-center justify-center rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[10px] font-black uppercase tracking-wide text-amber-300 sm:px-3 sm:py-3">
+                {freePageInfo
+                  ? `FREE: ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
+                  : `FREE items: ${freeItems}`}
+              </li>
+            )}
           </ul>
         )}
       </div>
