@@ -102,6 +102,7 @@ export type BidderDayOutcomeGroup = {
 
 /**
  * Per-IGN history for ranking drill-down: group `bidder_state_log` rows by calendar day (auction TZ).
+ * Ongoing rows are omitted here (same as the weekly log list); they stay in the DB for queue/ranking logic.
  */
 export function buildBidderOutcomeDaysByIgnKey(
   entries: readonly BidderStateLogEntry[]
@@ -120,6 +121,7 @@ export function buildBidderOutcomeDaysByIgnKey(
   for (const [ignKey, list] of byIgn) {
     const byDay = new Map<string, BidderStateLogEntry[]>();
     for (const e of list) {
+      if (e.state === BIDDER_STATE_ONGOING) continue;
       const { dateKey } = formatInstantInAuctionWeekTz(e.at, tz);
       const dayList = byDay.get(dateKey) ?? [];
       dayList.push(e);
