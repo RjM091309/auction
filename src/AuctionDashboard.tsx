@@ -540,10 +540,13 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     if (!ok) return;
     setEventModeSaving(true);
     try {
-      const nextState: AuctionState = { ...state, eventMode: eventModeDraft };
+      const nextRaw: AuctionState = { ...state, eventMode: eventModeDraft };
+      const nextState = dedupeIgnAcrossActiveQueues(
+        pruneOrphanQueueMembers(nextRaw)
+      );
       const server = await persistAuctionState(nextState);
       const merged = server ?? nextState;
-      setState(merged);
+      setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(merged)));
       void swal2EventModeSaved(merged.eventMode ?? eventModeDraft);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
