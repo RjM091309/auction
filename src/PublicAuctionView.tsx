@@ -39,6 +39,7 @@ import {
   dedupeIgnAcrossActiveQueues,
   pruneOrphanQueueMembers,
 } from './lib/dedupeIgnAcrossQueues';
+import { findOtherActiveQueueBlocking } from './lib/queueEligibility';
 import {
   maxQueueSlotsAfterShuffle,
   shuffleQueueIdsForType,
@@ -49,8 +50,12 @@ import { getAuctionWeekMondayKey } from './lib/auctionWeek';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import {
   computeWinnerAssignmentLabelsFromItems,
+  featherItemsPerWinnerUnit,
+  fragmentGeneralPageSpan,
   freeItemsFromTotalItems,
+  parseGuildRank,
   totalItemsForTypeByRank,
+  winnerAssignmentLabelTitle,
   winnerSlotsFromTotalItems,
 } from './lib/pageAssignment';
 import {
@@ -390,9 +395,13 @@ export default function PublicAuctionView() {
         return;
       }
 
-      const otherCard = fresh.items.find(
-        (it) =>
-          it.status === 'active' && it.id !== itemId && queueHasThisIgn(it)
+      const otherCard = findOtherActiveQueueBlocking(
+        fresh.eventMode,
+        fresh.items,
+        fresh.members,
+        ignLower,
+        itemId,
+        card.type
       );
       if (otherCard) {
         void swal2QueueAlreadyOnAnotherItem({
@@ -406,6 +415,9 @@ export default function PublicAuctionView() {
         void swal2AlreadyWonTypeThisWeek({
           ign: raw,
           itemName: displayAuctionItemName(card.name),
+          emperiumFragmentCardWinner:
+            (fresh.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
+            card.type === 'Fragment Card',
         });
         return;
       }
@@ -437,11 +449,15 @@ export default function PublicAuctionView() {
             ),
           });
         } else if (err.code === 'already_won_type_this_week') {
+          const item = queueModalItem;
           void swal2AlreadyWonTypeThisWeek({
             ign: raw,
             itemName: displayAuctionItemName(
-              err.extra?.itemName ?? queueModalItem?.name ?? 'this item'
+              err.extra?.itemName ?? item?.name ?? 'this item'
             ),
+            emperiumFragmentCardWinner:
+              (state?.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
+              item?.type === 'Fragment Card',
           });
         } else if (err.code === 'shuffle_locked') {
           void Swal.fire({
@@ -489,24 +505,50 @@ export default function PublicAuctionView() {
   const centerFewPublicQueueCards =
     activeItems.length > 0 && activeItems.length < 3;
   const featherPageStartByItemId = useMemo(() => {
-    const rank = state?.rewardRank ?? 'Bronze';
+    const rank = parseGuildRank(state?.rewardRank);
     const counts = state?.rewardItemCounts ?? {
       fragment: totalItemsForTypeByRank('Fragment Card', rank),
       lnd: totalItemsForTypeByRank('LND', rank),
       tns: totalItemsForTypeByRank('TNS', rank),
     };
     const featherItems = (state?.items ?? [])
-      .filter((it) => it.status === 'active' && (it.type === 'LND' || it.type === 'TNS'))
+      .filter(
+        (it) =>
+          it.status === 'active' &&
+          (it.type === 'Fragment Card' || it.type === 'LND' || it.type === 'TNS')
+      )
       .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
     const out: Record<string, number> = {};
     let nextPage = 1;
     for (const it of featherItems) {
       out[it.id] = nextPage;
-      const totalItems = it.type === 'LND' ? counts.lnd : counts.tns;
-      nextPage += winnerSlotsFromTotalItems(it.type, totalItems);
+      const totalItems =
+        it.type === 'Fragment Card'
+          ? counts.fragment
+          : it.type === 'LND'
+            ? counts.lnd
+            : counts.tns;
+      nextPage +=
+        it.type === 'Fragment Card'
+          ? fragmentGeneralPageSpan(totalItems)
+          : winnerSlotsFromTotalItems(it.type, totalItems, rank);
     }
     return out;
   }, [state?.items, state?.rewardRank, state?.rewardItemCounts]);
+
+  const publicRewardRank = useMemo(
+    () => parseGuildRank(state?.rewardRank),
+    [state?.rewardRank]
+  );
+  const publicRewardItemCounts = useMemo(
+    () =>
+      state?.rewardItemCounts ?? {
+        fragment: totalItemsForTypeByRank('Fragment Card', publicRewardRank),
+        lnd: totalItemsForTypeByRank('LND', publicRewardRank),
+        tns: totalItemsForTypeByRank('TNS', publicRewardRank),
+      },
+    [state?.rewardItemCounts, publicRewardRank]
+  );
 
   const bidderStateLogEntries = state?.bidderStateLog ?? [];
 
@@ -700,23 +742,8 @@ export default function PublicAuctionView() {
                         <PublicQueueCard
                           item={item}
                           members={state?.members ?? []}
-                          rewardRank={state?.rewardRank ?? 'Bronze'}
-                          rewardItemCounts={
-                            state?.rewardItemCounts ?? {
-                              fragment: totalItemsForTypeByRank(
-                                'Fragment Card',
-                                state?.rewardRank ?? 'Bronze'
-                              ),
-                              lnd: totalItemsForTypeByRank(
-                                'LND',
-                                state?.rewardRank ?? 'Bronze'
-                              ),
-                              tns: totalItemsForTypeByRank(
-                                'TNS',
-                                state?.rewardRank ?? 'Bronze'
-                              ),
-                            }
-                          }
+                          rewardRank={publicRewardRank}
+                          rewardItemCounts={publicRewardItemCounts}
                           featherPageStart={featherPageStartByItemId[item.id]}
                           isShuffling={publicShuffleUi.active}
                           shuffleSpinOffset={publicShuffleUi.spinOffsetByItemId[item.id]}
@@ -1172,29 +1199,31 @@ function PublicQueueCard({
             ? rewardItemCounts.tns
             : 1;
     const pageStart =
-      item.type === 'LND' || item.type === 'TNS'
+      item.type === 'Fragment Card' || item.type === 'LND' || item.type === 'TNS'
         ? featherPageStart ?? 1
         : 1;
     return computeWinnerAssignmentLabelsFromItems(
       item.type,
       totalItems,
       item.interestedMemberIds.length,
-      pageStart
+      pageStart,
+      rewardRank
     );
   })();
   const freeItems =
     item.type === 'LND'
-      ? freeItemsFromTotalItems(item.type, rewardItemCounts.lnd)
+      ? freeItemsFromTotalItems(item.type, rewardItemCounts.lnd, rewardRank)
       : item.type === 'TNS'
-        ? freeItemsFromTotalItems(item.type, rewardItemCounts.tns)
+        ? freeItemsFromTotalItems(item.type, rewardItemCounts.tns, rewardRank)
         : 0;
   const freePageInfo = (() => {
     if (item.type !== 'LND' && item.type !== 'TNS') return null;
     const pageStart = featherPageStart ?? 1;
     const totalItems = item.type === 'LND' ? rewardItemCounts.lnd : rewardItemCounts.tns;
-    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems);
+    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems, rewardRank);
     return freeItems > 0 ? { pageLabel: `P${pageStart + fullPages}`, freeItems } : null;
   })();
+  const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank);
   const resolvedRevealCount =
     typeof shuffleRevealCount === 'number' && Number.isInteger(shuffleRevealCount)
       ? Math.max(0, Math.min(shuffleRevealCount, displayIds.length))
@@ -1251,9 +1280,16 @@ function PublicQueueCard({
             </span>
             {!isShuffling && showWinnerShortlist && freeItems > 0 && (
               <span className="mt-0.5 block font-semibold text-amber-400 [text-decoration:none]">
-                {freePageInfo
-                  ? `+ FREE ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
-                  : `+${freeItems} free item${freeItems === 1 ? '' : 's'}`}
+                {freePageInfo ? (
+                  <span className="block">
+                    + FREE {freePageInfo.pageLabel} ({freePageInfo.freeItems} items, partial{' '}
+                    {featherSlotUnit}-item page)
+                  </span>
+                ) : (
+                  <span className="block">
+                    +{freeItems} free item{freeItems === 1 ? '' : 's'}
+                  </span>
+                )}
               </span>
             )}
           </span>
@@ -1303,11 +1339,7 @@ function PublicQueueCard({
                     </span>
                     {pageLabel ? (
                       <span
-                        title={
-                          pageLabel.startsWith('I')
-                            ? `Assigned item slot ${pageLabel.slice(1)}`
-                            : `Assigned page ${pageLabel.slice(1)}`
-                        }
+                        title={winnerAssignmentLabelTitle(pageLabel)}
                         className="shrink-0 rounded-lg border border-blue-500/60 bg-blue-500/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-blue-200"
                       >
                         {pageLabel}
@@ -1327,10 +1359,12 @@ function PublicQueueCard({
               );
             })}
             {!isShuffling && showWinnerShortlist && freeItems > 0 && (
-              <li className="flex items-center justify-center rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[10px] font-black uppercase tracking-wide text-amber-300 sm:px-3 sm:py-3">
-                {freePageInfo
-                  ? `FREE: ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
-                  : `FREE items: ${freeItems}`}
+              <li className="flex flex-col items-center justify-center gap-1 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[10px] font-black uppercase tracking-wide text-amber-300 sm:px-3 sm:py-3">
+                {freePageInfo ? (
+                  <span>{`FREE (partial ${featherSlotUnit}-item page): ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`}</span>
+                ) : (
+                  <span>FREE items: {freeItems}</span>
+                )}
               </li>
             )}
           </ul>

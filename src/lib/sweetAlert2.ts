@@ -2,6 +2,11 @@
  * DB sync & queue feedback — npm `sweetalert2` (centered modals).
  */
 import Swal from 'sweetalert2';
+import type { WeeklyEventType } from '../types';
+
+function eventModeLabel(mode: WeeklyEventType): string {
+  return mode === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
+}
 
 const darkShell = {
   background: '#020617',
@@ -89,10 +94,15 @@ export function swal2WinnerPoolFull(args: {
 export function swal2AlreadyWonTypeThisWeek(args: {
   ign: string;
   itemName: string;
+  /** Emperium Overrun: nanalo na sa Fragment Card — LND/TNS lang hanggang Monday. */
+  emperiumFragmentCardWinner?: boolean;
 }): Promise<void> {
-  const { ign, itemName } = args;
+  const { ign, itemName, emperiumFragmentCardWinner } = args;
   const i = escapeHtml(ign);
   const n = escapeHtml(itemName);
+  const emperiumNote = emperiumFragmentCardWinner
+    ? `<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Under <strong>Emperium Overrun</strong>, puwede ka pa ring mag-queue sa <strong>LND</strong> o <strong>TNS</strong> hanggang mag-Monday reset — hindi na sa Fragment Card.</p>`
+    : '';
   return Swal.fire({
     ...darkShell,
     icon: 'info',
@@ -100,6 +110,7 @@ export function swal2AlreadyWonTypeThisWeek(args: {
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
     html: `<div style="text-align:center;margin:0;padding:0">
+${emperiumNote}
 <p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Only <strong>winners</strong> are blocked from bidding again on the same item type (LND, TNS, …) this week — after the admin clicks the <strong>green check</strong>. Anyone <strong>not</strong> checked can still bid.</p>
 <p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is recorded as a winner for:</p>
 <div style="margin-top:1rem;display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
@@ -169,7 +180,42 @@ export function swal2NameAlreadyTaken(): Promise<void> {
     ...darkShell,
     icon: 'error',
     title: 'Name already in use',
-    text: 'That IGN is already taken by another character. Pick a different spelling or remove the duplicate roster entry first.',
+    text:
+      'Another roster row already uses this IGN (same person listed twice). Remove the duplicate member, or refresh the page—the app merges duplicate names when loading state.',
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** Confirm before persisting Guild League vs Emperium Overrun (queue rules change). */
+export function swal2ConfirmSaveEventMode(
+  currentMode: WeeklyEventType,
+  nextMode: WeeklyEventType
+): Promise<boolean> {
+  const c = escapeHtml(eventModeLabel(currentMode));
+  const n = escapeHtml(eventModeLabel(nextMode));
+  return Swal.fire({
+    ...darkShell,
+    icon: 'question',
+    title: 'Save event mode?',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Switch from <strong>${c}</strong> to <strong>${n}</strong>?</p>
+<p style="margin:1rem 0 0;line-height:1.55;font-size:14px;color:#94a3b8;text-align:center">Public queue rules will follow this mode (for example, Emperium allows one Fragment Card list and one LND or TNS list per bidder).</p>`,
+    showCancelButton: true,
+    confirmButtonText: 'Save',
+    cancelButtonText: 'Cancel',
+  }).then((r) => Boolean(r.isConfirmed));
+}
+
+export function swal2EventModeSaved(mode: WeeklyEventType): Promise<void> {
+  const m = escapeHtml(eventModeLabel(mode));
+  return Swal.fire({
+    ...darkShell,
+    icon: 'success',
+    title: 'Event mode saved',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Active mode is now <strong>${m}</strong>.</p>`,
     confirmButtonText: 'OK',
   }).then(() => undefined);
 }

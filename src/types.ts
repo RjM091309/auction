@@ -60,7 +60,7 @@ export interface BidderStateLogEntry {
 }
 
 export type WeeklyEventType = 'Guild League' | 'Emperium Overrun';
-export type GuildRank = 'Bronze' | 'Silver' | 'Gold';
+export type GuildRank = 'Bronze' | 'Emperium overrun';
 
 export interface RewardItemCounts {
   fragment: number;

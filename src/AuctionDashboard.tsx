@@ -52,12 +52,15 @@ import {
   swal2ConfirmResetShuffleUnmark,
   swal2WinnerPoolFull,
   swal2WinnerLimitsUpdated,
+  swal2ConfirmSaveEventMode,
+  swal2EventModeSaved,
 } from './lib/sweetAlert2';
 import { ignHasWeeklyTypeWin } from './lib/weeklyTypeWins';
 import {
   dedupeIgnAcrossActiveQueues,
   pruneOrphanQueueMembers,
 } from './lib/dedupeIgnAcrossQueues';
+import { findOtherActiveQueueBlocking } from './lib/queueEligibility';
 import {
   applyQueueMemberMove,
   parseQueueDragPayload,
@@ -75,9 +78,13 @@ import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
 import { getAuctionWeekMondayKey } from './lib/auctionWeek';
 import {
   computeWinnerAssignmentLabelsFromItems,
+  featherItemsPerWinnerUnit,
+  fragmentGeneralPageSpan,
   freeItemsFromTotalItems,
   GUILD_RANK_OPTIONS,
+  parseGuildRank,
   totalItemsForTypeByRank,
+  winnerAssignmentLabelTitle,
   winnerSlotsFromTotalItems,
 } from './lib/pageAssignment';
 import {
@@ -135,6 +142,11 @@ function rankPresetLimits(rank: GuildRank): { fragment: number; lnd: number; tns
   };
 }
 
+function guildRankButtonLabel(rank: GuildRank): string {
+  if (rank === 'Emperium overrun') return 'Emperium Overrun';
+  return rank;
+}
+
 export default function AuctionDashboard({ onLogout }: { onLogout: () => void }) {
   const [state, setState] = useState<AuctionState | null>(null);
   const mayPersist = useRef(false);
@@ -161,7 +173,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     tns: defaultWinnerPoolCapForType('TNS'),
   });
   const winnerSlotsFromItems = (type: ItemType, items: number): number => {
-    return winnerSlotsFromTotalItems(type, items);
+    return winnerSlotsFromTotalItems(type, items, winnerSetLimitForm.rank);
   };
   const winnerSplitPreview = useMemo(() => {
     const queuedByType = (type: ItemType) =>
@@ -169,12 +181,16 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         .filter((it) => it.status === 'active' && it.type === type)
         .reduce((sum, it) => sum + it.interestedMemberIds.length, 0);
     const build = (type: ItemType, items: number, bidders: number) => {
-      const pages = winnerSlotsFromItems(type, items);
+      const pages =
+        type === 'Fragment Card'
+          ? fragmentGeneralPageSpan(items)
+          : winnerSlotsFromItems(type, items);
       const labels = computeWinnerAssignmentLabelsFromItems(
         type,
         items,
         bidders,
-        1
+        1,
+        winnerSetLimitForm.rank
       );
       const winners = labels.length;
       const sample = labels.slice(0, 3).join(', ');
@@ -199,6 +215,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     };
   }, [
     state?.items,
+    winnerSetLimitForm.rank,
     winnerSetLimitForm.fragment,
     winnerSetLimitForm.lnd,
     winnerSetLimitForm.tns,
@@ -402,16 +419,29 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const centerFewQueueCards =
     visibleActiveAuctions.length > 0 && visibleActiveAuctions.length < 3;
   const featherPageStartByItemId = useMemo(() => {
-    const counts = state?.rewardItemCounts ?? rankPresetLimits(state?.rewardRank ?? 'Bronze');
+    const counts = state?.rewardItemCounts ?? rankPresetLimits(parseGuildRank(state?.rewardRank));
     const featherItems = (state?.items ?? [])
-      .filter((it) => it.status === 'active' && (it.type === 'LND' || it.type === 'TNS'))
+      .filter(
+        (it) =>
+          it.status === 'active' &&
+          (it.type === 'Fragment Card' || it.type === 'LND' || it.type === 'TNS')
+      )
       .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
+    const rewardRank = parseGuildRank(state?.rewardRank);
     const out: Record<string, number> = {};
     let nextPage = 1;
     for (const it of featherItems) {
       out[it.id] = nextPage;
-      const totalItems = it.type === 'LND' ? counts.lnd : counts.tns;
-      nextPage += winnerSlotsFromTotalItems(it.type, totalItems);
+      const totalItems =
+        it.type === 'Fragment Card'
+          ? counts.fragment
+          : it.type === 'LND'
+            ? counts.lnd
+            : counts.tns;
+      nextPage +=
+        it.type === 'Fragment Card'
+          ? fragmentGeneralPageSpan(totalItems)
+          : winnerSlotsFromTotalItems(it.type, totalItems, rewardRank);
     }
     return out;
   }, [state?.items, state?.rewardRank, state?.rewardItemCounts]);
@@ -506,11 +536,15 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
 
   const handleSaveEventMode = async () => {
     if (!state || eventModeDraft === eventModeActive || eventModeSaving) return;
+    const ok = await swal2ConfirmSaveEventMode(eventModeActive, eventModeDraft);
+    if (!ok) return;
     setEventModeSaving(true);
     try {
       const nextState: AuctionState = { ...state, eventMode: eventModeDraft };
       const server = await persistAuctionState(nextState);
-      setState(server ?? nextState);
+      const merged = server ?? nextState;
+      setState(merged);
+      void swal2EventModeSaved(merged.eventMode ?? eventModeDraft);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       void swal2SaveError(msg || 'Could not save event mode');
@@ -736,6 +770,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       void swal2AlreadyWonTypeThisWeek({
         ign: member.name,
         itemName: displayAuctionItemName(toItem.name),
+        emperiumFragmentCardWinner:
+          (base.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
+          toItem.type === 'Fragment Card',
       });
       return;
     }
@@ -756,6 +793,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         void swal2AlreadyWonTypeThisWeek({
           ign,
           itemName: displayAuctionItemName(next.toItemName),
+          emperiumFragmentCardWinner:
+            (base.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
+            toItem.type === 'Fragment Card',
         });
       }
       return;
@@ -856,7 +896,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
 
   const openWinnerSetLimitModal = () => {
     if (!state) return;
-    const rank = state.rewardRank ?? 'Bronze';
+    const rank = parseGuildRank(state.rewardRank);
     const preset = state.rewardItemCounts ?? rankPresetLimits(rank);
     setWinnerSetLimitForm({
       rank,
@@ -907,16 +947,20 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     setWinnerSetLimitModalOpen(false);
     try {
       const server = await persistAuctionState(nextState);
-      setState(server ?? nextState);
+      const merged = server ?? nextState;
+      setState(merged);
+      void swal2WinnerLimitsUpdated({
+        fragmentWinners: winnerSlotsFromItems(
+          'Fragment Card',
+          winnerSetLimitForm.fragment
+        ),
+        lndWinners: winnerSlotsFromItems('LND', winnerSetLimitForm.lnd),
+        tnsWinners: winnerSlotsFromItems('TNS', winnerSetLimitForm.tns),
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       void swal2SaveError(msg || 'Could not save winner set limit');
     }
-    void swal2WinnerLimitsUpdated({
-      fragmentWinners: winnerSplitPreview.fragment.winners,
-      lndWinners: winnerSplitPreview.lnd.winners,
-      tnsWinners: winnerSplitPreview.tns.winners,
-    });
   };
 
   const openEditMember = (memberId: number) => {
@@ -1010,11 +1054,13 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         return;
       }
 
-      const otherCard = base.items.find(
-        (it) =>
-          it.status === 'active' &&
-          it.id !== itemId &&
-          queueHasThisIgn(it)
+      const otherCard = findOtherActiveQueueBlocking(
+        base.eventMode,
+        base.items,
+        base.members,
+        ignLower,
+        itemId,
+        card.type
       );
       if (otherCard) {
         setState(base);
@@ -1032,6 +1078,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         void swal2AlreadyWonTypeThisWeek({
           ign: raw,
           itemName: displayAuctionItemName(card.name),
+          emperiumFragmentCardWinner:
+            (base.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
+            card.type === 'Fragment Card',
         });
         setQueueNameInput('');
         setQueueNameModalItemId(null);
@@ -1267,9 +1316,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                         <QueueCard
                           item={item}
                           members={state.members}
-                          rewardRank={state.rewardRank ?? 'Bronze'}
+                          rewardRank={parseGuildRank(state.rewardRank)}
                           rewardItemCounts={
-                            state.rewardItemCounts ?? rankPresetLimits(state.rewardRank ?? 'Bronze')
+                            state.rewardItemCounts ?? rankPresetLimits(parseGuildRank(state.rewardRank))
                           }
                           featherPageStart={featherPageStartByItemId[item.id]}
                           isShuffling={shuffleUi.active}
@@ -1712,7 +1761,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           : 'text-slate-300 hover:bg-slate-800'
                       }`}
                     >
-                      {rank}
+                      {guildRankButtonLabel(rank)}
                     </button>
                   ))}
                 </div>
@@ -1846,7 +1895,7 @@ function QueueCard({
   members: GuildMember[];
   rewardRank: GuildRank;
   rewardItemCounts: { fragment: number; lnd: number; tns: number };
-  /** Shared page numbering within Feathers tab (LND + TNS). */
+  /** Shared general page index for Fragment + LND + TNS (creation order). Fragment badges also show I# (one item per winner). */
   featherPageStart?: number;
   /** While shuffle animation runs, hide names and show loading skeletons. */
   isShuffling: boolean;
@@ -1890,11 +1939,8 @@ function QueueCard({
 
   /**
    * Auto-assign game auction pages to winners.
-   * Rules:
-   * - Total pages == winner limit (`poolCap`)
-   * - Winners == top `min(poolCap, queued)` rows
-   * - Pages are split as evenly as possible, sequentially
-   *   (example: limit=8, winners=4 => 2 pages each: P1-2, P3-4, P5-6, P7-8)
+   * Bronze LND/TNS: split all full pages across top winners evenly.
+   * Emperium overrun LND/TNS: exactly 2 full pages per winner (in order); leftover full pages are free.
    */
   const winnerPageRanges = (() => {
     const totalItems =
@@ -1906,31 +1952,33 @@ function QueueCard({
             ? rewardItemCounts.tns
             : 1;
     const pageStart =
-      item.type === 'LND' || item.type === 'TNS'
+      item.type === 'Fragment Card' || item.type === 'LND' || item.type === 'TNS'
         ? featherPageStart ?? 1
         : 1;
     return computeWinnerAssignmentLabelsFromItems(
       item.type,
       totalItems,
       displayIds.length,
-      pageStart
+      pageStart,
+      rewardRank
     );
   })();
   const freeItems =
     item.type === 'LND'
-      ? freeItemsFromTotalItems(item.type, rewardItemCounts.lnd)
+      ? freeItemsFromTotalItems(item.type, rewardItemCounts.lnd, rewardRank)
       : item.type === 'TNS'
-        ? freeItemsFromTotalItems(item.type, rewardItemCounts.tns)
+        ? freeItemsFromTotalItems(item.type, rewardItemCounts.tns, rewardRank)
         : 0;
   const freePageInfo = (() => {
     if (item.type !== 'LND' && item.type !== 'TNS') return null;
     const pageStart = featherPageStart ?? 1;
     const totalItems = item.type === 'LND' ? rewardItemCounts.lnd : rewardItemCounts.tns;
-    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems);
+    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems, rewardRank);
     return freeItems > 0
       ? { pageLabel: `P${pageStart + fullPages}`, freeItems }
       : null;
   })();
+  const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank);
   const resolvedRevealCount =
     typeof shuffleRevealCount === 'number' && Number.isInteger(shuffleRevealCount)
       ? Math.max(0, Math.min(shuffleRevealCount, displayIds.length))
@@ -2118,11 +2166,7 @@ function QueueCard({
                       </span>
                       {pageLabel && (
                         <span
-                          title={
-                            pageLabel.startsWith('I')
-                              ? `Assigned item slot ${pageLabel.slice(1)}`
-                              : `Assigned page ${pageLabel.slice(1)}`
-                          }
+                          title={winnerAssignmentLabelTitle(pageLabel)}
                           className="shrink-0 rounded-lg border border-blue-500/60 bg-blue-500/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-blue-200"
                         >
                           {pageLabel}
@@ -2212,10 +2256,12 @@ function QueueCard({
                 Drop at end of queue
               </div>
               {!isShuffling && showWinnerShortlist && freeItems > 0 && (
-                <div className="flex items-center justify-center rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-amber-300">
-                  {freePageInfo
-                    ? `FREE: ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
-                    : `FREE items: ${freeItems}`}
+                <div className="flex flex-col items-center justify-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-amber-300">
+                  {freePageInfo ? (
+                    <span>{`FREE (partial ${featherSlotUnit}-item page): ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`}</span>
+                  ) : (
+                    <span>FREE items: {freeItems}</span>
+                  )}
                 </div>
               )}
             </div>

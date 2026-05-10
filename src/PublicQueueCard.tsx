@@ -12,8 +12,10 @@ import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { auctionItemTypeColors } from './lib/auctionItemTypeColors';
 import {
   computeWinnerAssignmentLabelsFromItems,
+  featherItemsPerWinnerUnit,
   freeItemsFromTotalItems,
   totalItemsForTypeByRank,
+  winnerAssignmentLabelTitle,
   winnerSlotsFromTotalItems,
 } from './lib/pageAssignment';
 
@@ -32,6 +34,7 @@ export function PublicQueueCard({
   members: GuildMember[];
   rewardRank?: GuildRank;
   rewardItemCounts?: { fragment: number; lnd: number; tns: number };
+  /** Shared general page index (Fragment + LND + TNS). Fragment rows show I# · P# (one item per winner). */
   featherPageStart?: number;
   /** Optional visual loading phase; hide page assignment until final result is shown. */
   isShuffling?: boolean;
@@ -65,29 +68,31 @@ export function PublicQueueCard({
             ? counts.tns
             : 1;
     const pageStart =
-      item.type === 'LND' || item.type === 'TNS'
+      item.type === 'Fragment Card' || item.type === 'LND' || item.type === 'TNS'
         ? featherPageStart ?? 1
         : 1;
     return computeWinnerAssignmentLabelsFromItems(
       item.type,
       totalItems,
       item.interestedMemberIds.length,
-      pageStart
+      pageStart,
+      rewardRank
     );
   })();
   const freeItems =
     item.type === 'LND'
-      ? freeItemsFromTotalItems(item.type, counts.lnd)
+      ? freeItemsFromTotalItems(item.type, counts.lnd, rewardRank)
       : item.type === 'TNS'
-        ? freeItemsFromTotalItems(item.type, counts.tns)
+        ? freeItemsFromTotalItems(item.type, counts.tns, rewardRank)
         : 0;
   const freePageInfo = (() => {
     if (item.type !== 'LND' && item.type !== 'TNS') return null;
     const pageStart = featherPageStart ?? 1;
     const totalItems = item.type === 'LND' ? counts.lnd : counts.tns;
-    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems);
+    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems, rewardRank);
     return freeItems > 0 ? { pageLabel: `P${pageStart + fullPages}`, freeItems } : null;
   })();
+  const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank);
 
   return (
     <motion.article
@@ -126,9 +131,16 @@ export function PublicQueueCard({
             </span>
             {!isShuffling && showWinnerShortlist && freeItems > 0 && (
               <span className="mt-0.5 block font-semibold text-amber-400 [text-decoration:none]">
-                {freePageInfo
-                  ? `+ FREE ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
-                  : `+${freeItems} free item${freeItems === 1 ? '' : 's'}`}
+                {freePageInfo ? (
+                  <span className="block">
+                    + FREE {freePageInfo.pageLabel} ({freePageInfo.freeItems} items, partial{' '}
+                    {featherSlotUnit}-item page)
+                  </span>
+                ) : (
+                  <span className="block">
+                    +{freeItems} free item{freeItems === 1 ? '' : 's'}
+                  </span>
+                )}
               </span>
             )}
           </span>
@@ -165,11 +177,7 @@ export function PublicQueueCard({
                     </span>
                     {pageLabel ? (
                       <span
-                        title={
-                          pageLabel.startsWith('I')
-                            ? `Assigned item slot ${pageLabel.slice(1)}`
-                            : `Assigned page ${pageLabel.slice(1)}`
-                        }
+                        title={winnerAssignmentLabelTitle(pageLabel)}
                         className="shrink-0 rounded-lg border border-blue-500/60 bg-blue-500/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-blue-200"
                       >
                         {pageLabel}
@@ -189,10 +197,12 @@ export function PublicQueueCard({
               );
             })}
             {!isShuffling && showWinnerShortlist && freeItems > 0 && (
-              <li className="flex items-center justify-center rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[10px] font-black uppercase tracking-wide text-amber-300 sm:px-3 sm:py-3">
-                {freePageInfo
-                  ? `FREE: ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`
-                  : `FREE items: ${freeItems}`}
+              <li className="flex flex-col items-center justify-center gap-1 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[10px] font-black uppercase tracking-wide text-amber-300 sm:px-3 sm:py-3">
+                {freePageInfo ? (
+                  <span>{`FREE (partial ${featherSlotUnit}-item page): ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`}</span>
+                ) : (
+                  <span>FREE items: {freeItems}</span>
+                )}
               </li>
             )}
           </ul>

@@ -1,4 +1,8 @@
 import type { AuctionState } from '../types';
+import {
+  computeKeptQueueMemberKeys,
+  stripEmperiumCardQueuesAfterFragmentWeeklyWin,
+} from './queueEligibility';
 
 /** Drop queue IDs that are not in `members` (orphans from stale localStorage / bad sync). */
 export function pruneOrphanQueueMembers(s: AuctionState): AuctionState {
@@ -11,32 +15,22 @@ export function pruneOrphanQueueMembers(s: AuctionState): AuctionState {
 }
 
 /**
- * One IGN per active card across the guild: keep the first queue slot (by item
- * order then position); drop later duplicates (fixes legacy / bad rows).
+ * Guild League: one IGN per active item across the guild (first queue slot by item
+ * order then position). Emperium Overrun: one Fragment Card + one LND/TNS allowed;
+ * non-center types still one slot. Drops later duplicates (legacy / bad rows).
  */
 export function dedupeIgnAcrossActiveQueues(s: AuctionState): AuctionState {
-  const canonical = new Map<string, { itemId: string; mid: number }>();
+  const s0 = stripEmperiumCardQueuesAfterFragmentWeeklyWin(s);
+  const keep = computeKeptQueueMemberKeys(s0, s0.eventMode);
 
-  for (const it of s.items) {
-    if (it.status !== 'active') continue;
-    for (const mid of it.interestedMemberIds) {
-      const name = s.members.find((m) => m.id === mid)?.name?.trim().toLowerCase();
-      if (!name) continue;
-      if (!canonical.has(name)) canonical.set(name, { itemId: it.id, mid });
-    }
-  }
-
-  const items = s.items.map((it) => {
+  const items = s0.items.map((it) => {
     if (it.status !== 'active') return it;
-    const newIds = it.interestedMemberIds.filter((mid) => {
-      const name = s.members.find((m) => m.id === mid)?.name?.trim().toLowerCase();
-      if (!name) return true;
-      const c = canonical.get(name);
-      return c != null && c.itemId === it.id && c.mid === mid;
-    });
+    const newIds = it.interestedMemberIds.filter((mid) =>
+      keep.has(`${it.id}\0${mid}`)
+    );
     if (newIds.length === it.interestedMemberIds.length) return it;
     return { ...it, interestedMemberIds: newIds };
   });
 
-  return { ...s, items };
+  return { ...s0, items };
 }

@@ -4,6 +4,7 @@ import {
   DEFAULT_AUCTION_ITEMS,
   INITIAL_MEMBERS,
 } from '../data/auctionDefaults';
+import { dedupeRosterMembersByIgn } from './dedupeRosterMembersByIgn';
 
 const STORAGE_KEY = 'roo_auction_state';
 
@@ -73,18 +74,18 @@ export const loadState = (): AuctionState => {
             ...it,
             interestedMemberIds: [],
           }));
-      return {
+      return dedupeRosterMembersByIgn({
         items: normalizeAuctionItems(items),
         members,
         dataVersion: AUCTION_DATA_VERSION,
-      };
+      });
     }
 
-    return {
+    return dedupeRosterMembersByIgn({
       items: normalizeAuctionItems(rawItems),
       members,
       dataVersion: AUCTION_DATA_VERSION,
-    };
+    });
   } catch (e) {
     console.error('Failed to load state', e);
     const s = freshDefaultState();

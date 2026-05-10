@@ -1,5 +1,6 @@
 import type { DragEvent } from 'react';
 import type { AuctionState } from '../types';
+import { findOtherActiveQueueBlocking } from './queueEligibility';
 import { ignHasWeeklyTypeWin } from './weeklyTypeWins';
 
 export const QUEUE_DRAG_MIME = 'application/x-rooc-queue';
@@ -61,6 +62,38 @@ export function applyQueueMemberMove(
 
   if (fromItemId !== toItemId && toListBase.includes(memberId)) {
     return { error: 'no_change' };
+  }
+
+  if (fromItemId !== toItemId) {
+    const itemsSim = s.items.map((it) => {
+      if (it.id === fromItemId) {
+        return {
+          ...it,
+          interestedMemberIds: it.interestedMemberIds.filter((id) => id !== memberId),
+        };
+      }
+      if (it.id === toItemId) {
+        const without = it.interestedMemberIds.filter((id) => id !== memberId);
+        return {
+          ...it,
+          interestedMemberIds: without.includes(memberId)
+            ? without
+            : [...without, memberId],
+        };
+      }
+      return it;
+    });
+    const blocker = findOtherActiveQueueBlocking(
+      s.eventMode,
+      itemsSim,
+      s.members,
+      ignLower,
+      toItemId,
+      toItem.type
+    );
+    if (blocker) {
+      return { error: 'name_conflict', toItemName: blocker.name };
+    }
   }
 
   const toList = [...toListBase];

@@ -2,7 +2,6 @@ import type {
   AuctionItem,
   AuctionState,
   BidderStateLogEntry,
-  GuildRank,
   RewardItemCounts,
   GuildMember,
   WeeklyTypeWin,
@@ -11,6 +10,9 @@ import type {
 } from '../types';
 import { AUCTION_DATA_VERSION } from '../data/auctionDefaults';
 import { sortBidderStateLogNewestFirst } from './bidderStateLogUi';
+import { dedupeRosterMembersByIgn } from './dedupeRosterMembersByIgn';
+import { parseGuildRank, totalItemsForTypeByRank } from './pageAssignment';
+import { stripEmperiumCardQueuesAfterFragmentWeeklyWin } from './queueEligibility';
 
 /** Absolute API origin, or empty string to use same origin (Vite `/api` proxy in dev). */
 export function apiUrl(path: string): string {
@@ -224,10 +226,8 @@ export function parseAuctionState(json: unknown): AuctionState | null {
 
   const parseEventType = (v: unknown): WeeklyEventType =>
     v === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
-  const parseRank = (v: unknown): GuildRank =>
-    v === 'Silver' || v === 'Gold' ? v : 'Bronze';
   const eventMode = parseEventType(o.eventMode);
-  const rewardRank = parseRank(o.rewardRank);
+  const rewardRank = parseGuildRank(o.rewardRank);
   const parseCount = (v: unknown, fallback: number) =>
     Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : fallback;
   const rawCounts = o.rewardItemCounts;
@@ -236,24 +236,29 @@ export function parseAuctionState(json: unknown): AuctionState | null {
       ? (rawCounts as Record<string, unknown>)
       : {};
   const rewardItemCounts: RewardItemCounts = {
-    fragment: parseCount(rewardItemCountsObj.fragment, 2),
-    lnd: parseCount(rewardItemCountsObj.lnd, 30),
-    tns: parseCount(rewardItemCountsObj.tns, 50),
+    fragment: parseCount(
+      rewardItemCountsObj.fragment,
+      totalItemsForTypeByRank('Fragment Card', rewardRank)
+    ),
+    lnd: parseCount(rewardItemCountsObj.lnd, totalItemsForTypeByRank('LND', rewardRank)),
+    tns: parseCount(rewardItemCountsObj.tns, totalItemsForTypeByRank('TNS', rewardRank)),
   };
 
-  return {
-    items,
-    members,
-    dataVersion,
-    winnerShortlistUiEnabled,
-    shuffleLocked,
-    weeklyTypeWins,
-    eventMode,
-    rewardRank,
-    rewardItemCounts,
-    ...(winnerMarkLog ? { winnerMarkLog } : {}),
-    ...(bidderStateLog ? { bidderStateLog } : {}),
-  };
+  return stripEmperiumCardQueuesAfterFragmentWeeklyWin(
+    dedupeRosterMembersByIgn({
+      items,
+      members,
+      dataVersion,
+      winnerShortlistUiEnabled,
+      shuffleLocked,
+      weeklyTypeWins,
+      eventMode,
+      rewardRank,
+      rewardItemCounts,
+      ...(winnerMarkLog ? { winnerMarkLog } : {}),
+      ...(bidderStateLog ? { bidderStateLog } : {}),
+    })
+  );
 }
 
 const cred: RequestInit = { credentials: 'include' };

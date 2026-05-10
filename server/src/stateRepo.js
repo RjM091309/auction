@@ -1,5 +1,6 @@
 import { DATA_VERSION } from './defaults.js';
 import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
+import { findOtherActiveQueueBlocking, stripEmperiumCardQueuesAfterFragmentWeeklyWin } from './queueEligibility.js';
 import { maxRecordedWinnersForItem } from './winnerPoolCaps.js';
 import {
   rolloverWeeklyWinsIfNewWeek,
@@ -38,7 +39,9 @@ function parseEventMode(raw) {
   return sanitizeEventName(typeof raw === 'string' ? raw : String(raw));
 }
 function sanitizeRewardRank(v) {
-  return v === 'Silver' || v === 'Gold' ? v : 'Bronze';
+  const s = typeof v === 'string' ? v : String(v ?? '');
+  if (s === 'Emperium overrun') return 'Emperium overrun';
+  return 'Bronze';
 }
 function parseRewardRank(raw) {
   if (raw == null || raw === '') return defaultRewardRank();
@@ -229,7 +232,7 @@ export async function getFullState(pool) {
   );
   const rewardItemCounts = parseRewardItemCounts(countRows[0]?.value);
 
-  return {
+  return stripEmperiumCardQueuesAfterFragmentWeeklyWin({
     items,
     members: members.map((m) => ({
       id: Number(m.id),
@@ -245,7 +248,7 @@ export async function getFullState(pool) {
     eventMode,
     rewardRank,
     rewardItemCounts,
-  };
+  });
 }
 
 /**
@@ -300,9 +303,14 @@ export async function publicAddBidToQueue(pool, body) {
     });
   }
 
-  const otherCard = state.items.find(
-    (it) =>
-      it.status === 'active' && it.id !== tid && queueHasThisIgn(it)
+  const eventMode = state.eventMode ?? defaultEventMode();
+  const otherCard = findOtherActiveQueueBlocking(
+    eventMode,
+    state.items,
+    state.members,
+    ignLower,
+    tid,
+    card.type
   );
   if (otherCard) {
     throw clientError(400, 'Already on another item', {
@@ -317,11 +325,15 @@ export async function publicAddBidToQueue(pool, body) {
   const mid = existing?.id ?? 0;
 
   if (memberHasTypeWinThisWeek(weeklyWins, ignLower, card.type)) {
-    throw clientError(
-      400,
-      `You already won ${card.type} this week (marked with the green check). Losers can bid again; winners cannot until Monday.`,
-      { code: 'already_won_type_this_week', extra: { itemName: card.name } }
-    );
+    const emperium = parseEventMode(state.eventMode) === 'Emperium Overrun';
+    const msg =
+      emperium && card.type === 'Fragment Card'
+        ? 'You already won Fragment Card this week (card round). You can only join LND or TNS queues until Monday.'
+        : `You already won ${card.type} this week (marked with the green check). Losers can bid again; winners cannot until Monday.`;
+    throw clientError(400, msg, {
+      code: 'already_won_type_this_week',
+      extra: { itemName: card.name },
+    });
   }
 
   const membersNext = existing
