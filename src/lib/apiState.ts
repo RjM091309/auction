@@ -244,6 +244,23 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     tns: parseCount(rewardItemCountsObj.tns, totalItemsForTypeByRank('TNS', rewardRank)),
   };
 
+  let freeDrawChosenByItemId: Record<string, number> | undefined;
+  const rawFd = o.freeDrawChosenByItemId;
+  if (rawFd && typeof rawFd === 'object' && !Array.isArray(rawFd)) {
+    const fd: Record<string, number> = {};
+    for (const [k, v] of Object.entries(rawFd as Record<string, unknown>)) {
+      if (typeof k !== 'string' || !k) continue;
+      const id =
+        typeof v === 'number' && Number.isInteger(v) && v > 0
+          ? v
+          : typeof v === 'string' && /^\d+$/.test(v.trim())
+            ? parseInt(v.trim(), 10)
+            : NaN;
+      if (Number.isInteger(id) && id > 0) fd[k] = id;
+    }
+    freeDrawChosenByItemId = fd;
+  }
+
   return stripEmperiumCardQueuesAfterFragmentWeeklyWin(
     dedupeRosterMembersByIgn({
       items,
@@ -257,6 +274,9 @@ export function parseAuctionState(json: unknown): AuctionState | null {
       rewardItemCounts,
       ...(winnerMarkLog ? { winnerMarkLog } : {}),
       ...(bidderStateLog ? { bidderStateLog } : {}),
+      ...(freeDrawChosenByItemId !== undefined
+        ? { freeDrawChosenByItemId }
+        : {}),
     })
   );
 }
@@ -376,6 +396,7 @@ export async function persistAuctionState(
     eventMode: state.eventMode ?? 'Emperium Overrun',
     rewardRank: state.rewardRank ?? 'Bronze',
     rewardItemCounts: state.rewardItemCounts ?? { fragment: 2, lnd: 30, tns: 50 },
+    freeDrawChosenByItemId: state.freeDrawChosenByItemId ?? {},
   };
   const res = await fetch(apiUrl('/api/state'), {
     ...cred,

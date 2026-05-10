@@ -49,6 +49,7 @@ import {
   swal2ConfirmRemoveMember,
   swal2ConfirmClearAllQueues,
   swal2ConfirmShuffleAllQueues,
+  swal2ConfirmShuffleDrawFree,
   swal2ConfirmResetShuffleUnmark,
   swal2WinnerPoolFull,
   swal2WinnerLimitsUpdated,
@@ -70,6 +71,7 @@ import {
 import {
   defaultWinnerPoolCapForType,
   maxQueueSlotsAfterShuffle,
+  shuffleFreeDrawTail,
   shuffleQueueIdsForType,
 } from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
@@ -79,6 +81,7 @@ import { filterToCurrentAuctionWeek, getAuctionWeekMondayKey } from './lib/aucti
 import {
   computeWinnerAssignmentLabelsFromItems,
   featherItemsPerWinnerUnit,
+  featherPageCountBeforePartialFree,
   fragmentGeneralPageSpan,
   freeItemsFromTotalItems,
   GUILD_RANK_OPTIONS,
@@ -86,6 +89,8 @@ import {
   totalItemsForTypeByRank,
   winnerAssignmentLabelTitle,
   winnerSlotsFromTotalItems,
+  formatFreePoolPageDisplay,
+  freePoolPageLabelTitle,
 } from './lib/pageAssignment';
 import {
   BIDDER_STATE_LOSS,
@@ -130,6 +135,7 @@ function auctionPollSnapshot(s: AuctionState): string {
     rewardRank: s.rewardRank,
     rewardItemCounts: s.rewardItemCounts,
     dataVersion: s.dataVersion,
+    freeDrawChosenByItemId: s.freeDrawChosenByItemId ?? {},
   });
 }
 
@@ -327,6 +333,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
               winnerMarkLog: server.winnerMarkLog ?? prev.winnerMarkLog,
               bidderStateLog: server.bidderStateLog ?? prev.bidderStateLog,
               weeklyTypeWins: server.weeklyTypeWins ?? prev.weeklyTypeWins,
+              freeDrawChosenByItemId:
+                server.freeDrawChosenByItemId ?? prev.freeDrawChosenByItemId,
             };
           });
         })
@@ -701,6 +709,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
           ...prev,
           shuffleLocked: true,
           winnerShortlistUiEnabled: true,
+          freeDrawChosenByItemId: {},
           items: prev.items.map((item) => {
             if (item.status !== 'active') return item;
             return {
@@ -725,6 +734,51 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     shuffleRafRef.current = requestAnimationFrame(tick);
   };
 
+  /** Re-randomize order below winner shortlist only (LND/TNS with partial free page). */
+  const handleShuffleDrawFree = async (itemId: string) => {
+    if (!state || state.shuffleLocked !== true || shuffleUi.active) return;
+    const item = state.items.find((i) => i.id === itemId);
+    if (!item || item.status !== 'active') return;
+    if (item.type !== 'LND' && item.type !== 'TNS') return;
+    const rank = parseGuildRank(state.rewardRank);
+    const counts = state.rewardItemCounts ?? rankPresetLimits(rank);
+    const totalItems = item.type === 'LND' ? counts.lnd : counts.tns;
+    if (freeItemsFromTotalItems(item.type, totalItems, rank) <= 0) return;
+    const pool = maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap);
+    const ids = item.interestedMemberIds;
+    if (ids.length <= pool) return;
+    const ok = await swal2ConfirmShuffleDrawFree({
+      itemName: displayAuctionItemName(item.name),
+    });
+    if (!ok) return;
+    const recordedLower = new Set(
+      (item.recordedWinnerNames ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean)
+    );
+    const isRecordedWinner = (memberId: number): boolean => {
+      const name =
+        state.members.find((m) => m.id === memberId)?.name?.trim().toLowerCase() ?? '';
+      return name.length > 0 && recordedLower.has(name);
+    };
+    const { ordered: nextIds, chosenMemberId } = shuffleFreeDrawTail(
+      ids,
+      pool,
+      item.type,
+      isRecordedWinner
+    );
+    if (chosenMemberId == null) return;
+    const nextState: AuctionState = {
+      ...state,
+      freeDrawChosenByItemId: {
+        ...(state.freeDrawChosenByItemId ?? {}),
+        [itemId]: chosenMemberId,
+      },
+      items: state.items.map((it) =>
+        it.id === itemId ? { ...it, interestedMemberIds: nextIds } : it
+      ),
+    };
+    setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(nextState)));
+  };
+
   const handleResetShuffleUnmarkAll = async () => {
     if (!state) return;
     const ok = await swal2ConfirmResetShuffleUnmark();
@@ -739,6 +793,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         ...prev,
         shuffleLocked: false,
         winnerShortlistUiEnabled: false,
+        freeDrawChosenByItemId: {},
         items: prev.items.map((item) => {
           const reopened = {
             ...item,
@@ -1352,6 +1407,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                             (shuffleUi.revealCountByItemId[item.id] ?? 0) >=
                             maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
                           }
+                          shuffleLocked={state.shuffleLocked === true}
+                          onShuffleDrawFree={handleShuffleDrawFree}
+                          freeDrawChosenMemberId={
+                            (state.freeDrawChosenByItemId ?? {})[item.id] ?? null
+                          }
                         />
                       </div>
                     ))}
@@ -1879,6 +1939,9 @@ function QueueCard({
   shuffleRevealCount,
   shufflePreviewIds,
   shuffleDone,
+  shuffleLocked,
+  onShuffleDrawFree,
+  freeDrawChosenMemberId,
 }: {
   key?: React.Key;
   item: AuctionItem;
@@ -1891,6 +1954,12 @@ function QueueCard({
   isShuffling: boolean;
   /** When false, no shortlist row styling or green “mark winner” buttons (after Reset / Unmark). */
   showWinnerShortlist: boolean;
+  /** After main shuffle; enables free-draw shuffle for losers below shortlist. */
+  shuffleLocked?: boolean;
+  /** Re-randomize only non-recorded queue rows below the shortlist (LND/TNS with free partial). */
+  onShuffleDrawFree?: (itemId: string) => void | Promise<void>;
+  /** Member highlighted as the free-draw pick (set only after “Shuffle draw free”). */
+  freeDrawChosenMemberId?: number | null;
   onOpenAddName: (itemId: string) => void;
   onEditMember: (memberId: number) => void;
   onDeactivateMember: (memberId: number) => void | Promise<void>;
@@ -1963,9 +2032,9 @@ function QueueCard({
     if (item.type !== 'LND' && item.type !== 'TNS') return null;
     const pageStart = featherPageStart ?? 1;
     const totalItems = item.type === 'LND' ? rewardItemCounts.lnd : rewardItemCounts.tns;
-    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems, rewardRank);
+    const offset = featherPageCountBeforePartialFree(item.type, totalItems, rewardRank);
     return freeItems > 0
-      ? { pageLabel: `P${pageStart + fullPages}`, freeItems }
+      ? { pageLabel: `P${pageStart + offset}`, freeItems }
       : null;
   })();
   const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank);
@@ -2069,6 +2138,14 @@ function QueueCard({
                 if (!m) return null;
                 const isRevealedWinner =
                   isShuffling ? idx < resolvedRevealCount : idx < shortlistSlots;
+                const isFreeDrawPickRow =
+                  !isShuffling &&
+                  shuffleLocked === true &&
+                  showWinnerShortlist &&
+                  freeItems > 0 &&
+                  (item.type === 'LND' || item.type === 'TNS') &&
+                  typeof freeDrawChosenMemberId === 'number' &&
+                  freeDrawChosenMemberId === mid;
                 const pageLabel =
                   !isShuffling && idx < shortlistSlots && idx < winnerPageRanges.length
                     ? winnerPageRanges[idx]
@@ -2109,7 +2186,9 @@ function QueueCard({
                         ? 'bg-blue-600/20 border-blue-500/50'
                         : isShuffling
                           ? 'bg-blue-500/15 border-blue-400/60'
-                          : 'bg-slate-900 border-slate-800'
+                          : isFreeDrawPickRow
+                            ? 'border-sky-500/40 bg-slate-800/90 ring-1 ring-inset ring-sky-500/15 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.06)]'
+                            : 'bg-slate-900 border-slate-800'
                     } transition-all`}
                   >
                     <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -2138,7 +2217,11 @@ function QueueCard({
                       </div>
                       <span
                         title={m.name}
-                        className="min-w-0 flex-1 break-words font-bold leading-normal text-slate-200 [overflow-wrap:anywhere]"
+                        className={`min-w-0 flex-1 break-words font-bold leading-normal [overflow-wrap:anywhere] ${
+                          isFreeDrawPickRow
+                            ? 'text-slate-100'
+                            : 'text-slate-200'
+                        }`}
                       >
                         {isShuffling ? (
                           <span
@@ -2154,6 +2237,28 @@ function QueueCard({
                           m.name
                         )}
                       </span>
+                      {isFreeDrawPickRow ? (
+                        freePageInfo ? (
+                          <span
+                            className="flex shrink-0 flex-wrap items-center justify-end gap-1"
+                            title={freePoolPageLabelTitle(freePageInfo.pageLabel)}
+                          >
+                            <span className="rounded-md border border-sky-500/45 bg-sky-950/60 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-sky-200">
+                              Free
+                            </span>
+                            <span className="rounded-lg border border-sky-400/35 bg-sky-950/50 px-2 py-0.5 font-mono text-[10px] font-black uppercase tabular-nums tracking-wide text-sky-100">
+                              {formatFreePoolPageDisplay(freePageInfo.pageLabel)}
+                            </span>
+                          </span>
+                        ) : (
+                          <span
+                            title="Free draw pool"
+                            className="shrink-0 rounded-md border border-sky-500/45 bg-sky-950/60 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-sky-200"
+                          >
+                            Free
+                          </span>
+                        )
+                      ) : null}
                       {pageLabel && (
                         <span
                           title={winnerAssignmentLabelTitle(pageLabel)}
@@ -2246,12 +2351,27 @@ function QueueCard({
                 Drop at end of queue
               </div>
               {!isShuffling && showWinnerShortlist && freeItems > 0 && (
-                <div className="flex flex-col items-center justify-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-amber-300">
+                <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-slate-600/70 bg-slate-800/50 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-slate-300">
                   {freePageInfo ? (
-                    <span>{`FREE (partial ${featherSlotUnit}-item page): ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`}</span>
+                    <span className="text-sky-200/95">{`FREE (partial ${featherSlotUnit}-item page): ${formatFreePoolPageDisplay(freePageInfo.pageLabel)} (${freePageInfo.freeItems} items)`}</span>
                   ) : (
-                    <span>FREE items: {freeItems}</span>
+                    <span className="text-sky-200/95">FREE items: {freeItems}</span>
                   )}
+                  {shuffleLocked &&
+                    onShuffleDrawFree &&
+                    displayIds.length > shortlistSlots && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void onShuffleDrawFree(item.id);
+                        }}
+                        className="mt-1 inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-sky-500/45 bg-sky-600/20 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-sky-100 transition-colors hover:border-sky-400/55 hover:bg-sky-600/30 active:scale-[0.98]"
+                      >
+                        <Shuffle className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                        Shuffle draw free
+                      </button>
+                    )}
                 </div>
               )}
             </div>

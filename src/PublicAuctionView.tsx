@@ -51,12 +51,15 @@ import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import {
   computeWinnerAssignmentLabelsFromItems,
   featherItemsPerWinnerUnit,
+  featherPageCountBeforePartialFree,
   fragmentGeneralPageSpan,
   freeItemsFromTotalItems,
   parseGuildRank,
   totalItemsForTypeByRank,
   winnerAssignmentLabelTitle,
   winnerSlotsFromTotalItems,
+  formatFreePoolPageDisplay,
+  freePoolPageLabelTitle,
 } from './lib/pageAssignment';
 import {
   BIDDER_STATE_LOSS,
@@ -768,6 +771,10 @@ export default function PublicAuctionView() {
                           showWinnerShortlist={
                             state?.winnerShortlistUiEnabled === true
                           }
+                          shuffleLocked={state?.shuffleLocked === true}
+                          freeDrawChosenMemberId={
+                            (state?.freeDrawChosenByItemId ?? {})[item.id] ?? null
+                          }
                           showJoinQueue={state?.shuffleLocked !== true}
                           onRequestAddName={() => setQueueNameModalItemId(item.id)}
                         />
@@ -1144,6 +1151,8 @@ function PublicQueueCard({
   shufflePreviewIds,
   shuffleDone,
   showWinnerShortlist,
+  shuffleLocked,
+  freeDrawChosenMemberId,
   showJoinQueue,
   onRequestAddName,
 }: {
@@ -1159,6 +1168,10 @@ function PublicQueueCard({
   shuffleDone?: boolean;
   /** Same as admin: off after Reset / Unmark until Shuffle again. */
   showWinnerShortlist: boolean;
+  /** After main shuffle; used with free draw highlight. */
+  shuffleLocked?: boolean;
+  /** Member highlighted as the free-draw pick (same as admin dashboard). */
+  freeDrawChosenMemberId?: number | null;
   /** Hidden after admin runs “Shuffle all queues” until Reset shuffle. */
   showJoinQueue: boolean;
   onRequestAddName: () => void;
@@ -1207,8 +1220,8 @@ function PublicQueueCard({
     if (item.type !== 'LND' && item.type !== 'TNS') return null;
     const pageStart = featherPageStart ?? 1;
     const totalItems = item.type === 'LND' ? rewardItemCounts.lnd : rewardItemCounts.tns;
-    const fullPages = winnerSlotsFromTotalItems(item.type, totalItems, rewardRank);
-    return freeItems > 0 ? { pageLabel: `P${pageStart + fullPages}`, freeItems } : null;
+    const offset = featherPageCountBeforePartialFree(item.type, totalItems, rewardRank);
+    return freeItems > 0 ? { pageLabel: `P${pageStart + offset}`, freeItems } : null;
   })();
   const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank);
   const resolvedRevealCount =
@@ -1266,10 +1279,10 @@ function PublicQueueCard({
               after shuffle
             </span>
             {!isShuffling && showWinnerShortlist && freeItems > 0 && (
-              <span className="mt-0.5 block font-semibold text-amber-400 [text-decoration:none]">
+              <span className="mt-0.5 block font-semibold text-sky-300/95 [text-decoration:none]">
                 {freePageInfo ? (
                   <span className="block">
-                    + FREE {freePageInfo.pageLabel} ({freePageInfo.freeItems} items, partial{' '}
+                    + FREE {formatFreePoolPageDisplay(freePageInfo.pageLabel)} ({freePageInfo.freeItems} items, partial{' '}
                     {featherSlotUnit}-item page)
                   </span>
                 ) : (
@@ -1293,6 +1306,14 @@ function PublicQueueCard({
               const m = members.find((x) => x.id === mid);
               if (!m) return null;
               const shortlist = isShuffling ? idx < resolvedRevealCount : idx < shortlistSlots;
+              const isFreeDrawPickRow =
+                !isShuffling &&
+                shuffleLocked === true &&
+                showWinnerShortlist &&
+                freeItems > 0 &&
+                (item.type === 'LND' || item.type === 'TNS') &&
+                typeof freeDrawChosenMemberId === 'number' &&
+                freeDrawChosenMemberId === mid;
               const pageLabel =
                 !isShuffling && shortlist && idx < winnerPageRanges.length
                   ? winnerPageRanges[idx]
@@ -1305,11 +1326,17 @@ function PublicQueueCard({
                       ? 'border-blue-500/50 bg-blue-600/20'
                       : isShuffling
                         ? 'border-blue-400/60 bg-blue-500/15'
-                        : 'border-slate-800 bg-slate-900'
+                        : isFreeDrawPickRow
+                          ? 'border-sky-500/40 bg-slate-800/90 ring-1 ring-inset ring-sky-500/15 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.06)]'
+                          : 'border-slate-800 bg-slate-900'
                   }`}
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-3">
-                    <span className="min-w-0 flex-1 break-words font-bold leading-normal text-slate-200 [overflow-wrap:anywhere]">
+                    <span
+                      className={`min-w-0 flex-1 break-words font-bold leading-normal [overflow-wrap:anywhere] ${
+                        isFreeDrawPickRow ? 'text-slate-100' : 'text-slate-200'
+                      }`}
+                    >
                       {isShuffling ? (
                         <span
                           className={
@@ -1324,6 +1351,28 @@ function PublicQueueCard({
                         m.name
                       )}
                     </span>
+                    {isFreeDrawPickRow ? (
+                      freePageInfo ? (
+                        <span
+                          className="flex shrink-0 flex-wrap items-center justify-end gap-1"
+                          title={freePoolPageLabelTitle(freePageInfo.pageLabel)}
+                        >
+                          <span className="rounded-md border border-sky-500/45 bg-sky-950/60 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-sky-200">
+                            Free
+                          </span>
+                          <span className="rounded-lg border border-sky-400/35 bg-sky-950/50 px-2 py-0.5 font-mono text-[10px] font-black uppercase tabular-nums tracking-wide text-sky-100">
+                            {formatFreePoolPageDisplay(freePageInfo.pageLabel)}
+                          </span>
+                        </span>
+                      ) : (
+                        <span
+                          title="Free draw pool"
+                          className="shrink-0 rounded-md border border-sky-500/45 bg-sky-950/60 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-sky-200"
+                        >
+                          Free
+                        </span>
+                      )
+                    ) : null}
                     {pageLabel ? (
                       <span
                         title={winnerAssignmentLabelTitle(pageLabel)}
@@ -1346,11 +1395,11 @@ function PublicQueueCard({
               );
             })}
             {!isShuffling && showWinnerShortlist && freeItems > 0 && (
-              <li className="flex flex-col items-center justify-center gap-1 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[10px] font-black uppercase tracking-wide text-amber-300 sm:px-3 sm:py-3">
+              <li className="flex flex-col items-center justify-center gap-1 rounded-2xl border border-slate-600/70 bg-slate-800/50 px-3 py-2.5 text-[10px] font-black uppercase tracking-wide text-slate-300 sm:px-3 sm:py-3">
                 {freePageInfo ? (
-                  <span>{`FREE (partial ${featherSlotUnit}-item page): ${freePageInfo.pageLabel} (${freePageInfo.freeItems} items)`}</span>
+                  <span className="text-sky-200/95">{`FREE (partial ${featherSlotUnit}-item page): ${formatFreePoolPageDisplay(freePageInfo.pageLabel)} (${freePageInfo.freeItems} items)`}</span>
                 ) : (
-                  <span>FREE items: {freeItems}</span>
+                  <span className="text-sky-200/95">FREE items: {freeItems}</span>
                 )}
               </li>
             )}

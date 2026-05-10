@@ -70,3 +70,55 @@ export function shuffleQueueIdsForType(ids: number[], _type: ItemType): number[]
   }
   return a;
 }
+
+export type FreeDrawShuffleResult = {
+  ordered: number[];
+  /** Null when nothing changed (no tail / no eligible losers). */
+  chosenMemberId: number | null;
+};
+
+/**
+ * Free draw after main shuffle: top `poolCap` shortlist rows stay fixed.
+ * Picks **exactly one** random loser below that (not `isRecordedWinner`), places them
+ * immediately after any stuck recorded rows in the tail; everyone else keeps original
+ * tail order relative to each other.
+ */
+export function shuffleFreeDrawTail(
+  ids: number[],
+  poolCap: number,
+  _type: ItemType,
+  isRecordedWinner: (memberId: number) => boolean
+): FreeDrawShuffleResult {
+  const n = ids.length;
+  const keep = Math.max(0, Math.min(Math.floor(poolCap), n));
+  const head = ids.slice(0, keep);
+  const tail = ids.slice(keep);
+  if (tail.length === 0) return { ordered: [...ids], chosenMemberId: null };
+  const stuck = tail.filter((id) => isRecordedWinner(id));
+  const losers = tail.filter((id) => !isRecordedWinner(id));
+  if (losers.length === 0) return { ordered: [...ids], chosenMemberId: null };
+  const chosen = losers[randomUintBelow(losers.length)]!;
+  const stuckSet = new Set(stuck);
+  const restTail: number[] = [];
+  for (const id of tail) {
+    if (id === chosen) continue;
+    if (stuckSet.has(id)) continue;
+    restTail.push(id);
+  }
+  const ordered = head.concat(stuck, chosen, restTail);
+  return { ordered, chosenMemberId: chosen };
+}
+
+/** Shuffle every row after the shortlist (no recorded-winner filter). */
+export function shuffleTailAfterShortlist(
+  ids: number[],
+  poolCap: number,
+  type: ItemType
+): number[] {
+  const n = ids.length;
+  const keep = Math.max(0, Math.min(Math.floor(poolCap), n));
+  const head = ids.slice(0, keep);
+  const tail = ids.slice(keep);
+  if (tail.length <= 1) return [...ids];
+  return head.concat(shuffleQueueIdsForType(tail, type));
+}

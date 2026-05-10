@@ -22,6 +22,7 @@ import {
 const EVENT_MODE_META_KEY = 'event_mode';
 const REWARD_RANK_META_KEY = 'reward_rank';
 const REWARD_ITEM_COUNTS_META_KEY = 'reward_item_counts_json';
+const FREE_DRAW_CHOSEN_META_KEY = 'free_draw_chosen_by_item';
 
 function defaultEventMode() {
   return 'Emperium Overrun';
@@ -63,6 +64,25 @@ function parseRewardItemCounts(raw) {
     };
   } catch {
     return fallback;
+  }
+}
+
+/** Map itemId → member id for “shuffle draw free” highlight (public + admin). */
+function parseFreeDrawChosenByItemJson(raw) {
+  if (raw == null || raw === '') return {};
+  try {
+    const s = typeof raw === 'string' ? raw : String(raw);
+    const j = JSON.parse(s);
+    if (!j || typeof j !== 'object' || Array.isArray(j)) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(j)) {
+      if (typeof k !== 'string' || !k) continue;
+      const id = coerceMemberId(v);
+      if (id != null && id > 0) out[k] = id;
+    }
+    return out;
+  } catch {
+    return {};
   }
 }
 
@@ -232,6 +252,12 @@ export async function getFullState(pool) {
   );
   const rewardItemCounts = parseRewardItemCounts(countRows[0]?.value);
 
+  const [freeDrawMeta] = await pool.query(
+    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
+    [FREE_DRAW_CHOSEN_META_KEY]
+  );
+  const freeDrawChosenByItemId = parseFreeDrawChosenByItemJson(freeDrawMeta[0]?.value);
+
   return stripEmperiumCardQueuesAfterFragmentWeeklyWin({
     items,
     members: members.map((m) => ({
@@ -248,6 +274,7 @@ export async function getFullState(pool) {
     eventMode,
     rewardRank,
     rewardItemCounts,
+    freeDrawChosenByItemId,
   });
 }
 
@@ -358,6 +385,7 @@ export async function publicAddBidToQueue(pool, body) {
     eventMode: state.eventMode ?? defaultEventMode(),
     rewardRank: state.rewardRank ?? defaultRewardRank(),
     rewardItemCounts: state.rewardItemCounts ?? { fragment: 2, lnd: 30, tns: 50 },
+    freeDrawChosenByItemId: state.freeDrawChosenByItemId ?? {},
   });
 
   return getFullState(pool);
@@ -674,6 +702,22 @@ export async function replaceFullState(pool, body) {
       });
     }
     await appendBidderStateLog(conn, bidderStateRows);
+
+    if (Object.prototype.hasOwnProperty.call(body, 'freeDrawChosenByItemId')) {
+      const raw = body.freeDrawChosenByItemId;
+      const cleaned = {};
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        for (const [k, v] of Object.entries(raw)) {
+          if (typeof k !== 'string' || !k) continue;
+          const mid = resolveQueueMemberId(v, idRemap);
+          if (mid != null && mid > 0) cleaned[k] = mid;
+        }
+      }
+      await conn.query(
+        'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+        [FREE_DRAW_CHOSEN_META_KEY, JSON.stringify(cleaned)]
+      );
+    }
 
     await conn.commit();
   } catch (e) {

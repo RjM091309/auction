@@ -272,6 +272,25 @@ export function swal2ConfirmResetShuffleUnmark(): Promise<boolean> {
   }).then((r) => Boolean(r.isConfirmed));
 }
 
+/** Confirm free-draw shuffle for one LND/TNS card (below shortlist, one random pick). */
+export function swal2ConfirmShuffleDrawFree(args: {
+  itemName: string;
+}): Promise<boolean> {
+  const n = escapeHtml(args.itemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'question',
+    title: 'Shuffle draw free?',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">One random bidder below the winner shortlist on <strong>${n}</strong> will move to the front of the free pool. The shortlist order does not change.</p>`,
+    showCancelButton: true,
+    confirmButtonText: 'Shuffle draw free',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#2563eb',
+  }).then((r) => Boolean(r.isConfirmed));
+}
+
 /** Confirm before shuffling all active queues. */
 export function swal2ConfirmShuffleAllQueues(args: {
   totalParticipants: number;

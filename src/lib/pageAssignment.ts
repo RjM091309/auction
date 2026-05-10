@@ -63,8 +63,9 @@ export function freePageInfoForTypeByRank(
 ): { pageLabel: string; freeItems: number } | null {
   const freeItems = freeItemsForTypeByRank(type, rank);
   if (freeItems <= 0) return null;
-  const fullPages = totalPagesForTypeByRank(type, rank);
-  const freePage = pageStart + fullPages;
+  const items = totalItemsForTypeByRank(type, rank);
+  const offset = featherPageCountBeforePartialFree(type, items, rank);
+  const freePage = pageStart + offset;
   return { pageLabel: `P${freePage}`, freeItems };
 }
 
@@ -100,6 +101,20 @@ export function freeItemsFromTotalItems(
   return n % u;
 }
 
+/**
+ * How many general feather “P#” steps (each P = one 4-item page) come **before** the leftover partial-free block.
+ * Emperium Overrun: each full 8-item winner slot spans **two** consecutive P-pages; Bronze: one P per 4-item slot.
+ */
+export function featherPageCountBeforePartialFree(
+  type: ItemType,
+  totalItems: number,
+  rank: GuildRank
+): number {
+  if (type !== 'LND' && type !== 'TNS') return 0;
+  const slots = winnerSlotsFromTotalItems(type, totalItems, rank);
+  return rank === 'Emperium overrun' ? slots * 2 : slots;
+}
+
 /** Tooltip for shortlist badges (LND/TNS page ranges, Fragment I# per page + general P#, etc.). */
 export function winnerAssignmentLabelTitle(label: string): string {
   const s = label.trim();
@@ -114,10 +129,34 @@ export function winnerAssignmentLabelTitle(label: string): string {
   if (/^I\d+$/.test(s)) {
     return `Assigned item slot ${s.slice(1)}`;
   }
+  const featherPair = /^P(\d+)-P(\d+)$/.exec(s);
+  if (featherPair) {
+    return `Winner draw: general pages ${featherPair[1]}–${featherPair[2]} (each P = one 4-item page).`;
+  }
   if (s.startsWith('P')) {
     return `Assigned page ${s.slice(1)}`;
   }
   return s;
+}
+
+/**
+ * Display label for the leftover partial feather page (free pool).
+ * Prefix “+” so it is not mistaken for winner shortlist badges, which use plain “P#”.
+ */
+export function formatFreePoolPageDisplay(pageLabel: string): string {
+  const t = pageLabel.trim();
+  if (/^P\d+$/i.test(t)) return `+${t}`;
+  return t;
+}
+
+/** Tooltip for free-pool page badge (distinct from winner “Assigned page” tooltips). */
+export function freePoolPageLabelTitle(pageLabel: string): string {
+  const t = pageLabel.trim();
+  if (/^P\d+$/i.test(t)) {
+    const n = t.slice(1);
+    return `Leftover partial page on general page ${n} (${formatFreePoolPageDisplay(t)}). The “+” marks the free pool, not the same meaning as a winner row “${t}” badge on another card.`;
+  }
+  return `Partial free pool (${t})`;
 }
 
 export function computeWinnerAssignmentLabelsFromItems(
@@ -130,10 +169,17 @@ export function computeWinnerAssignmentLabelsFromItems(
   const bidders = Math.max(0, Math.floor(bidderCount));
   if (bidders <= 0) return [];
   if (type === 'LND' || type === 'TNS') {
-    const totalPages = winnerSlotsFromTotalItems(type, totalItems, rank);
-    const winningBidders = Math.min(totalPages, bidders);
+    const totalSlots = winnerSlotsFromTotalItems(type, totalItems, rank);
+    const winningBidders = Math.min(totalSlots, bidders);
     if (winningBidders <= 0) return [];
-    const ranges = computeWinnerPageRanges(totalPages, winningBidders);
+    if (rank === 'Emperium overrun') {
+      return Array.from({ length: winningBidders }, (_, i) => {
+        const pLo = pageStart + 2 * i;
+        const pHi = pLo + 1;
+        return `P${pLo}-P${pHi}`;
+      });
+    }
+    const ranges = computeWinnerPageRanges(totalSlots, winningBidders);
     return ranges.map((r) =>
       r.start === r.end
         ? `P${pageStart + r.start - 1}`
@@ -185,13 +231,17 @@ export function computeWinnerAssignmentLabels(
       : null;
 
   if (type === 'LND' || type === 'TNS') {
-    // Feathers: page pool is fixed by rank; if bidders are fewer,
-    // divide pages across available winning bidders.
-    const totalPages = totalPagesForTypeByRank(type, rank);
+    const totalSlots = totalPagesForTypeByRank(type, rank);
     const winningBidders =
-      bidders == null ? totalPages : Math.min(totalPages, bidders);
+      bidders == null ? totalSlots : Math.min(totalSlots, bidders);
     if (winningBidders <= 0) return [];
-    const ranges = computeWinnerPageRanges(totalPages, winningBidders);
+    if (rank === 'Emperium overrun') {
+      return Array.from({ length: winningBidders }, (_, i) => {
+        const pLo = pageStart + 2 * i;
+        return `P${pLo}-P${pLo + 1}`;
+      });
+    }
+    const ranges = computeWinnerPageRanges(totalSlots, winningBidders);
     return ranges.map((r) =>
       r.start === r.end
         ? `P${pageStart + r.start - 1}`

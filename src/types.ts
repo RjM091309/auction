@@ -96,4 +96,9 @@ export interface AuctionState {
   rewardRank?: GuildRank;
   /** Actual configured item counts used for winner/page/free computations. */
   rewardItemCounts?: RewardItemCounts;
+  /**
+   * LND/TNS “shuffle draw free” pick per item (member id). Persisted so the public queue
+   * view can highlight the same row as the admin dashboard.
+   */
+  freeDrawChosenByItemId?: Record<string, number>;
 }
