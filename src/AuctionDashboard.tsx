@@ -75,7 +75,7 @@ import {
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
-import { getAuctionWeekMondayKey } from './lib/auctionWeek';
+import { filterToCurrentAuctionWeek, getAuctionWeekMondayKey } from './lib/auctionWeek';
 import {
   computeWinnerAssignmentLabelsFromItems,
   featherItemsPerWinnerUnit,
@@ -455,6 +455,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     [bidderStateLogEntries]
   );
 
+  const bidderStateLogThisAuctionWeek = useMemo(
+    () => filterToCurrentAuctionWeek(bidderStateLogEntriesSorted),
+    [bidderStateLogEntriesSorted]
+  );
+
   const queueIgnCounts = useMemo(
     () =>
       countQueuedIgnByNormalized(
@@ -468,11 +473,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const bidderStatsByIgn = useMemo(
     () =>
       summarizeBidderStateLog(
-        bidderStateLogEntriesSorted,
+        bidderStateLogThisAuctionWeek,
         state?.shuffleLocked === true,
         queueIgnCounts
       ),
-    [bidderStateLogEntriesSorted, state?.shuffleLocked, queueIgnCounts]
+    [bidderStateLogThisAuctionWeek, state?.shuffleLocked, queueIgnCounts]
   );
 
   const filteredBidderRankingRows = useMemo(
@@ -484,8 +489,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   );
 
   const bidderRankingDayDetails = useMemo(
-    () => buildBidderOutcomeDaysByIgnKey(bidderStateLogEntriesSorted),
-    [bidderStateLogEntriesSorted]
+    () => buildBidderOutcomeDaysByIgnKey(bidderStateLogThisAuctionWeek),
+    [bidderStateLogThisAuctionWeek]
   );
 
   /** Weekly list: win/loss only — ongoing rows stay in DB for ranking math but are not shown here. */

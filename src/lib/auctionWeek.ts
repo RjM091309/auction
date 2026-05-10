@@ -53,3 +53,12 @@ export function getAuctionWeekMondayKey(
   }
   throw new Error(`[auctionWeek] could not find Monday in TZ ${timeZone}`);
 }
+
+/** Rows whose `at` is in the current Monday-based auction week (same boundary as weekly log + rollover). */
+export function filterToCurrentAuctionWeek<T extends { at: number }>(
+  entries: readonly T[],
+  timeZone = getAuctionWeekTimezone()
+): T[] {
+  const currentMonday = getAuctionWeekMondayKey(Date.now(), timeZone);
+  return entries.filter((e) => getAuctionWeekMondayKey(e.at, timeZone) === currentMonday);
+}
