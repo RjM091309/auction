@@ -42,8 +42,8 @@ export interface WinnerMarkLogEntry {
 }
 
 /**
- * Unified shuffle + winner outcome log (`bidder_state_log`).
- * state: 0 = loss (below winner pool after shuffle), 1 = win (green check), 2 = ongoing (in pool).
+ * Unified shuffle outcome log (`bidder_state_log`). Written on shuffle lock only (Win/Loss by pool order).
+ * state: 0 = loss, 1 = win (in pool), 2 = legacy ongoing (old rows). Admin marks → `winner_mark_log`, not here.
  */
 export interface BidderStateLogEntry {
   id?: number;
@@ -88,7 +88,7 @@ export interface AuctionState {
   weeklyTypeWins?: WeeklyTypeWin[];
   /** Newest first; persisted on server when admin marks a winner (green check). */
   winnerMarkLog?: WinnerMarkLogEntry[];
-  /** Newest first; shuffle lock + winner marks (see `BidderStateLogEntry.state`). */
+  /** Newest first; shuffle lock writes Win/Loss (`bidder_state_log`). Hindi na dinudoble ang check dito. */
   bidderStateLog?: BidderStateLogEntry[];
   /** Admin-selected active event mode. */
   eventMode?: WeeklyEventType;

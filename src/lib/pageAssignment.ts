@@ -115,6 +115,16 @@ export function featherPageCountBeforePartialFree(
   return rank === 'Emperium overrun' ? slots * 2 : slots;
 }
 
+/**
+ * Consecutive general “P#” slots (each P = one 4-item page) this feather pool occupies.
+ * Advances the shared Fragment+LND+TNS counter so the next item’s labels do not overlap.
+ */
+export function featherRewardSpanFourItemPages(type: ItemType, totalItems: number): number {
+  if (type !== 'LND' && type !== 'TNS') return 0;
+  const n = Math.max(0, Math.floor(totalItems));
+  return Math.ceil(n / 4);
+}
+
 /** Tooltip for shortlist badges (LND/TNS page ranges, Fragment I# per page + general P#, etc.). */
 export function winnerAssignmentLabelTitle(label: string): string {
   const s = label.trim();

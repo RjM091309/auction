@@ -82,6 +82,7 @@ import {
   computeWinnerAssignmentLabelsFromItems,
   featherItemsPerWinnerUnit,
   featherPageCountBeforePartialFree,
+  featherRewardSpanFourItemPages,
   fragmentGeneralPageSpan,
   freeItemsFromTotalItems,
   GUILD_RANK_OPTIONS,
@@ -451,7 +452,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       nextPage +=
         it.type === 'Fragment Card'
           ? fragmentGeneralPageSpan(totalItems)
-          : winnerSlotsFromTotalItems(it.type, totalItems, rewardRank);
+          : featherRewardSpanFourItemPages(it.type, totalItems);
     }
     return out;
   }, [state?.items, state?.rewardRank, state?.rewardItemCounts]);
@@ -714,8 +715,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             if (item.status !== 'active') return item;
             return {
               ...item,
-              /** Bagong shuffle round — walang green check hanggang ma-mark ulit. */
-              recordedWinnerNames: [],
+              /** Green checks tinatanggal lang sa Reset shuffle; queue pinapanatili ang lahat ng member. */
               interestedMemberIds:
                 previewQueueByItemId[item.id] ??
                 shuffleQueueIdsForType(item.interestedMemberIds, item.type),
@@ -896,9 +896,6 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       if (!target || target.status !== 'active') return prev;
       const ex = target.recordedWinnerNames ?? [];
       if (ex.length >= pool) return prev;
-      const memberId = prev.members.find(
-        (m) => m.name.trim().toLowerCase() === trimmed.toLowerCase()
-      )?.id;
 
       return {
         ...prev,
@@ -907,9 +904,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
           return {
             ...it,
             recordedWinnerNames: [...ex, trimmed],
-            interestedMemberIds: memberId
-              ? it.interestedMemberIds.filter((id) => id !== memberId)
-              : it.interestedMemberIds,
+            interestedMemberIds: it.interestedMemberIds,
           };
         }),
       };
@@ -1502,7 +1497,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                       <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center">
                         <p className="font-medium text-slate-500">
                           No ranking yet. Run <strong>Shuffle all queues</strong> or mark a winner so Win /
-                          Loss / Ongoing counts show up here.
+                          Loss counts show up here.
                         </p>
                       </div>
                     ))}
@@ -1511,9 +1506,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                     (bidderStateLogEntries.length === 0 ? (
                       <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center">
                         <p className="font-medium text-slate-500">
-                          No weekly log yet. Run <strong>Shuffle all queues</strong> to record loss / ongoing
-                          rows; a green check means a win —{' '}
-                          <code className="text-xs text-slate-400">bidder_state_log</code>.
+                          No weekly log yet. Run <strong>Shuffle all queues</strong> for Win / Loss in{' '}
+                          <code className="text-xs text-slate-400">bidder_state_log</code>; green check marks
+                          appear in the separate winner mark log.
                         </p>
                       </div>
                     ) : (
@@ -1988,7 +1983,7 @@ function QueueCard({
     'Other': 'text-slate-400 border-slate-700 bg-slate-800'
   };
 
-  /** Rows that can be marked winner — Frag 2 / LND 6 / TNS 8; else top 1; 0 when shortlist UI is off after reset. */
+  /** Rows in the post-shuffle winner draw pool — Frag 2 / LND 6 / TNS 8; else top 1; 0 when shortlist UI is off after reset. */
   const shortlistSlots = showWinnerShortlist
     ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
     : 0;

@@ -1,6 +1,7 @@
 /**
- * Unified log: shuffle shortlist vs labas (ongoing / loss) + admin green-check (win).
- * state: 0 = loss (below pool after shuffle), 1 = win (marked winner), 2 = ongoing (in pool).
+ * Unified log: shuffle lock → Win/Loss in `bidder_state_log` only.
+ * Admin green-check marks go to `winner_mark_log` (not duplicated here).
+ * state: 0 = loss, 1 = win (pool), 2 = legacy “ongoing” from older saves.
  */
 
 export const MAX_BIDDER_STATE_LOG_ROWS = 3000;

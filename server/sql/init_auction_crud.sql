@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS item_queue (
   INDEX idx_item_queue_item (item_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Unified outcome log: state 0=loss (below pool after shuffle), 1=win (green check), 2=ongoing (in pool). See server `bidderStateLog.js`.
+-- Unified outcome log: shuffle lock → 0/1 by pool order; optional +1 after marks; see `bidderStateLog.js`.
 CREATE TABLE IF NOT EXISTS bidder_state_log (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   at_ms BIGINT NOT NULL,

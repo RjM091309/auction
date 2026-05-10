@@ -154,17 +154,6 @@ function ignForRemappedMember(body, idRemap, resolvedId) {
   return '';
 }
 
-function resolveMemberIdFromIgn(body, idRemap, ign) {
-  const t = normalizeIgn(ign);
-  for (const m of body.members) {
-    if (normalizeIgn(m.name) === t) {
-      const r = idRemap.get(m.id) ?? idRemap.get(String(m.id));
-      if (typeof r === 'number' && r > 0 && !Number.isNaN(r)) return r;
-    }
-  }
-  return null;
-}
-
 export async function getFullState(pool) {
   await rolloverWeeklyWinsIfNewWeek(pool);
 
@@ -501,7 +490,7 @@ export async function replaceFullState(pool, body) {
   const newWinnerMarkEntries = [];
   const markNow = Date.now();
   for (const it of body.items) {
-    const row = prevByItemId.get(it.id);
+    const row = prevByItemId.get(it.id) ?? prevByItemId.get(String(it.id));
     const prevNames = parseWinnerNamesJson(row?.winnerNamesJson);
     const prevLower = new Set(
       prevNames.map((p) => String(p).trim().toLowerCase()).filter(Boolean)
@@ -654,7 +643,8 @@ export async function replaceFullState(pool, body) {
     await appendWinnerMarkLog(conn, newWinnerMarkEntries);
 
     const bidderStateRows = [];
-    if (!prevShuffleLocked && body.shuffleLocked === true) {
+    const shuffleLockNow = !prevShuffleLocked && body.shuffleLocked === true;
+    if (shuffleLockNow) {
       const batchAt = Date.now();
       for (const it of body.items) {
         if (it.status !== 'active') continue;
@@ -671,6 +661,7 @@ export async function replaceFullState(pool, body) {
           }
           const ign =
             ignForRemappedMember(body, idRemap, resolved) || `#${resolved}`;
+          const state = idx < poolCap ? 1 : 0;
           bidderStateRows.push({
             at: batchAt,
             memberId: resolved,
@@ -678,7 +669,7 @@ export async function replaceFullState(pool, body) {
             itemId: it.id,
             itemName: typeof it.name === 'string' ? it.name : '',
             itemType: typeof it.type === 'string' ? it.type : '',
-            state: idx < poolCap ? 2 : 0,
+            state,
             poolCap,
             queuePosition: idx,
             shuffleBatchAtMs: batchAt,
@@ -686,20 +677,6 @@ export async function replaceFullState(pool, body) {
           idx += 1;
         }
       }
-    }
-    for (const e of newWinnerMarkEntries) {
-      bidderStateRows.push({
-        at: e.at,
-        memberId: resolveMemberIdFromIgn(body, idRemap, e.ign),
-        ign: e.ign,
-        itemId: e.itemId,
-        itemName: e.itemName,
-        itemType: e.itemType,
-        state: 1,
-        poolCap: null,
-        queuePosition: null,
-        shuffleBatchAtMs: null,
-      });
     }
     await appendBidderStateLog(conn, bidderStateRows);
 

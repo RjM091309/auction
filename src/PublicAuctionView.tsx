@@ -52,12 +52,12 @@ import {
   computeWinnerAssignmentLabelsFromItems,
   featherItemsPerWinnerUnit,
   featherPageCountBeforePartialFree,
+  featherRewardSpanFourItemPages,
   fragmentGeneralPageSpan,
   freeItemsFromTotalItems,
   parseGuildRank,
   totalItemsForTypeByRank,
   winnerAssignmentLabelTitle,
-  winnerSlotsFromTotalItems,
   formatFreePoolPageDisplay,
   freePoolPageLabelTitle,
 } from './lib/pageAssignment';
@@ -536,7 +536,7 @@ export default function PublicAuctionView() {
       nextPage +=
         it.type === 'Fragment Card'
           ? fragmentGeneralPageSpan(totalItems)
-          : winnerSlotsFromTotalItems(it.type, totalItems, rank);
+          : featherRewardSpanFourItemPages(it.type, totalItems);
     }
     return out;
   }, [state?.items, state?.rewardRank, state?.rewardItemCounts]);
@@ -863,7 +863,7 @@ export default function PublicAuctionView() {
                       <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center sm:p-12">
                         <p className="text-sm font-medium text-slate-500">
                           No ranking yet. Join a queue or ask an admin to shuffle or mark a winner so Win /
-                          Loss / Ongoing counts show up here.
+                          Loss counts show up here.
                         </p>
                       </div>
                     ))}
@@ -872,9 +872,9 @@ export default function PublicAuctionView() {
                     (bidderStateLogEntries.length === 0 ? (
                       <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center sm:p-12">
                         <p className="text-sm font-medium text-slate-500">
-                          No weekly log yet. After an admin runs <strong>Shuffle all queues</strong>, loss
-                          and ongoing rows are written here; a green check means a win (
-                          <code className="text-xs text-slate-400">bidder_state_log</code>).
+                          No weekly log yet. After shuffle, Win / Loss are in{' '}
+                          <code className="text-xs text-slate-400">bidder_state_log</code>; admin green checks
+                          are listed in the winner mark log.
                         </p>
                       </div>
                     ) : (
