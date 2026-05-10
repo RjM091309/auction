@@ -1,4 +1,8 @@
 import type { AuctionItem, BidderStateLogEntry, GuildMember } from '../types';
+import {
+  formatInstantInAuctionWeekTz,
+  getAuctionWeekTimezone,
+} from './auctionWeek';
 
 /** Matches DB `bidder_state_log.state` (server + types). */
 export const BIDDER_STATE_LOSS = 0;
@@ -88,6 +92,50 @@ export type BidderSummaryRow = {
   losses: number;
   ongoing: number;
 };
+
+/** One calendar day in auction TZ, newest days first in lists built by {@link buildBidderOutcomeDaysByIgnKey}. */
+export type BidderDayOutcomeGroup = {
+  dateKey: string;
+  weekdayShort: string;
+  entries: BidderStateLogEntry[];
+};
+
+/**
+ * Per-IGN history for ranking drill-down: group `bidder_state_log` rows by calendar day (auction TZ).
+ */
+export function buildBidderOutcomeDaysByIgnKey(
+  entries: readonly BidderStateLogEntry[]
+): Map<string, BidderDayOutcomeGroup[]> {
+  const tz = getAuctionWeekTimezone();
+  const byIgn = new Map<string, BidderStateLogEntry[]>();
+  for (const e of entries) {
+    const k = e.ign.trim().toLowerCase();
+    if (!k) continue;
+    const arr = byIgn.get(k) ?? [];
+    arr.push(e);
+    byIgn.set(k, arr);
+  }
+
+  const out = new Map<string, BidderDayOutcomeGroup[]>();
+  for (const [ignKey, list] of byIgn) {
+    const byDay = new Map<string, BidderStateLogEntry[]>();
+    for (const e of list) {
+      const { dateKey } = formatInstantInAuctionWeekTz(e.at, tz);
+      const dayList = byDay.get(dateKey) ?? [];
+      dayList.push(e);
+      byDay.set(dateKey, dayList);
+    }
+    const days: BidderDayOutcomeGroup[] = [...byDay.entries()]
+      .sort(([a], [b]) => (a < b ? 1 : a > b ? -1 : 0))
+      .map(([dateKey, dayEntries]) => {
+        const { weekdayShort } = formatInstantInAuctionWeekTz(dayEntries[0].at, tz);
+        const sorted = [...dayEntries].sort((a, b) => b.at - a.at);
+        return { dateKey, weekdayShort, entries: sorted };
+      });
+    out.set(ignKey, days);
+  }
+  return out;
+}
 
 /** Same token rules as `bidderLogEntryMatchesSearch` — IGN plus Win/Loss/Ongoing counts and labels. */
 export function bidderRankingRowMatchesSearch(

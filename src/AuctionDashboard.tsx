@@ -92,6 +92,7 @@ import {
   BIDDER_STATE_ONGOING,
   BIDDER_STATE_WIN,
   type BidderLogStateFilter,
+  buildBidderOutcomeDaysByIgnKey,
   bidderLogEntryMatchesFilter,
   bidderLogEntryMatchesSearch,
   bidderRankingRowMatchesSearch,
@@ -101,6 +102,7 @@ import {
   sortBidderStateLogNewestFirst,
   summarizeBidderStateLog,
 } from './lib/bidderStateLogUi';
+import { BidderRankingExpandableRows } from './components/BidderRankingExpandableRows';
 
 /** How often the admin dashboard pulls server state so public joins show up without manual refresh. */
 const ADMIN_STATE_POLL_MS = 2000;
@@ -479,6 +481,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         bidderRankingRowMatchesSearch(row, bidderRankingSearch)
       ),
     [bidderStatsByIgn, bidderRankingSearch]
+  );
+
+  const bidderRankingDayDetails = useMemo(
+    () => buildBidderOutcomeDaysByIgnKey(bidderStateLogEntriesSorted),
+    [bidderStateLogEntriesSorted]
   );
 
   /** Weekly list: win/loss only — ongoing rows stay in DB for ranking math but are not shown here. */
@@ -1409,46 +1416,21 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                             />
                           </div>
                         </div>
+                        <p className="text-xs text-slate-500">
+                          Open a name to see each day (weekday + date in auction timezone), item, and{' '}
+                          <strong className="font-semibold text-slate-400">Win</strong> /{' '}
+                          <strong className="font-semibold text-slate-400">Loss</strong> /{' '}
+                          <strong className="font-semibold text-slate-400">Ongoing</strong>.
+                        </p>
                         {filteredBidderRankingRows.length === 0 ? (
                           <p className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 py-10 text-center font-medium text-slate-500">
                             No entries match this search.
                           </p>
                         ) : (
-                          <ul
-                            className="space-y-2"
-                            aria-label="Win and loss counts by bidder"
-                          >
-                            {filteredBidderRankingRows.map((row) => (
-                              <li
-                                key={row.ign.toLowerCase()}
-                                className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 sm:px-5 sm:py-3.5"
-                              >
-                                <span className="min-w-0 break-words font-bold text-amber-400">
-                                  {row.ign}
-                                </span>
-                                <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 text-sm">
-                                  <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-green-400">
-                                    <span className="text-[10px] font-black uppercase tracking-wide text-slate-500">
-                                      Win
-                                    </span>
-                                    {row.wins}
-                                  </span>
-                                  <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-rose-300">
-                                    <span className="text-[10px] font-black uppercase tracking-wide text-slate-500">
-                                      Loss
-                                    </span>
-                                    {row.losses}
-                                  </span>
-                                  <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-blue-300">
-                                    <span className="text-[10px] font-black uppercase tracking-wide text-slate-500">
-                                      Ong
-                                    </span>
-                                    {row.ongoing}
-                                  </span>
-                                </div>
-                              </li>
-                            ))}
-                          </ul>
+                          <BidderRankingExpandableRows
+                            rows={filteredBidderRankingRows}
+                            dayDetailsByIgn={bidderRankingDayDetails}
+                          />
                         )}
                       </div>
                     ) : (

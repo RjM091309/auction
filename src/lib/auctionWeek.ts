@@ -5,6 +5,31 @@ export function getAuctionWeekTimezone(): string {
   return typeof tz === 'string' && tz.trim() ? tz.trim() : 'Asia/Manila';
 }
 
+/** Calendar day + weekday in the guild auction timezone (same as weekly rollover). */
+export function formatInstantInAuctionWeekTz(
+  instantMs: number,
+  timeZone = getAuctionWeekTimezone()
+): { dateKey: string; weekdayShort: string; timeHm: string } {
+  const d = new Date(instantMs);
+  const dateKey = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+  const weekdayShort = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'short',
+  }).format(d);
+  const timeHm = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(d);
+  return { dateKey, weekdayShort, timeHm };
+}
+
 /** YYYY-MM-DD for Monday of the auction week in the provided timezone. */
 export function getAuctionWeekMondayKey(
   instantMs = Date.now(),
