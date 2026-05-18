@@ -34,12 +34,11 @@ import {
   swal2QueueAlreadyOnAnotherItem,
   swal2QueueMemberAdded,
 } from './lib/sweetAlert2';
-import { ignHasWeeklyTypeWin } from './lib/weeklyTypeWins';
 import {
-  dedupeIgnAcrossActiveQueues,
-  pruneOrphanQueueMembers,
-} from './lib/dedupeIgnAcrossQueues';
-import { findOtherActiveQueueBlocking } from './lib/queueEligibility';
+  findOtherActiveQueueBlocking,
+  shuffleLockClosesPublicSignup,
+  weeklyTypeWinBlocksQueueJoin,
+} from './lib/queueEligibility';
 import {
   maxQueueSlotsAfterShuffle,
   shuffleQueueIdsForType,
@@ -258,6 +257,15 @@ export default function PublicAuctionView() {
     return src.filter((n) => n.toLowerCase().includes(q)).slice(0, 80);
   }, [rosterIgnSuggestions, queueNameInput]);
 
+  const publicSignupClosedByShuffle = useMemo(
+    () =>
+      shuffleLockClosesPublicSignup(
+        state?.shuffleLocked === true,
+        state?.eventMode
+      ),
+    [state?.shuffleLocked, state?.eventMode]
+  );
+
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = opts?.silent === true;
     if (!silent) setLoading(true);
@@ -265,20 +273,19 @@ export default function PublicAuctionView() {
     try {
       const remote = await fetchAuctionState();
       if (remote) {
-        const normalized = dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote));
-        const nowLocked = normalized.shuffleLocked === true;
+        const nowLocked = remote.shuffleLocked === true;
         if (!hasInitialShuffleStateRef.current) {
           // First load (or page refresh): capture baseline only, no visual trigger.
           prevShuffleLockedRef.current = nowLocked;
           hasInitialShuffleStateRef.current = true;
         } else if (!prevShuffleLockedRef.current && nowLocked) {
           // Only play visual on actual in-session transition false -> true.
-          startPublicShuffleVisual(normalized);
+          startPublicShuffleVisual(remote);
           prevShuffleLockedRef.current = nowLocked;
         } else {
           prevShuffleLockedRef.current = nowLocked;
         }
-        setState(normalized);
+        setState(remote);
       } else if (!silent) {
         setState(null);
       }
@@ -302,12 +309,12 @@ export default function PublicAuctionView() {
   }, [load]);
 
   useEffect(() => {
-    if (state?.shuffleLocked === true) {
+    if (publicSignupClosedByShuffle) {
       setQueueNameModalItemId(null);
       setQueueNameInput('');
       setIgnSuggestionsOpen(false);
     }
-  }, [state?.shuffleLocked]);
+  }, [publicSignupClosedByShuffle]);
 
   /** Kapag binuksan ang join modal, i-refresh ang state para hindi stale ang `weeklyTypeWins`. */
   useEffect(() => {
@@ -335,8 +342,8 @@ export default function PublicAuctionView() {
         return;
       }
 
-      const fresh = dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote));
-      setState(fresh);
+      setState(remote);
+      const fresh = remote;
 
       const card = fresh.items.find((it) => it.id === itemId);
       if (!card) {
@@ -373,7 +380,12 @@ export default function PublicAuctionView() {
         });
         return;
       }
-      if (fresh.shuffleLocked === true) {
+      if (
+        shuffleLockClosesPublicSignup(
+          fresh.shuffleLocked === true,
+          fresh.eventMode
+        )
+      ) {
         void Swal.fire({
           icon: 'info',
           title: 'Join queue closed',
@@ -406,7 +418,8 @@ export default function PublicAuctionView() {
         fresh.members,
         ignLower,
         itemId,
-        card.type
+        card.type,
+        { skipHiddenBlockingItems: true }
       );
       if (otherCard) {
         void swal2QueueAlreadyOnAnotherItem({
@@ -416,7 +429,14 @@ export default function PublicAuctionView() {
         return;
       }
 
-      if (ignHasWeeklyTypeWin(fresh.weeklyTypeWins, raw, card.type)) {
+      if (
+        weeklyTypeWinBlocksQueueJoin(
+          fresh.eventMode,
+          card.type,
+          fresh.weeklyTypeWins,
+          raw
+        )
+      ) {
         void swal2AlreadyWonTypeThisWeek({
           ign: raw,
           itemName: displayAuctionItemName(card.name),
@@ -428,8 +448,7 @@ export default function PublicAuctionView() {
       }
 
       const next = await publicAddBidToQueue(itemId, raw);
-      const normalized = dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(next));
-      setState(normalized);
+      setState(next);
 
       void swal2QueueMemberAdded({
         ign: raw,
@@ -581,10 +600,10 @@ export default function PublicAuctionView() {
     () =>
       summarizeBidderStateLog(
         bidderStateLogThisAuctionWeek,
-        state?.shuffleLocked === true,
+        publicSignupClosedByShuffle,
         queueIgnCounts
       ),
-    [bidderStateLogThisAuctionWeek, state?.shuffleLocked, queueIgnCounts]
+    [bidderStateLogThisAuctionWeek, publicSignupClosedByShuffle, queueIgnCounts]
   );
 
   const filteredBidderRankingRows = useMemo(
@@ -775,7 +794,7 @@ export default function PublicAuctionView() {
                           freeDrawChosenMemberId={
                             (state?.freeDrawChosenByItemId ?? {})[item.id] ?? null
                           }
-                          showJoinQueue={state?.shuffleLocked !== true}
+                          showJoinQueue={!publicSignupClosedByShuffle}
                           onRequestAddName={() => setQueueNameModalItemId(item.id)}
                         />
                       </div>

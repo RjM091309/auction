@@ -1,7 +1,9 @@
 import type { DragEvent } from 'react';
 import type { AuctionState } from '../types';
-import { findOtherActiveQueueBlocking } from './queueEligibility';
-import { ignHasWeeklyTypeWin } from './weeklyTypeWins';
+import {
+  findOtherActiveQueueBlocking,
+  weeklyTypeWinBlocksQueueJoin,
+} from './queueEligibility';
 
 export const QUEUE_DRAG_MIME = 'application/x-rooc-queue';
 
@@ -18,6 +20,34 @@ export type QueueMoveError =
   | 'name_conflict'
   | 'no_change'
   | 'weekly_type_win';
+
+/** Remove one member from a single item queue (other queues unchanged). */
+export function applyRemoveMemberFromQueue(
+  s: AuctionState,
+  itemId: string,
+  memberId: number
+): AuctionState | { error: 'not_found' } {
+  const item = s.items.find((i) => i.id === itemId);
+  if (!item || !item.interestedMemberIds.includes(memberId)) {
+    return { error: 'not_found' };
+  }
+
+  const items = s.items.map((it) =>
+    it.id === itemId
+      ? {
+          ...it,
+          interestedMemberIds: it.interestedMemberIds.filter((id) => id !== memberId),
+        }
+      : it
+  );
+
+  const freeDrawChosenByItemId = { ...(s.freeDrawChosenByItemId ?? {}) };
+  if (freeDrawChosenByItemId[itemId] === memberId) {
+    delete freeDrawChosenByItemId[itemId];
+  }
+
+  return { ...s, items, freeDrawChosenByItemId };
+}
 
 export function applyQueueMemberMove(
   s: AuctionState,
@@ -39,7 +69,12 @@ export function applyQueueMemberMove(
 
   if (
     fromItemId !== toItemId &&
-    ignHasWeeklyTypeWin(s.weeklyTypeWins, member.name, toItem.type)
+    weeklyTypeWinBlocksQueueJoin(
+      s.eventMode,
+      toItem.type,
+      s.weeklyTypeWins,
+      member.name
+    )
   ) {
     return { error: 'weekly_type_win', toItemName: toItem.name };
   }

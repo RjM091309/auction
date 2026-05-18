@@ -192,9 +192,9 @@ export function countQueuedIgnByNormalized(
 
 /**
  * Summary for the Logs table. Wins/losses = history from `bidder_state_log`.
- * **Ongoing** = lahat ng naka-queue habang **hindi pa** naka-shuffle (`shuffleLocked === false`):
- * bilang ng active list slots per IGN. Pag **shuffle na** (naka-lock), ongoing = **0** sa summary —
- * may “result” na ang round (loss/shortlist nasa log), hindi na “pre-shuffle waiting”.
+ * **Ongoing** = bilang ng active queue slots per IGN habang bukas ang public signup.
+ * Pag sarado na ang signup dahil sa shuffle lock (Guild League pagkatapos ng shuffle),
+ * ongoing = **0**; sa Emperium Overrun nananatiling bukas ang signup kaya reflected pa rin ang queue.
  */
 export function summarizeBidderStateLog(
   entries: BidderStateLogEntry[],

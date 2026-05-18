@@ -32,6 +32,7 @@ import { saveState } from './lib/storage';
 import { AUCTION_DATA_VERSION } from './data/auctionDefaults';
 import {
   deactivateMemberOnServer,
+  removeMemberFromItemQueueOnServer,
   fetchAuctionState,
   logoutRequest,
   persistAuctionState,
@@ -46,6 +47,7 @@ import {
   swal2NameAlreadyTaken,
   swal2MemberNameUpdated,
   swal2SaveError,
+  swal2ConfirmRemoveFromQueue,
   swal2ConfirmRemoveMember,
   swal2ConfirmClearAllQueues,
   swal2ConfirmShuffleAllQueues,
@@ -56,18 +58,26 @@ import {
   swal2ConfirmSaveEventMode,
   swal2EventModeSaved,
 } from './lib/sweetAlert2';
-import { ignHasWeeklyTypeWin } from './lib/weeklyTypeWins';
 import {
   dedupeIgnAcrossActiveQueues,
   pruneOrphanQueueMembers,
 } from './lib/dedupeIgnAcrossQueues';
-import { findOtherActiveQueueBlocking } from './lib/queueEligibility';
+import {
+  findOtherActiveQueueBlocking,
+  shuffleLockClosesPublicSignup,
+  weeklyTypeWinBlocksQueueJoin,
+} from './lib/queueEligibility';
 import {
   applyQueueMemberMove,
   parseQueueDragPayload,
   QUEUE_DRAG_MIME,
   type QueueMovePayload,
 } from './lib/queueMove';
+import {
+  buildQueueBaselineFromState,
+  mergeQueuesForPersist,
+  type QueueBaselineByItemId,
+} from './lib/mergeAuctionQueues';
 import {
   defaultWinnerPoolCapForType,
   maxQueueSlotsAfterShuffle,
@@ -166,7 +176,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const persistDebouncePendingRef = useRef(false);
   /** True while `persistAuctionState` HTTP is in flight. */
   const persistInFlightRef = useRef(false);
-  
+  /** IGN sets per item from last server poll — used so admin save does not wipe new public bids. */
+  const queueBaselineRef = useRef<QueueBaselineByItemId>(new Map());
+  /** Skip one debounced persist after applying a read-only server poll. */
+  const skipPersistAfterPollRef = useRef(false);
+
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
   const [isAddItemOpen, setIsAddItemOpen] = useState(false);
   const [queueNameModalItemId, setQueueNameModalItemId] = useState<string | null>(null);
@@ -273,15 +287,16 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     (async () => {
       const remote = await fetchAuctionState();
       if (cancelled) return;
+      const initial =
+        remote ?? {
+          items: [],
+          members: [],
+          dataVersion: AUCTION_DATA_VERSION,
+        };
+      queueBaselineRef.current = buildQueueBaselineFromState(initial);
       setState(
         dedupeIgnAcrossActiveQueues(
-          pruneOrphanQueueMembers(
-            remote ?? {
-              items: [],
-              members: [],
-              dataVersion: AUCTION_DATA_VERSION,
-            }
-          )
+          pruneOrphanQueueMembers(initial)
         )
       );
       mayPersist.current = true;
@@ -314,6 +329,10 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
 
   useEffect(() => {
     if (!state || !mayPersist.current) return;
+    if (skipPersistAfterPollRef.current) {
+      skipPersistAfterPollRef.current = false;
+      return;
+    }
     if (skipInitialPersist.current > 0) {
       skipInitialPersist.current -= 1;
       return;
@@ -324,9 +343,17 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       const snap = latestState.current;
       if (!snap) return;
       persistInFlightRef.current = true;
-      persistAuctionState(snap)
+      (async () => {
+        const remote = await fetchAuctionState();
+        const toSave =
+          remote != null
+            ? mergeQueuesForPersist(snap, remote, queueBaselineRef.current)
+            : snap;
+        return persistAuctionState(toSave);
+      })()
         .then((server) => {
           if (!server) return;
+          queueBaselineRef.current = buildQueueBaselineFromState(server);
           setState((prev) => {
             if (!prev) return prev;
             return {
@@ -397,6 +424,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         if (auctionPollSnapshot(prev) === auctionPollSnapshot(normalized)) {
           return prev;
         }
+        queueBaselineRef.current = buildQueueBaselineFromState(normalized);
+        skipPersistAfterPollRef.current = true;
         return normalized;
       });
     };
@@ -479,14 +508,23 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     [state?.items, state?.members]
   );
 
+  const publicSignupClosedByShuffle = useMemo(
+    () =>
+      shuffleLockClosesPublicSignup(
+        state?.shuffleLocked === true,
+        state?.eventMode
+      ),
+    [state?.shuffleLocked, state?.eventMode]
+  );
+
   const bidderStatsByIgn = useMemo(
     () =>
       summarizeBidderStateLog(
         bidderStateLogThisAuctionWeek,
-        state?.shuffleLocked === true,
+        publicSignupClosedByShuffle,
         queueIgnCounts
       ),
-    [bidderStateLogThisAuctionWeek, state?.shuffleLocked, queueIgnCounts]
+    [bidderStateLogThisAuctionWeek, publicSignupClosedByShuffle, queueIgnCounts]
   );
 
   const filteredBidderRankingRows = useMemo(
@@ -834,7 +872,12 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       member &&
       toItem &&
       payload.fromItemId !== payload.toItemId &&
-      ignHasWeeklyTypeWin(base.weeklyTypeWins, member.name, toItem.type)
+      weeklyTypeWinBlocksQueueJoin(
+        base.eventMode,
+        toItem.type,
+        base.weeklyTypeWins,
+        member.name
+      )
     ) {
       setState(base);
       void swal2AlreadyWonTypeThisWeek({
@@ -937,6 +980,26 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     });
   };
 
+  const handleRemoveFromQueue = async (itemId: string, memberId: number) => {
+    if (!state) return;
+    const item = state.items.find((i) => i.id === itemId);
+    const m = state.members.find((x) => x.id === memberId);
+    if (!item || !m) return;
+    const ok = await swal2ConfirmRemoveFromQueue(
+      m.name,
+      displayAuctionItemName(item.name)
+    );
+    if (!ok) return;
+    try {
+      const server = await removeMemberFromItemQueueOnServer(itemId, memberId);
+      queueBaselineRef.current = buildQueueBaselineFromState(server);
+      setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server)));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      void swal2SaveError(msg || 'Could not remove from queue');
+    }
+  };
+
   const handleDeactivateMember = async (memberId: number) => {
     if (!state) return;
     const m = state.members.find((x) => x.id === memberId);
@@ -946,6 +1009,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     try {
       const next = await deactivateMemberOnServer(memberId);
       setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(next)));
+      setEditMemberId(null);
+      setEditMemberNameInput('');
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       void swal2SaveError(msg || 'Could not remove bidder');
@@ -1138,7 +1203,14 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         return;
       }
 
-      if (ignHasWeeklyTypeWin(base.weeklyTypeWins, raw, card.type)) {
+      if (
+        weeklyTypeWinBlocksQueueJoin(
+          base.eventMode,
+          card.type,
+          base.weeklyTypeWins,
+          raw
+        )
+      ) {
         setState(base);
         void swal2AlreadyWonTypeThisWeek({
           ign: raw,
@@ -1392,7 +1464,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           }
                           onOpenAddName={openQueueNameModal}
                           onEditMember={openEditMember}
-                          onDeactivateMember={handleDeactivateMember}
+                          onRemoveFromQueue={(memberId) =>
+                            void handleRemoveFromQueue(item.id, memberId)
+                          }
                           onMoveQueueMember={handleQueueMove}
                           onComplete={handleCompleteAuction}
                           shuffleSpinOffset={shuffleUi.spinOffsetByItemId[item.id]}
@@ -1715,6 +1789,16 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
               >
                 Save name
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (editMemberId == null) return;
+                  void handleDeactivateMember(editMemberId);
+                }}
+                className="w-full rounded-[1.25rem] border border-red-500/40 bg-red-950/30 py-4 text-sm font-black uppercase tracking-widest text-red-300 transition-colors hover:bg-red-950/50"
+              >
+                Remove from all queues
+              </button>
             </form>
           </Modal>
         )}
@@ -1927,7 +2011,7 @@ function QueueCard({
   showWinnerShortlist,
   onOpenAddName,
   onEditMember,
-  onDeactivateMember,
+  onRemoveFromQueue,
   onMoveQueueMember,
   onComplete,
   shuffleSpinOffset,
@@ -1957,7 +2041,7 @@ function QueueCard({
   freeDrawChosenMemberId?: number | null;
   onOpenAddName: (itemId: string) => void;
   onEditMember: (memberId: number) => void;
-  onDeactivateMember: (memberId: number) => void | Promise<void>;
+  onRemoveFromQueue: (memberId: number) => void | Promise<void>;
   onMoveQueueMember: (p: QueueMovePayload) => void;
   onComplete: (id: string, winner: string | null) => void;
   /** While shuffling, rotation offset for unrevealed queue names. */
@@ -2282,10 +2366,10 @@ function QueueCard({
                         disabled={isShuffling}
                         onClick={(e) => {
                           e.stopPropagation();
-                          void onDeactivateMember(mid);
+                          void onRemoveFromQueue(mid);
                         }}
-                        title="Remove bidder (inactive in DB)"
-                        aria-label={`Remove ${m.name} from roster`}
+                        title="Remove from this queue only"
+                        aria-label={`Remove ${m.name} from ${displayAuctionItemName(item.name)}`}
                         className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-red-950/50 hover:text-red-400"
                       >
                         <Trash2 className="h-4 w-4" aria-hidden />

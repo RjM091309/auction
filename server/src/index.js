@@ -18,6 +18,7 @@ import {
   getFullState,
   replaceFullState,
   deactivateMember,
+  removeMemberFromItemQueue,
   publicAddBidToQueue,
 } from './stateRepo.js';
 import {
@@ -121,6 +122,24 @@ app.put('/api/state', requireAuth, async (req, res) => {
     const code = e.statusCode ?? 500;
     if (code >= 500) console.error(e);
     res.status(code).json({ error: String(e.message) });
+  }
+});
+
+app.delete('/api/items/:itemId/queue/:memberId', requireAuth, async (req, res) => {
+  try {
+    const state = await removeMemberFromItemQueue(
+      pool,
+      req.params.itemId,
+      req.params.memberId
+    );
+    console.log(
+      `[audit] queue remove item=${req.params.itemId} member=${req.params.memberId} ip=${clientIp(req)}`
+    );
+    res.json(state);
+  } catch (e) {
+    const code = e.statusCode ?? 500;
+    if (code >= 500) console.error(e);
+    res.status(code).json({ error: String(e.message ?? 'Error') });
   }
 });
 

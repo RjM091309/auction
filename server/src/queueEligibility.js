@@ -2,9 +2,22 @@
  * Keep in sync with `src/lib/queueEligibility.ts` (Emperium vs Guild queue rules).
  */
 
+import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
+
 /** @param {string | undefined} m */
 export function defaultEventModeForQueues(m) {
   return m === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
+}
+
+/** Guild League: shuffle lock closes public signup. Emperium Overrun: stays open. */
+export function shuffleLockClosesPublicSignup(shuffleLocked, eventMode) {
+  if (!shuffleLocked) return false;
+  return defaultEventModeForQueues(eventMode) !== 'Emperium Overrun';
+}
+
+/** Weekly win / log lock — temporarily disabled so everyone can bid. */
+export function weeklyTypeWinBlocksQueueJoin(_eventMode, _itemType, _wins, _ignRaw) {
+  return false;
 }
 
 /** @param {string} t */
@@ -23,7 +36,9 @@ export function emperiumSecondQueueBlocks(targetType, otherType) {
     return true;
   }
   if (targetType === 'Fragment Card' && otherType === 'Fragment Card') return true;
-  if (isFeatherType(targetType) && isFeatherType(otherType)) return true;
+  if (isFeatherType(targetType) && isFeatherType(otherType)) {
+    return targetType === otherType;
+  }
   return false;
 }
 
@@ -31,6 +46,7 @@ export function emperiumSecondQueueBlocks(targetType, otherType) {
  * @param {unknown} eventMode
  * @param {{ id: string, status: string, type: string, interestedMemberIds: number[] }[]} items
  * @param {{ id: number, name: string }[]} members
+ * @param {{ skipHiddenBlockingItems?: boolean } | undefined} [opts]
  */
 export function findOtherActiveQueueBlocking(
   eventMode,
@@ -38,7 +54,8 @@ export function findOtherActiveQueueBlocking(
   members,
   ignLower,
   targetItemId,
-  targetType
+  targetType,
+  opts
 ) {
   const norm = String(ignLower ?? '')
     .trim()
@@ -51,8 +68,12 @@ export function findOtherActiveQueueBlocking(
 
   const mode = defaultEventModeForQueues(eventMode);
 
+  const skipHidden =
+    opts && opts.skipHiddenBlockingItems === true && mode !== 'Emperium Overrun';
+
   for (const it of items) {
     if (it.status !== 'active' || it.id === targetItemId) continue;
+    if (skipHidden && isAuctionItemHiddenForPublic(it)) continue;
     if (!queueHasIgn(it)) continue;
 
     if (mode !== 'Emperium Overrun') {
@@ -78,22 +99,7 @@ function ignHasWeeklyTypeWin(wins, ignRaw, itemType) {
  * (feather queues only until Monday). Keep in sync with `src/lib/queueEligibility.ts`.
  * @param {object} s
  */
+/** Temporarily disabled — do not strip Fragment queues from weekly win log. */
 export function stripEmperiumCardQueuesAfterFragmentWeeklyWin(s) {
-  if (defaultEventModeForQueues(s.eventMode) !== 'Emperium Overrun') return s;
-  const wins = s.weeklyTypeWins;
-  if (!Array.isArray(wins) || wins.length === 0) return s;
-
-  let changed = false;
-  const items = s.items.map((it) => {
-    if (it.status !== 'active' || it.type !== 'Fragment Card') return it;
-    const newIds = it.interestedMemberIds.filter((mid) => {
-      const m = s.members.find((x) => x.id === mid);
-      if (!m?.name) return true;
-      return !ignHasWeeklyTypeWin(wins, m.name, 'Fragment Card');
-    });
-    if (newIds.length === it.interestedMemberIds.length) return it;
-    changed = true;
-    return { ...it, interestedMemberIds: newIds };
-  });
-  return changed ? { ...s, items } : s;
+  return s;
 }

@@ -1,6 +1,8 @@
 import type { AuctionState } from '../types';
+import { isAuctionItemHidden } from './hiddenAuctionItems';
 import {
   computeKeptQueueMemberKeys,
+  defaultEventModeForQueues,
   stripEmperiumCardQueuesAfterFragmentWeeklyWin,
 } from './queueEligibility';
 
@@ -15,16 +17,42 @@ export function pruneOrphanQueueMembers(s: AuctionState): AuctionState {
 }
 
 /**
- * Guild League: one IGN per active item across the guild (first queue slot by item
- * order then position). Emperium Overrun: one Fragment Card + one LND/TNS allowed;
- * non-center types still one slot. Drops later duplicates (legacy / bad rows).
+ * Guild League: one IGN per **visible** active auction (first slot by item order then
+ * position); hidden boards are deduped separately so a hidden queue cannot steal the
+ * only public slot. Emperium Overrun: one Fragment Card + one LND + one TNS; non-center
+ * types still one slot. Drops later duplicates (legacy / bad rows).
  */
 export function dedupeIgnAcrossActiveQueues(s: AuctionState): AuctionState {
   const s0 = stripEmperiumCardQueuesAfterFragmentWeeklyWin(s);
-  const keep = computeKeptQueueMemberKeys(s0, s0.eventMode);
+  const mode = defaultEventModeForQueues(s0.eventMode);
+
+  const keepEmperiumVisible =
+    mode === 'Emperium Overrun'
+      ? computeKeptQueueMemberKeys(s0, s0.eventMode, (it) => !isAuctionItemHidden(it))
+      : null;
+  const keepEmperiumHidden =
+    mode === 'Emperium Overrun'
+      ? computeKeptQueueMemberKeys(s0, s0.eventMode, (it) => isAuctionItemHidden(it))
+      : null;
+  const keepGuildVisible =
+    mode !== 'Emperium Overrun'
+      ? computeKeptQueueMemberKeys(s0, s0.eventMode, (it) => !isAuctionItemHidden(it))
+      : null;
+  const keepGuildHidden =
+    mode !== 'Emperium Overrun'
+      ? computeKeptQueueMemberKeys(s0, s0.eventMode, (it) => isAuctionItemHidden(it))
+      : null;
 
   const items = s0.items.map((it) => {
     if (it.status !== 'active') return it;
+    const keep =
+      mode === 'Emperium Overrun'
+        ? isAuctionItemHidden(it)
+          ? keepEmperiumHidden!
+          : keepEmperiumVisible!
+        : isAuctionItemHidden(it)
+          ? keepGuildHidden!
+          : keepGuildVisible!;
     const newIds = it.interestedMemberIds.filter((mid) =>
       keep.has(`${it.id}\0${mid}`)
     );

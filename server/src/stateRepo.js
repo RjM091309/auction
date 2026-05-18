@@ -1,12 +1,16 @@
 import { DATA_VERSION } from './defaults.js';
 import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
-import { findOtherActiveQueueBlocking, stripEmperiumCardQueuesAfterFragmentWeeklyWin } from './queueEligibility.js';
+import {
+  findOtherActiveQueueBlocking,
+  shuffleLockClosesPublicSignup,
+  stripEmperiumCardQueuesAfterFragmentWeeklyWin,
+  weeklyTypeWinBlocksQueueJoin,
+} from './queueEligibility.js';
 import { maxRecordedWinnersForItem } from './winnerPoolCaps.js';
 import {
   rolloverWeeklyWinsIfNewWeek,
   loadWeeklyTypeWins,
   saveWeeklyTypeWins,
-  memberHasTypeWinThisWeek,
   applyWeeklyWinnerDiff,
   mergeCompletedItemWinsInto,
   mergeRecordedWinnerNamesInto,
@@ -267,9 +271,48 @@ export async function getFullState(pool) {
   });
 }
 
+/** Find active roster row by IGN (case-insensitive) or create one. */
+async function findOrCreateActiveMemberId(conn, rawName) {
+  const name = rawName.trim();
+  const ignLower = name.toLowerCase();
+  const [rows] = await conn.query(
+    `SELECT id, active FROM members
+     WHERE LOWER(TRIM(name)) = ?
+     ORDER BY active DESC, id ASC`,
+    [ignLower]
+  );
+  if (Array.isArray(rows) && rows.length > 0) {
+    const id = Number(rows[0].id);
+    if (rows[0].active !== 1) {
+      await conn.query('UPDATE members SET active = 1, name = ? WHERE id = ?', [
+        name,
+        id,
+      ]);
+    }
+    return id;
+  }
+  const [ins] = await conn.query(
+    'INSERT INTO members (name, role, active) VALUES (?, ?, 1)',
+    [name, 'Member']
+  );
+  return Number(ins.insertId);
+}
+
+/** True if IGN is already queued on this item (active members only). */
+async function itemQueueHasIgn(conn, itemId, ignLower) {
+  const [rows] = await conn.query(
+    `SELECT 1 AS ok FROM item_queue iq
+     INNER JOIN members m ON m.id = iq.member_id AND m.active = 1
+     WHERE iq.item_id = ? AND LOWER(TRIM(m.name)) = ?
+     LIMIT 1`,
+    [itemId, ignLower]
+  );
+  return Array.isArray(rows) && rows.length > 0;
+}
+
 /**
  * Public: add IGN to an active item’s queue (same rules as admin “Add name to queue”).
- * Persists via replaceFullState. No auth.
+ * Appends one `item_queue` row (no full-state replace). No auth.
  */
 export async function publicAddBidToQueue(pool, body) {
   const raw = typeof body?.name === 'string' ? body.name.trim() : '';
@@ -284,7 +327,7 @@ export async function publicAddBidToQueue(pool, body) {
   const state = await getFullState(pool);
   const weeklyWins = await loadWeeklyTypeWins(pool);
 
-  if (state.shuffleLocked === true) {
+  if (shuffleLockClosesPublicSignup(state.shuffleLocked === true, state.eventMode)) {
     throw clientError(400, 'Queue signup is closed until the next reset', {
       code: 'shuffle_locked',
     });
@@ -326,7 +369,8 @@ export async function publicAddBidToQueue(pool, body) {
     state.members,
     ignLower,
     tid,
-    card.type
+    card.type,
+    { skipHiddenBlockingItems: true }
   );
   if (otherCard) {
     throw clientError(400, 'Already on another item', {
@@ -335,16 +379,11 @@ export async function publicAddBidToQueue(pool, body) {
     });
   }
 
-  const existing = state.members.find(
-    (m) => m.name.toLowerCase() === ignLower
-  );
-  const mid = existing?.id ?? 0;
-
-  if (memberHasTypeWinThisWeek(weeklyWins, ignLower, card.type)) {
+  if (weeklyTypeWinBlocksQueueJoin(state.eventMode, card.type, weeklyWins, raw)) {
     const emperium = parseEventMode(state.eventMode) === 'Emperium Overrun';
     const msg =
       emperium && card.type === 'Fragment Card'
-        ? 'You already won Fragment Card this week (card round). You can only join LND or TNS queues until Monday.'
+        ? 'You already won Fragment Card this week (card round). You can still join LND and TNS queues until Monday.'
         : `You already won ${card.type} this week (marked with the green check). Losers can bid again; winners cannot until Monday.`;
     throw clientError(400, msg, {
       code: 'already_won_type_this_week',
@@ -352,30 +391,74 @@ export async function publicAddBidToQueue(pool, body) {
     });
   }
 
-  const membersNext = existing
-    ? state.members
-    : [...state.members, { id: mid, name: raw, role: 'Member' }];
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
 
-  const itemsNext = state.items.map((it) => {
-    if (it.id !== tid) return it;
-    if (it.interestedMemberIds.includes(mid)) return it;
-    return {
-      ...it,
-      interestedMemberIds: [...it.interestedMemberIds, mid],
-    };
-  });
+    if (await itemQueueHasIgn(conn, tid, ignLower)) {
+      throw clientError(400, 'Already in this queue', {
+        code: 'already_listed',
+        extra: { itemName: card.name },
+      });
+    }
 
-  await replaceFullState(pool, {
-    items: itemsNext,
-    members: membersNext,
-    dataVersion: state.dataVersion,
-    winnerShortlistUiEnabled: state.winnerShortlistUiEnabled === true,
-    shuffleLocked: state.shuffleLocked === true,
-    eventMode: state.eventMode ?? defaultEventMode(),
-    rewardRank: state.rewardRank ?? defaultRewardRank(),
-    rewardItemCounts: state.rewardItemCounts ?? { fragment: 2, lnd: 30, tns: 50 },
-    freeDrawChosenByItemId: state.freeDrawChosenByItemId ?? {},
-  });
+    const memberId = await findOrCreateActiveMemberId(conn, raw);
+
+    const [posRows] = await conn.query(
+      'SELECT COALESCE(MAX(position), -1) + 1 AS nextPos FROM item_queue WHERE item_id = ?',
+      [tid]
+    );
+    const nextPos = Number(posRows[0]?.nextPos ?? 0);
+
+    await conn.query(
+      'INSERT INTO item_queue (item_id, member_id, position) VALUES (?, ?, ?)',
+      [tid, memberId, nextPos]
+    );
+
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback().catch(() => {});
+    if (e.statusCode) throw e;
+    throw e;
+  } finally {
+    conn.release();
+  }
+
+  return getFullState(pool);
+}
+
+/** Remove one member from a single item queue (roster row stays active). */
+export async function removeMemberFromItemQueue(pool, itemId, memberId) {
+  const tid = typeof itemId === 'string' ? itemId.trim() : '';
+  const id =
+    typeof memberId === 'number' && Number.isInteger(memberId)
+      ? memberId
+      : parseInt(String(memberId ?? '').trim(), 10);
+  if (!tid) {
+    const err = new Error('Item id is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!Number.isInteger(id) || id <= 0) {
+    const err = new Error('Invalid member id');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const [itemRows] = await pool.query(
+    'SELECT id FROM auction_items WHERE id = ? LIMIT 1',
+    [tid]
+  );
+  if (!Array.isArray(itemRows) || itemRows.length === 0) {
+    const err = new Error('Item not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  await pool.query('DELETE FROM item_queue WHERE item_id = ? AND member_id = ?', [
+    tid,
+    id,
+  ]);
 
   return getFullState(pool);
 }
@@ -473,7 +556,7 @@ export async function replaceFullState(pool, body) {
         (x) => String(x.id) === String(memberId)
       );
       const ignN = normalizeIgn(m?.name ?? '');
-      if (memberHasTypeWinThisWeek(nextWeeklyWins, ignN, it.type)) {
+      if (weeklyTypeWinBlocksQueueJoin(body.eventMode, it.type, nextWeeklyWins, ignN)) {
         const label = m?.name ?? memberId;
         const err = new Error(
           `Cannot save: "${label}" already won ${it.type} this week (green check). Clears Monday.`

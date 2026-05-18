@@ -101,7 +101,7 @@ export function swal2AlreadyWonTypeThisWeek(args: {
   const i = escapeHtml(ign);
   const n = escapeHtml(itemName);
   const emperiumNote = emperiumFragmentCardWinner
-    ? `<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Under <strong>Emperium Overrun</strong>, puwede ka pa ring mag-queue sa <strong>LND</strong> o <strong>TNS</strong> hanggang mag-Monday reset — hindi na sa Fragment Card.</p>`
+    ? `<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Under <strong>Emperium Overrun</strong>, puwede ka pa ring mag-queue sa <strong>LND</strong> at <strong>TNS</strong> (pareho) hanggang mag-Monday reset — hindi na sa Fragment Card.</p>`
     : '';
   return Swal.fire({
     ...darkShell,
@@ -200,7 +200,7 @@ export function swal2ConfirmSaveEventMode(
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
     html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Switch from <strong>${c}</strong> to <strong>${n}</strong>?</p>
-<p style="margin:1rem 0 0;line-height:1.55;font-size:14px;color:#94a3b8;text-align:center">Public queue rules will follow this mode (for example, Emperium allows one Fragment Card list and one LND or TNS list per bidder).</p>`,
+<p style="margin:1rem 0 0;line-height:1.55;font-size:14px;color:#94a3b8;text-align:center">Public queue rules will follow this mode (for example, Emperium allows one Fragment Card list plus one LND list and one TNS list per bidder).</p>`,
     showCancelButton: true,
     confirmButtonText: 'Save',
     cancelButtonText: 'Cancel',
@@ -218,6 +218,27 @@ export function swal2EventModeSaved(mode: WeeklyEventType): Promise<void> {
     html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Active mode is now <strong>${m}</strong>.</p>`,
     confirmButtonText: 'OK',
   }).then(() => undefined);
+}
+
+/** Confirm removing a bidder from one auction card queue only. */
+export function swal2ConfirmRemoveFromQueue(
+  ign: string,
+  itemName: string
+): Promise<boolean> {
+  const i = escapeHtml(ign);
+  const n = escapeHtml(itemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'warning',
+    title: 'Remove from this queue?',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Remove <strong>${i}</strong> from <strong>${n}</strong> only. Queues on other cards (LND, TNS, Fragment Card, etc.) stay the same.</p>`,
+    showCancelButton: true,
+    confirmButtonText: 'Remove from queue',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#dc2626',
+  }).then((r) => Boolean(r.isConfirmed));
 }
 
 /** Confirm removing a bidder from the roster (soft-delete on server). */
