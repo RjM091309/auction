@@ -2,7 +2,7 @@ import type { GuildRank, ItemType } from '../types';
 
 /**
  * Current game reward presets by rank:
- * Bronze => Card=2, LND=30, TNS=50 items; Emperium overrun => Card=20, LND=150, TNS=170.
+ * Bronze => Card=2, Feathers=80 items; Emperium overrun => Card=20, Feathers=320.
  */
 /** Ranks shown in Winner set limit (Bronze guild rewards vs Emperium overrun). */
 export const GUILD_RANK_OPTIONS: GuildRank[] = ['Bronze', 'Emperium overrun'];
@@ -10,15 +10,13 @@ export const GUILD_RANK_OPTIONS: GuildRank[] = ['Bronze', 'Emperium overrun'];
 const TOTAL_ITEMS_BY_RANK_AND_TYPE: Record<GuildRank, Record<ItemType, number>> = {
   Bronze: {
     'Fragment Card': 2,
-    LND: 30,
-    TNS: 50,
+    Feathers: 80,
     'Ancient Item': 1,
     Other: 1,
   },
   'Emperium overrun': {
     'Fragment Card': 20,
-    LND: 150,
-    TNS: 170,
+    Feathers: 320,
     'Ancient Item': 1,
     Other: 1,
   },
@@ -34,7 +32,7 @@ export function totalItemsForTypeByRank(type: ItemType, rank: GuildRank = 'Bronz
   return TOTAL_ITEMS_BY_RANK_AND_TYPE[rank]?.[type] ?? 1;
 }
 
-/** LND/TNS: items per full winner slot (page unit). Emperium overrun uses 8; guild rank uses 4. */
+/** Feathers: items per full winner slot (page unit). Emperium overrun uses 8; guild rank uses 4. */
 export function featherItemsPerWinnerUnit(rank: GuildRank): number {
   return rank === 'Emperium overrun' ? 8 : 4;
 }
@@ -42,7 +40,7 @@ export function featherItemsPerWinnerUnit(rank: GuildRank): number {
 /** Game rule: feather types use 4 (Bronze) or 8 (Emperium overrun) items per winner slot. */
 export function totalPagesForTypeByRank(type: ItemType, rank: GuildRank = 'Bronze'): number {
   const items = totalItemsForTypeByRank(type, rank);
-  if (type === 'LND' || type === 'TNS') {
+  if (type === 'Feathers') {
     const u = featherItemsPerWinnerUnit(rank);
     return Math.max(0, Math.floor(items / u));
   }
@@ -50,7 +48,7 @@ export function totalPagesForTypeByRank(type: ItemType, rank: GuildRank = 'Bronz
 }
 
 export function freeItemsForTypeByRank(type: ItemType, rank: GuildRank = 'Bronze'): number {
-  if (type !== 'LND' && type !== 'TNS') return 0;
+  if (type !== 'Feathers') return 0;
   const items = totalItemsForTypeByRank(type, rank);
   const u = featherItemsPerWinnerUnit(rank);
   return Math.max(0, items % u);
@@ -75,7 +73,7 @@ export function winnerSlotsFromTotalItems(
   rank: GuildRank = 'Bronze'
 ): number {
   const n = Math.max(0, Math.floor(totalItems));
-  if (type === 'LND' || type === 'TNS') {
+  if (type === 'Feathers') {
     const u = featherItemsPerWinnerUnit(rank);
     return Math.max(0, Math.floor(n / u));
   }
@@ -95,7 +93,7 @@ export function freeItemsFromTotalItems(
   totalItems: number,
   rank: GuildRank = 'Bronze'
 ): number {
-  if (type !== 'LND' && type !== 'TNS') return 0;
+  if (type !== 'Feathers') return 0;
   const n = Math.max(0, Math.floor(totalItems));
   const u = featherItemsPerWinnerUnit(rank);
   return n % u;
@@ -110,22 +108,22 @@ export function featherPageCountBeforePartialFree(
   totalItems: number,
   rank: GuildRank
 ): number {
-  if (type !== 'LND' && type !== 'TNS') return 0;
+  if (type !== 'Feathers') return 0;
   const slots = winnerSlotsFromTotalItems(type, totalItems, rank);
   return rank === 'Emperium overrun' ? slots * 2 : slots;
 }
 
 /**
  * Consecutive general “P#” slots (each P = one 4-item page) this feather pool occupies.
- * Advances the shared Fragment+LND+TNS counter so the next item’s labels do not overlap.
+ * Advances the shared Fragment+Feathers counter so the next item’s labels do not overlap.
  */
 export function featherRewardSpanFourItemPages(type: ItemType, totalItems: number): number {
-  if (type !== 'LND' && type !== 'TNS') return 0;
+  if (type !== 'Feathers') return 0;
   const n = Math.max(0, Math.floor(totalItems));
   return Math.ceil(n / 4);
 }
 
-/** Tooltip for shortlist badges (LND/TNS page ranges, Fragment I# per page + general P#, etc.). */
+/** Tooltip for shortlist badges (Feathers page ranges, Fragment I# per page + general P#, etc.). */
 export function winnerAssignmentLabelTitle(label: string): string {
   const s = label.trim();
   const fragHyphen = /^I(\d+)\s*-\s*P(\d+)$/.exec(s);
@@ -178,7 +176,7 @@ export function computeWinnerAssignmentLabelsFromItems(
 ): string[] {
   const bidders = Math.max(0, Math.floor(bidderCount));
   if (bidders <= 0) return [];
-  if (type === 'LND' || type === 'TNS') {
+  if (type === 'Feathers') {
     const totalSlots = winnerSlotsFromTotalItems(type, totalItems, rank);
     const winningBidders = Math.min(totalSlots, bidders);
     if (winningBidders <= 0) return [];
@@ -240,7 +238,7 @@ export function computeWinnerAssignmentLabels(
       ? Math.max(0, Math.floor(bidderCount))
       : null;
 
-  if (type === 'LND' || type === 'TNS') {
+  if (type === 'Feathers') {
     const totalSlots = totalPagesForTypeByRank(type, rank);
     const winningBidders =
       bidders == null ? totalSlots : Math.min(totalSlots, bidders);

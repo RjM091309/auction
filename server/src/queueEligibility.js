@@ -3,6 +3,7 @@
  */
 
 import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
+import { findMatchingIgnName, canonicalIgnKey } from './ignQueueIdentity.js';
 
 /** @param {string | undefined} m */
 export function defaultEventModeForQueues(m) {
@@ -15,19 +16,19 @@ export function shuffleLockClosesPublicSignup(shuffleLocked, eventMode) {
   return defaultEventModeForQueues(eventMode) !== 'Emperium Overrun';
 }
 
-/** Weekly win / log lock — temporarily disabled so everyone can bid. */
+/** Weekly win / log lock disabled — winners can bid again next auction. */
 export function weeklyTypeWinBlocksQueueJoin(_eventMode, _itemType, _wins, _ignRaw) {
   return false;
 }
 
 /** @param {string} t */
 export function isEmperiumCenterType(t) {
-  return t === 'Fragment Card' || t === 'LND' || t === 'TNS';
+  return t === 'Fragment Card' || t === 'Feathers' || t === 'LND' || t === 'TNS';
 }
 
 /** @param {string} t */
 export function isFeatherType(t) {
-  return t === 'LND' || t === 'TNS';
+  return t === 'Feathers' || t === 'LND' || t === 'TNS';
 }
 
 /** @param {string} targetType @param {string} otherType */
@@ -37,7 +38,7 @@ export function emperiumSecondQueueBlocks(targetType, otherType) {
   }
   if (targetType === 'Fragment Card' && otherType === 'Fragment Card') return true;
   if (isFeatherType(targetType) && isFeatherType(otherType)) {
-    return targetType === otherType;
+    return true;
   }
   return false;
 }
@@ -46,26 +47,44 @@ export function emperiumSecondQueueBlocks(targetType, otherType) {
  * @param {unknown} eventMode
  * @param {{ id: string, status: string, type: string, interestedMemberIds: number[] }[]} items
  * @param {{ id: number, name: string }[]} members
+ * @param {string} ignRaw
+ * @param {string} targetItemId
+ * @param {string} targetType
  * @param {{ skipHiddenBlockingItems?: boolean } | undefined} [opts]
  */
 export function findOtherActiveQueueBlocking(
   eventMode,
   items,
   members,
-  ignLower,
+  ignRaw,
   targetItemId,
   targetType,
   opts
 ) {
-  const norm = String(ignLower ?? '')
-    .trim()
-    .toLowerCase();
-  const queueHasIgn = (it) =>
-    it.interestedMemberIds.some((mid) => {
-      const n = members.find((m) => m.id === mid)?.name;
-      return n != null && String(n).trim().toLowerCase() === norm;
-    });
+  const hit = findOtherActiveQueueBlockingWithMatch(
+    eventMode,
+    items,
+    members,
+    ignRaw,
+    targetItemId,
+    targetType,
+    opts
+  );
+  return hit ? hit.item : null;
+}
 
+/**
+ * @returns {{ item: object, matchedIgn: string } | null}
+ */
+export function findOtherActiveQueueBlockingWithMatch(
+  eventMode,
+  items,
+  members,
+  ignRaw,
+  targetItemId,
+  targetType,
+  opts
+) {
   const mode = defaultEventModeForQueues(eventMode);
 
   const skipHidden =
@@ -74,24 +93,31 @@ export function findOtherActiveQueueBlocking(
   for (const it of items) {
     if (it.status !== 'active' || it.id === targetItemId) continue;
     if (skipHidden && isAuctionItemHiddenForPublic(it)) continue;
-    if (!queueHasIgn(it)) continue;
+
+    const queuedNames = [];
+    for (const mid of it.interestedMemberIds) {
+      const n = members.find((m) => m.id === mid)?.name;
+      if (n != null && String(n).trim()) queuedNames.push(n);
+    }
+    if (queuedNames.length === 0) continue;
+    const matchedIgn = findMatchingIgnName(ignRaw, queuedNames);
+    if (!matchedIgn) continue;
 
     if (mode !== 'Emperium Overrun') {
-      return it;
+      return { item: it, matchedIgn };
     }
-    if (emperiumSecondQueueBlocks(targetType, it.type)) return it;
+    if (emperiumSecondQueueBlocks(targetType, it.type)) {
+      return { item: it, matchedIgn };
+    }
+    if (
+      isEmperiumCenterType(targetType) &&
+      isEmperiumCenterType(it.type) &&
+      canonicalIgnKey(ignRaw) !== canonicalIgnKey(matchedIgn)
+    ) {
+      return { item: it, matchedIgn };
+    }
   }
   return null;
-}
-
-/** @param {{ ign: string, t: string }[]} wins @param {string} ignRaw @param {string} itemType */
-function ignHasWeeklyTypeWin(wins, ignRaw, itemType) {
-  if (!Array.isArray(wins) || wins.length === 0) return false;
-  const ign = String(ignRaw ?? '')
-    .trim()
-    .toLowerCase();
-  if (!ign) return false;
-  return wins.some((w) => w.ign === ign && w.t === itemType);
 }
 
 /**

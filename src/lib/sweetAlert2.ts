@@ -22,6 +22,18 @@ function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
+function shouldShowSimilarIgnNote(ign: string, matchedIgn?: string): boolean {
+  if (!matchedIgn) return false;
+  return ign.trim().toLowerCase() !== matchedIgn.trim().toLowerCase();
+}
+
+/** Extra line when blocked due to spacing/typo variant of an existing queue name. */
+function similarIgnNoteHtml(ign: string, matchedIgn: string): string {
+  const i = escapeHtml(ign);
+  const m = escapeHtml(matchedIgn);
+  return `<p style="margin:0 0 1rem;line-height:1.55;font-size:14px;color:#fbbf24;text-align:center">Already queued as <strong>${m}</strong> — each character gets one slot only (includes typos, spacing, or trailing numbers like <strong>${i}</strong>).</p>`;
+}
+
 /** After adding a name to an auction card queue */
 export function swal2QueueMemberAdded(args: {
   ign: string;
@@ -51,17 +63,26 @@ export function swal2QueueMemberAdded(args: {
 export function swal2QueueAlreadyOnAnotherItem(args: {
   ign: string;
   otherItemName: string;
+  /** Existing queue name that matched (spacing/typo variant). */
+  matchedIgn?: string;
 }): Promise<void> {
-  const { ign, otherItemName } = args;
+  const { ign, otherItemName, matchedIgn } = args;
   const i = escapeHtml(ign);
   const o = escapeHtml(otherItemName);
+  const similar =
+    matchedIgn && shouldShowSimilarIgnNote(ign, matchedIgn)
+      ? similarIgnNoteHtml(ign, matchedIgn)
+      : '';
   return Swal.fire({
     ...darkShell,
     icon: 'error',
-    title: 'Already bidding on another item',
+    title: matchedIgn && shouldShowSimilarIgnNote(ign, matchedIgn)
+      ? 'Similar name already queued'
+      : 'Already bidding on another item',
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
     html: `<div style="text-align:center;margin:0;padding:0">
+${similar}
 <p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Each character can only join <strong>one</strong> active bid queue at a time.</p>
 <p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is already listed for:</p>
 <div style="display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
@@ -94,14 +115,14 @@ export function swal2WinnerPoolFull(args: {
 export function swal2AlreadyWonTypeThisWeek(args: {
   ign: string;
   itemName: string;
-  /** Emperium Overrun: nanalo na sa Fragment Card — LND/TNS lang hanggang Monday. */
+  /** Emperium Overrun: nanalo na sa Fragment Card — Feathers lang hanggang Monday. */
   emperiumFragmentCardWinner?: boolean;
 }): Promise<void> {
   const { ign, itemName, emperiumFragmentCardWinner } = args;
   const i = escapeHtml(ign);
   const n = escapeHtml(itemName);
   const emperiumNote = emperiumFragmentCardWinner
-    ? `<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Under <strong>Emperium Overrun</strong>, puwede ka pa ring mag-queue sa <strong>LND</strong> at <strong>TNS</strong> (pareho) hanggang mag-Monday reset — hindi na sa Fragment Card.</p>`
+    ? `<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Under <strong>Emperium Overrun</strong>, puwede ka pa ring mag-queue sa <strong>Feathers</strong> hanggang mag-Monday reset — hindi na sa Fragment Card.</p>`
     : '';
   return Swal.fire({
     ...darkShell,
@@ -111,7 +132,7 @@ export function swal2AlreadyWonTypeThisWeek(args: {
     customClass: { htmlContainer: 'swal-queue-html' },
     html: `<div style="text-align:center;margin:0;padding:0">
 ${emperiumNote}
-<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Only <strong>winners</strong> are blocked from bidding again on the same item type (LND, TNS, …) this week — after the admin clicks the <strong>green check</strong>. Anyone <strong>not</strong> checked can still bid.</p>
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Only <strong>winners</strong> are blocked from bidding again on the same item type (Feathers, …) this week — after the admin clicks the <strong>green check</strong>. Anyone <strong>not</strong> checked can still bid.</p>
 <p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is recorded as a winner for:</p>
 <div style="margin-top:1rem;display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
 <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
@@ -127,18 +148,31 @@ ${emperiumNote}
 export function swal2QueueAlreadyListed(args: {
   ign: string;
   itemName: string;
+  matchedIgn?: string;
 }): Promise<void> {
-  const { ign, itemName } = args;
+  const { ign, itemName, matchedIgn } = args;
   const i = escapeHtml(ign);
   const n = escapeHtml(itemName);
+  const similar =
+    matchedIgn && shouldShowSimilarIgnNote(ign, matchedIgn)
+      ? similarIgnNoteHtml(ign, matchedIgn)
+      : '';
+  const listedLine =
+    matchedIgn && shouldShowSimilarIgnNote(ign, matchedIgn)
+      ? `<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">You cannot queue the variant <strong>${i}</strong> on this item again.</p>`
+      : `<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is already on the list for this item.</p>`;
   return Swal.fire({
     ...darkShell,
     icon: 'info',
-    title: 'Already in this queue',
+    title:
+      matchedIgn && shouldShowSimilarIgnNote(ign, matchedIgn)
+        ? 'Similar name already in queue'
+        : 'Already in this queue',
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
     html: `<div style="text-align:center;margin:0;padding:0">
-<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is already on the list for this item.</p>
+${similar}
+${listedLine}
 <div style="display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
 <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
 <div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${n}</div>
@@ -175,13 +209,31 @@ export function swal2MemberNameUpdated(args: {
 }
 
 /** Another roster entry already uses this IGN */
-export function swal2NameAlreadyTaken(): Promise<void> {
+export function swal2NameAlreadyTaken(args?: {
+  ign?: string;
+  matchedIgn?: string;
+}): Promise<void> {
+  const ign = args?.ign?.trim() ?? '';
+  const matchedIgn = args?.matchedIgn?.trim();
+  const similar =
+    ign && matchedIgn && shouldShowSimilarIgnNote(ign, matchedIgn)
+      ? similarIgnNoteHtml(ign, matchedIgn)
+      : '';
   return Swal.fire({
     ...darkShell,
     icon: 'error',
-    title: 'Name already in use',
-    text:
-      'Another roster row already uses this IGN (same person listed twice). Remove the duplicate member, or refresh the page—the app merges duplicate names when loading state.',
+    title:
+      ign && matchedIgn && shouldShowSimilarIgnNote(ign, matchedIgn)
+        ? 'Similar name already in roster'
+        : 'Name already in use',
+    width: similar ? 'min(28rem, calc(100vw - 2rem))' : undefined,
+    customClass: similar ? { htmlContainer: 'swal-queue-html' } : undefined,
+    html: similar
+      ? `<div style="text-align:center;margin:0;padding:0">${similar}<p style="margin:0;line-height:1.55;font-size:14px;color:#94a3b8">Use the existing member or merge duplicates in the roster.</p></div>`
+      : undefined,
+    text: similar
+      ? undefined
+      : 'Another roster row already uses this IGN (same person listed twice). Remove the duplicate member, or refresh the page—the app merges duplicate names when loading state.',
     confirmButtonText: 'OK',
   }).then(() => undefined);
 }
@@ -200,7 +252,7 @@ export function swal2ConfirmSaveEventMode(
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
     html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Switch from <strong>${c}</strong> to <strong>${n}</strong>?</p>
-<p style="margin:1rem 0 0;line-height:1.55;font-size:14px;color:#94a3b8;text-align:center">Public queue rules will follow this mode (for example, Emperium allows one Fragment Card list plus one LND list and one TNS list per bidder).</p>`,
+<p style="margin:1rem 0 0;line-height:1.55;font-size:14px;color:#94a3b8;text-align:center">Public queue rules will follow this mode (for example, Emperium allows one Fragment Card list plus one Feathers list per bidder).</p>`,
     showCancelButton: true,
     confirmButtonText: 'Save',
     cancelButtonText: 'Cancel',
@@ -233,7 +285,7 @@ export function swal2ConfirmRemoveFromQueue(
     title: 'Remove from this queue?',
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
-    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Remove <strong>${i}</strong> from <strong>${n}</strong> only. Queues on other cards (LND, TNS, Fragment Card, etc.) stay the same.</p>`,
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Remove <strong>${i}</strong> from <strong>${n}</strong> only. Queues on other cards (Feathers, Fragment Card, etc.) stay the same.</p>`,
     showCancelButton: true,
     confirmButtonText: 'Remove from queue',
     cancelButtonText: 'Cancel',
@@ -293,7 +345,7 @@ export function swal2ConfirmResetShuffleUnmark(): Promise<boolean> {
   }).then((r) => Boolean(r.isConfirmed));
 }
 
-/** Confirm free-draw shuffle for one LND/TNS card (below shortlist, one random pick). */
+/** Confirm free-draw shuffle for one Feathers card (below shortlist, one random pick). */
 export function swal2ConfirmShuffleDrawFree(args: {
   itemName: string;
 }): Promise<boolean> {
@@ -316,20 +368,16 @@ export function swal2ConfirmShuffleDrawFree(args: {
 export function swal2ConfirmShuffleAllQueues(args: {
   totalParticipants: number;
   fragmentParticipants: number;
-  lndParticipants: number;
-  tnsParticipants: number;
+  feathersParticipants: number;
   fragmentLimit: number;
-  lndLimit: number;
-  tnsLimit: number;
+  feathersLimit: number;
 }): Promise<boolean> {
   const {
     totalParticipants,
     fragmentParticipants,
-    lndParticipants,
-    tnsParticipants,
+    feathersParticipants,
     fragmentLimit,
-    lndLimit,
-    tnsLimit,
+    feathersLimit,
   } = args;
   return Swal.fire({
     ...darkShell,
@@ -342,16 +390,14 @@ export function swal2ConfirmShuffleAllQueues(args: {
 <div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box;margin-bottom:0.75rem">
 <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.5rem">Bidder breakdown</div>
 <div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Puppet Frag Card</span><strong>${fragmentParticipants}</strong></div>
-<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>LND</span><strong>${lndParticipants}</strong></div>
-<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>TNS</span><strong>${tnsParticipants}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Feathers</span><strong>${feathersParticipants}</strong></div>
 <div style="height:1px;background:#334155;margin:0.5rem 0"></div>
 <div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>Total bidders</span><strong>${totalParticipants}</strong></div>
 </div>
 <div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box">
 <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.5rem">Winner set limit</div>
 <div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Puppet Frag Card</span><strong>${fragmentLimit}</strong></div>
-<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>LND</span><strong>${lndLimit}</strong></div>
-<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>TNS</span><strong>${tnsLimit}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>Feathers</span><strong>${feathersLimit}</strong></div>
 </div>
 </div>`,
     showCancelButton: true,
@@ -388,12 +434,10 @@ export function swal2SaveError(message: string): Promise<void> {
 /** After updating winner limits in admin modal. */
 export function swal2WinnerLimitsUpdated(args: {
   fragmentWinners: number;
-  lndWinners: number;
-  tnsWinners: number;
+  feathersWinners: number;
 }): Promise<void> {
   const f = String(args.fragmentWinners);
-  const l = String(args.lndWinners);
-  const t = String(args.tnsWinners);
+  const feathers = String(args.feathersWinners);
   return Swal.fire({
     ...darkShell,
     icon: 'success',
@@ -404,8 +448,7 @@ export function swal2WinnerLimitsUpdated(args: {
 <p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Updated winning bidder slots for this round.</p>
 <div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box">
 <div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Puppet Frag Card winners</span><strong>${f}</strong></div>
-<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>LND winners</span><strong>${l}</strong></div>
-<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>TNS winners</span><strong>${t}</strong></div>
+<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>Feathers winners</span><strong>${feathers}</strong></div>
 </div>
 </div>`,
     confirmButtonText: 'OK',

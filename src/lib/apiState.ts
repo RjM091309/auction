@@ -11,8 +11,13 @@ import type {
 import { AUCTION_DATA_VERSION } from '../data/auctionDefaults';
 import { sortBidderStateLogNewestFirst } from './bidderStateLogUi';
 import { dedupeRosterMembersByIgn } from './dedupeRosterMembersByIgn';
-import { parseGuildRank, totalItemsForTypeByRank } from './pageAssignment';
+import { normalizeQueuesForEventMode } from './dedupeIgnAcrossQueues';
+import { parseGuildRank } from './pageAssignment';
 import { stripEmperiumCardQueuesAfterFragmentWeeklyWin } from './queueEligibility';
+import {
+  migrateFeatherItems,
+  parseRewardItemCounts,
+} from './featherMigration';
 
 /** Absolute API origin, or empty string to use same origin (Vite `/api` proxy in dev). */
 export function apiUrl(path: string): string {
@@ -99,17 +104,6 @@ export function parseAuctionState(json: unknown): AuctionState | null {
   const shuffleLocked = o.shuffleLocked === true;
 
   let weeklyTypeWins: WeeklyTypeWin[] = [];
-  const rawWins = o.weeklyTypeWins;
-  if (Array.isArray(rawWins)) {
-    for (const row of rawWins) {
-      if (!row || typeof row !== 'object') continue;
-      const r = row as Record<string, unknown>;
-      const ign =
-        typeof r.ign === 'string' ? r.ign.trim().toLowerCase() : '';
-      const t = typeof r.t === 'string' ? r.t : '';
-      if (ign && t) weeklyTypeWins.push({ ign, t });
-    }
-  }
 
   let winnerMarkLog: WinnerMarkLogEntry[] | undefined;
   const rawLog = o.winnerMarkLog;
@@ -228,21 +222,10 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     v === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
   const eventMode = parseEventType(o.eventMode);
   const rewardRank = parseGuildRank(o.rewardRank);
-  const parseCount = (v: unknown, fallback: number) =>
-    Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : fallback;
-  const rawCounts = o.rewardItemCounts;
-  const rewardItemCountsObj =
-    rawCounts && typeof rawCounts === 'object'
-      ? (rawCounts as Record<string, unknown>)
-      : {};
-  const rewardItemCounts: RewardItemCounts = {
-    fragment: parseCount(
-      rewardItemCountsObj.fragment,
-      totalItemsForTypeByRank('Fragment Card', rewardRank)
-    ),
-    lnd: parseCount(rewardItemCountsObj.lnd, totalItemsForTypeByRank('LND', rewardRank)),
-    tns: parseCount(rewardItemCountsObj.tns, totalItemsForTypeByRank('TNS', rewardRank)),
-  };
+  const rewardItemCounts: RewardItemCounts = parseRewardItemCounts(
+    o.rewardItemCounts,
+    rewardRank
+  );
 
   let freeDrawChosenByItemId: Record<string, number> | undefined;
   const rawFd = o.freeDrawChosenByItemId;
@@ -261,23 +244,25 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     freeDrawChosenByItemId = fd;
   }
 
-  return stripEmperiumCardQueuesAfterFragmentWeeklyWin(
-    dedupeRosterMembersByIgn({
-      items,
-      members,
-      dataVersion,
-      winnerShortlistUiEnabled,
-      shuffleLocked,
-      weeklyTypeWins,
-      eventMode,
-      rewardRank,
-      rewardItemCounts,
-      ...(winnerMarkLog ? { winnerMarkLog } : {}),
-      ...(bidderStateLog ? { bidderStateLog } : {}),
-      ...(freeDrawChosenByItemId !== undefined
-        ? { freeDrawChosenByItemId }
-        : {}),
-    })
+  return normalizeQueuesForEventMode(
+    stripEmperiumCardQueuesAfterFragmentWeeklyWin(
+      dedupeRosterMembersByIgn({
+        items: migrateFeatherItems(items),
+        members,
+        dataVersion,
+        winnerShortlistUiEnabled,
+        shuffleLocked,
+        weeklyTypeWins,
+        eventMode,
+        rewardRank,
+        rewardItemCounts,
+        ...(winnerMarkLog ? { winnerMarkLog } : {}),
+        ...(bidderStateLog ? { bidderStateLog } : {}),
+        ...(freeDrawChosenByItemId !== undefined
+          ? { freeDrawChosenByItemId }
+          : {}),
+      })
+    )
   );
 }
 
@@ -339,7 +324,11 @@ export class PublicAddBidError extends Error {
   constructor(
     message: string,
     public readonly code?: string,
-    public readonly extra?: { itemName?: string; otherItemName?: string }
+    public readonly extra?: {
+      itemName?: string;
+      otherItemName?: string;
+      matchedIgn?: string;
+    }
   ) {
     super(message);
     this.name = 'PublicAddBidError';
@@ -395,7 +384,7 @@ export async function persistAuctionState(
     shuffleLocked: state.shuffleLocked === true,
     eventMode: state.eventMode ?? 'Emperium Overrun',
     rewardRank: state.rewardRank ?? 'Bronze',
-    rewardItemCounts: state.rewardItemCounts ?? { fragment: 2, lnd: 30, tns: 50 },
+    rewardItemCounts: state.rewardItemCounts ?? { fragment: 2, feathers: 80 },
     freeDrawChosenByItemId: state.freeDrawChosenByItemId ?? {},
   };
   const res = await fetch(apiUrl('/api/state'), {

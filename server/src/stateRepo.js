@@ -1,20 +1,20 @@
 import { DATA_VERSION } from './defaults.js';
-import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
 import {
-  findOtherActiveQueueBlocking,
+  findMatchingIgnName,
+  ignMatchesForQueueIdentity,
+  matchingIgnOnQueueItem,
+  queueItemHasMatchingIgn,
+  findMemberByIgnIdentity,
+} from './ignQueueIdentity.js';
+import {
+  findOtherActiveQueueBlockingWithMatch,
   shuffleLockClosesPublicSignup,
   stripEmperiumCardQueuesAfterFragmentWeeklyWin,
-  weeklyTypeWinBlocksQueueJoin,
 } from './queueEligibility.js';
 import { maxRecordedWinnersForItem } from './winnerPoolCaps.js';
 import {
   rolloverWeeklyWinsIfNewWeek,
-  loadWeeklyTypeWins,
   saveWeeklyTypeWins,
-  applyWeeklyWinnerDiff,
-  mergeCompletedItemWinsInto,
-  mergeRecordedWinnerNamesInto,
-  normalizeIgn,
 } from './weeklyTypeWins.js';
 import { getAuctionWeekMondayKey } from './auctionWeek.js';
 import { loadWinnerMarkLog, appendWinnerMarkLog } from './winnerMarkLog.js';
@@ -22,6 +22,7 @@ import {
   loadBidderStateLog,
   appendBidderStateLog,
 } from './bidderStateLog.js';
+import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
 
 const EVENT_MODE_META_KEY = 'event_mode';
 const REWARD_RANK_META_KEY = 'reward_rank';
@@ -53,7 +54,7 @@ function parseRewardRank(raw) {
   return sanitizeRewardRank(typeof raw === 'string' ? raw : String(raw));
 }
 function parseRewardItemCounts(raw) {
-  const fallback = { fragment: 2, lnd: 30, tns: 50 };
+  const fallback = { fragment: 2, feathers: 80 };
   if (raw == null || raw === '') return fallback;
   try {
     const s = typeof raw === 'string' ? raw : String(raw);
@@ -61,11 +62,13 @@ function parseRewardItemCounts(raw) {
     if (!j || typeof j !== 'object') return fallback;
     const toInt = (v, d) =>
       Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d;
-    return {
-      fragment: toInt(j.fragment, fallback.fragment),
-      lnd: toInt(j.lnd, fallback.lnd),
-      tns: toInt(j.tns, fallback.tns),
-    };
+    const fragment = toInt(j.fragment, fallback.fragment);
+    if (j.feathers != null && j.feathers !== '') {
+      return { fragment, feathers: toInt(j.feathers, fallback.feathers) };
+    }
+    const lnd = toInt(j.lnd, 30);
+    const tns = toInt(j.tns, 50);
+    return { fragment, feathers: lnd + tns };
   } catch {
     return fallback;
   }
@@ -226,7 +229,7 @@ export async function getFullState(pool) {
   );
   if (shuffleLockRows[0]?.value === '1') shuffleLocked = true;
 
-  const weeklyTypeWins = await loadWeeklyTypeWins(pool);
+  const weeklyTypeWins = [];
   const winnerMarkLog = await loadWinnerMarkLog(pool);
   const bidderStateLog = await loadBidderStateLog(pool);
   const [eventRows] = await pool.query(
@@ -271,26 +274,41 @@ export async function getFullState(pool) {
   });
 }
 
-/** Find active roster row by IGN (case-insensitive) or create one. */
+/** Find active roster row by IGN (fuzzy) or create one. */
 async function findOrCreateActiveMemberId(conn, rawName) {
   const name = rawName.trim();
-  const ignLower = name.toLowerCase();
   const [rows] = await conn.query(
-    `SELECT id, active FROM members
-     WHERE LOWER(TRIM(name)) = ?
-     ORDER BY active DESC, id ASC`,
+    `SELECT id, name, active FROM members WHERE active = 1 ORDER BY id ASC`
+  );
+  if (Array.isArray(rows)) {
+    const matchName = findMatchingIgnName(
+      name,
+      rows.map((r) => String(r.name ?? ''))
+    );
+    if (matchName) {
+      const row = rows.find((r) =>
+        ignMatchesForQueueIdentity(String(r.name ?? ''), matchName)
+      );
+      if (row) return Number(row.id);
+    }
+  }
+
+  const ignLower = name.toLowerCase();
+  const [inactive] = await conn.query(
+    `SELECT id FROM members
+     WHERE active = 0 AND LOWER(TRIM(name)) = ?
+     ORDER BY id ASC LIMIT 1`,
     [ignLower]
   );
-  if (Array.isArray(rows) && rows.length > 0) {
-    const id = Number(rows[0].id);
-    if (rows[0].active !== 1) {
-      await conn.query('UPDATE members SET active = 1, name = ? WHERE id = ?', [
-        name,
-        id,
-      ]);
-    }
+  if (Array.isArray(inactive) && inactive.length > 0) {
+    const id = Number(inactive[0].id);
+    await conn.query('UPDATE members SET active = 1, name = ? WHERE id = ?', [
+      name,
+      id,
+    ]);
     return id;
   }
+
   const [ins] = await conn.query(
     'INSERT INTO members (name, role, active) VALUES (?, ?, 1)',
     [name, 'Member']
@@ -298,16 +316,21 @@ async function findOrCreateActiveMemberId(conn, rawName) {
   return Number(ins.insertId);
 }
 
-/** True if IGN is already queued on this item (active members only). */
-async function itemQueueHasIgn(conn, itemId, ignLower) {
+/** True if a matching IGN is already on this item queue. */
+async function itemQueueHasIgn(conn, itemId, ignRaw) {
   const [rows] = await conn.query(
-    `SELECT 1 AS ok FROM item_queue iq
+    `SELECT m.name FROM item_queue iq
      INNER JOIN members m ON m.id = iq.member_id AND m.active = 1
-     WHERE iq.item_id = ? AND LOWER(TRIM(m.name)) = ?
-     LIMIT 1`,
-    [itemId, ignLower]
+     WHERE iq.item_id = ?`,
+    [itemId]
   );
-  return Array.isArray(rows) && rows.length > 0;
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  return (
+    findMatchingIgnName(
+      ignRaw,
+      rows.map((r) => String(r.name ?? ''))
+    ) != null
+  );
 }
 
 /**
@@ -325,15 +348,12 @@ export async function publicAddBidToQueue(pool, body) {
   }
 
   const state = await getFullState(pool);
-  const weeklyWins = await loadWeeklyTypeWins(pool);
 
   if (shuffleLockClosesPublicSignup(state.shuffleLocked === true, state.eventMode)) {
     throw clientError(400, 'Queue signup is closed until the next reset', {
       code: 'shuffle_locked',
     });
   }
-
-  const ignLower = raw.toLowerCase();
 
   const card = state.items.find((it) => it.id === tid);
   if (!card) {
@@ -349,45 +369,31 @@ export async function publicAddBidToQueue(pool, body) {
     throw clientError(404, 'Item not found', { code: 'item_hidden' });
   }
 
-  const queueHasThisIgn = (it) =>
-    it.interestedMemberIds.some((mid) => {
-      const n = state.members.find((m) => m.id === mid)?.name;
-      return n != null && n.trim().toLowerCase() === ignLower;
-    });
-
-  if (queueHasThisIgn(card)) {
+  const matchedOnCard = matchingIgnOnQueueItem(card, state.members, raw);
+  if (matchedOnCard) {
     throw clientError(400, 'Already in this queue', {
       code: 'already_listed',
-      extra: { itemName: card.name },
+      extra: { itemName: card.name, matchedIgn: matchedOnCard },
     });
   }
 
   const eventMode = state.eventMode ?? defaultEventMode();
-  const otherCard = findOtherActiveQueueBlocking(
+  const otherBlock = findOtherActiveQueueBlockingWithMatch(
     eventMode,
     state.items,
     state.members,
-    ignLower,
+    raw,
     tid,
     card.type,
     { skipHiddenBlockingItems: true }
   );
-  if (otherCard) {
+  if (otherBlock) {
     throw clientError(400, 'Already on another item', {
       code: 'on_other_item',
-      extra: { otherItemName: otherCard.name },
-    });
-  }
-
-  if (weeklyTypeWinBlocksQueueJoin(state.eventMode, card.type, weeklyWins, raw)) {
-    const emperium = parseEventMode(state.eventMode) === 'Emperium Overrun';
-    const msg =
-      emperium && card.type === 'Fragment Card'
-        ? 'You already won Fragment Card this week (card round). You can still join LND and TNS queues until Monday.'
-        : `You already won ${card.type} this week (marked with the green check). Losers can bid again; winners cannot until Monday.`;
-    throw clientError(400, msg, {
-      code: 'already_won_type_this_week',
-      extra: { itemName: card.name },
+      extra: {
+        otherItemName: otherBlock.item.name,
+        matchedIgn: otherBlock.matchedIgn,
+      },
     });
   }
 
@@ -395,10 +401,20 @@ export async function publicAddBidToQueue(pool, body) {
   try {
     await conn.beginTransaction();
 
-    if (await itemQueueHasIgn(conn, tid, ignLower)) {
+    if (await itemQueueHasIgn(conn, tid, raw)) {
+      const [rows] = await conn.query(
+        `SELECT m.name FROM item_queue iq
+         INNER JOIN members m ON m.id = iq.member_id AND m.active = 1
+         WHERE iq.item_id = ?`,
+        [tid]
+      );
+      const matchedIgn = findMatchingIgnName(
+        raw,
+        (Array.isArray(rows) ? rows : []).map((r) => String(r.name ?? ''))
+      );
       throw clientError(400, 'Already in this queue', {
         code: 'already_listed',
-        extra: { itemName: card.name },
+        extra: { itemName: card.name, matchedIgn: matchedIgn ?? undefined },
       });
     }
 
@@ -522,16 +538,8 @@ export async function replaceFullState(pool, body) {
   const [oldItemRows] = await pool.query(
     `SELECT id, name, type, status, winner_name AS winnerName, winner_names_json AS winnerNamesJson FROM auction_items`
   );
-  const wins = await loadWeeklyTypeWins(pool);
-  const oldItems = oldItemRows.map((r) => ({
-    id: r.id,
-    type: r.type,
-    status: r.status,
-    winnerName: r.winnerName,
-  }));
-  let nextWeeklyWins = applyWeeklyWinnerDiff(oldItems, body.items, wins);
-  nextWeeklyWins = mergeCompletedItemWinsInto(body.items, nextWeeklyWins);
-  nextWeeklyWins = mergeRecordedWinnerNamesInto(body.items, nextWeeklyWins);
+  /** No weekly type lock — winners may bid again on the next auction (Fragment Card + Feathers). */
+  const nextWeeklyWins = [];
 
   for (const it of body.items) {
     const rec = it.recordedWinnerNames;
@@ -540,26 +548,6 @@ export async function replaceFullState(pool, body) {
       if (rec.length > cap) {
         const err = new Error(
           `Too many marked winners on "${it.name}" (${it.type}): max ${cap} (winner limit for this item)`
-        );
-        err.statusCode = 400;
-        throw err;
-      }
-    }
-  }
-
-  for (const it of body.items) {
-    if (it.status !== 'active') continue;
-    const ids = Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : [];
-    for (const memberId of ids) {
-      if (memberId == null || memberId === '') continue;
-      const m = body.members.find(
-        (x) => String(x.id) === String(memberId)
-      );
-      const ignN = normalizeIgn(m?.name ?? '');
-      if (weeklyTypeWinBlocksQueueJoin(body.eventMode, it.type, nextWeeklyWins, ignN)) {
-        const label = m?.name ?? memberId;
-        const err = new Error(
-          `Cannot save: "${label}" already won ${it.type} this week (green check). Clears Monday.`
         );
         err.statusCode = 400;
         throw err;
@@ -630,19 +618,32 @@ export async function replaceFullState(pool, body) {
       idRemap.set(String(m.id), newId);
     }
 
-    const memberIds = [
-      ...new Set(
-        body.members
-          .map((m) => idRemap.get(m.id) ?? idRemap.get(String(m.id)))
-          .filter((x) => typeof x === 'number' && !Number.isNaN(x) && x > 0)
-      ),
-    ];
+    const memberIds = new Set();
 
-    if (memberIds.length > 0) {
-      const ph = memberIds.map(() => '?').join(',');
+    for (const m of body.members) {
+      const cid = idRemap.get(m.id) ?? idRemap.get(String(m.id));
+      if (typeof cid === 'number' && !Number.isNaN(cid) && cid > 0) {
+        memberIds.add(cid);
+      }
+    }
+
+    for (const it of body.items) {
+      const ids = Array.isArray(it.interestedMemberIds)
+        ? it.interestedMemberIds
+        : [];
+      for (const memberId of ids) {
+        const resolved = resolveQueueMemberId(memberId, idRemap);
+        if (resolved != null && resolved > 0) memberIds.add(resolved);
+      }
+    }
+
+    const memberIdList = [...memberIds];
+
+    if (memberIdList.length > 0) {
+      const ph = memberIdList.map(() => '?').join(',');
       await conn.query(
         `UPDATE members SET active = 0 WHERE id NOT IN (${ph})`,
-        memberIds
+        memberIdList
       );
     }
 

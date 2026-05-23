@@ -1,4 +1,8 @@
-export type ItemType = 'Fragment Card' | 'LND' | 'TNS' | 'Ancient Item' | 'Other';
+export type ItemType =
+  | 'Fragment Card'
+  | 'Feathers'
+  | 'Ancient Item'
+  | 'Other';
 
 export interface AuctionItem {
   id: string;
@@ -64,8 +68,7 @@ export type GuildRank = 'Bronze' | 'Emperium overrun';
 
 export interface RewardItemCounts {
   fragment: number;
-  lnd: number;
-  tns: number;
+  feathers: number;
 }
 
 export interface AuctionState {
@@ -97,7 +100,7 @@ export interface AuctionState {
   /** Actual configured item counts used for winner/page/free computations. */
   rewardItemCounts?: RewardItemCounts;
   /**
-   * LND/TNS “shuffle draw free” pick per item (member id). Persisted so the public queue
+   * Feathers “shuffle draw free” pick per item (member id). Persisted so the public queue
    * view can highlight the same row as the admin dashboard.
    */
   freeDrawChosenByItemId?: Record<string, number>;

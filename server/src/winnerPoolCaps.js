@@ -1,8 +1,7 @@
 /** Default caps when item has no explicit override. */
 const DEFAULTS = {
   'Fragment Card': 2,
-  LND: 7,
-  TNS: 12,
+  Feathers: 19,
   'Ancient Item': 1,
   Other: 1,
 };

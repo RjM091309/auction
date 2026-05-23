@@ -7,12 +7,19 @@ import type {
   WeeklyTypeWin,
 } from '../types';
 import { isAuctionItemHidden } from './hiddenAuctionItems';
+import { isFeatherItemType } from './featherMigration';
+import {
+  canonicalIgnKey,
+  findMatchingIgnName,
+  ignMatchesForQueueDedupe,
+  ignMatchesForQueueIdentity,
+} from './ignQueueIdentity';
 
 export function defaultEventModeForQueues(m?: WeeklyEventType): WeeklyEventType {
   return m ?? 'Emperium Overrun';
 }
 
-/** Guild League: main shuffle lock closes public signup. Emperium Overrun: signup stays open (card + LND + TNS queue rules). */
+/** Guild League: main shuffle lock closes public signup. Emperium Overrun: signup stays open (card + Feathers queue rules). */
 export function shuffleLockClosesPublicSignup(
   shuffleLocked: boolean,
   eventMode?: WeeklyEventType
@@ -21,9 +28,7 @@ export function shuffleLockClosesPublicSignup(
   return defaultEventModeForQueues(eventMode) !== 'Emperium Overrun';
 }
 
-/**
- * Weekly green-check / winner lock — temporarily disabled so log/history does not block bids.
- */
+/** Weekly type win lock disabled — winners can bid again next auction (Fragment Card + Feathers). */
 export function weeklyTypeWinBlocksQueueJoin(
   _eventMode: WeeklyEventType | undefined,
   _itemType: ItemType,
@@ -33,25 +38,25 @@ export function weeklyTypeWinBlocksQueueJoin(
   return false;
 }
 
-export function isEmperiumCenterType(t: ItemType): boolean {
-  return t === 'Fragment Card' || t === 'LND' || t === 'TNS';
+export function isEmperiumCenterType(t: ItemType | string): boolean {
+  return t === 'Fragment Card' || t === 'Feathers' || t === 'LND' || t === 'TNS';
 }
 
-export function isFeatherType(t: ItemType): boolean {
-  return t === 'LND' || t === 'TNS';
+export function isFeatherType(t: ItemType | string): boolean {
+  return isFeatherItemType(t);
 }
 
 /**
- * Emperium Overrun: one Fragment Card queue + one LND queue + one TNS queue per bidder
- * (same feather type twice still blocks). Guild / non-center: second active queue blocks.
+ * Emperium Overrun: one Fragment Card queue + one Feathers queue per bidder.
+ * Guild / non-center: second active queue blocks.
  */
-export function emperiumSecondQueueBlocks(targetType: ItemType, otherType: ItemType): boolean {
+export function emperiumSecondQueueBlocks(targetType: ItemType | string, otherType: ItemType | string): boolean {
   if (!isEmperiumCenterType(targetType) || !isEmperiumCenterType(otherType)) {
     return true;
   }
   if (targetType === 'Fragment Card' && otherType === 'Fragment Card') return true;
   if (isFeatherType(targetType) && isFeatherType(otherType)) {
-    return targetType === otherType;
+    return true;
   }
   return false;
 }
@@ -60,9 +65,28 @@ function queueMemberKey(itemId: string, mid: number): string {
   return `${itemId}\0${mid}`;
 }
 
+function groupEntriesByIgnIdentity<T extends { name: string }>(
+  entries: T[],
+  samePerson: (a: string, b: string) => boolean
+): T[][] {
+  const groups: T[][] = [];
+  for (const e of entries) {
+    let placed = false;
+    for (const g of groups) {
+      if (g.some((x) => samePerson(x.name, e.name))) {
+        g.push(e);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) groups.push([e]);
+  }
+  return groups;
+}
+
 /**
  * Guild: keep first active queue row per IGN (item order, then queue order).
- * Emperium: keep first Fragment Card + first LND + first TNS; non-center queues stay one slot.
+ * Emperium: keep first Fragment Card + first Feathers; non-center queues stay one slot.
  *
  * @param activeItemPredicate — optional; when set, only active items matching this predicate
  *   are considered (e.g. visible-only vs hidden-only split for Guild League dedupe).
@@ -79,21 +103,19 @@ export function computeKeptQueueMemberKeys(
     if (it.status !== 'active') continue;
     if (activeItemPredicate && !activeItemPredicate(it)) continue;
     for (const mid of it.interestedMemberIds) {
-      const name = s.members.find((m) => m.id === mid)?.name?.trim().toLowerCase();
+      const name = s.members.find((m) => m.id === mid)?.name?.trim();
       if (!name) continue;
       entries.push({ itemId: it.id, mid, type: it.type, name });
     }
   }
 
-  const byName = new Map<string, Entry[]>();
-  for (const e of entries) {
-    const arr = byName.get(e.name) ?? [];
-    arr.push(e);
-    byName.set(e.name, arr);
-  }
-
   const keep = new Set<string>();
-  for (const [, group] of byName) {
+  const samePerson =
+    mode === 'Emperium Overrun'
+      ? ignMatchesForQueueDedupe
+      : ignMatchesForQueueIdentity;
+  const identityGroups = groupEntriesByIgnIdentity(entries, samePerson);
+  for (const group of identityGroups) {
     if (mode !== 'Emperium Overrun') {
       const first = group[0];
       if (first) keep.add(queueMemberKey(first.itemId, first.mid));
@@ -105,13 +127,14 @@ export function computeKeptQueueMemberKeys(
       keep.add(queueMemberKey(o.itemId, o.mid));
       continue;
     }
-    // Prefer the latest queue row per type (newest bid wins over legacy duplicates).
     const firstCard = [...group].reverse().find((e) => e.type === 'Fragment Card');
-    const firstLnd = [...group].reverse().find((e) => e.type === 'LND');
-    const firstTns = [...group].reverse().find((e) => e.type === 'TNS');
+    const firstFeathers = [...group]
+      .reverse()
+      .find((e) => isFeatherType(e.type));
     if (firstCard) keep.add(queueMemberKey(firstCard.itemId, firstCard.mid));
-    if (firstLnd) keep.add(queueMemberKey(firstLnd.itemId, firstLnd.mid));
-    if (firstTns) keep.add(queueMemberKey(firstTns.itemId, firstTns.mid));
+    if (firstFeathers) {
+      keep.add(queueMemberKey(firstFeathers.itemId, firstFeathers.mid));
+    }
   }
   return keep;
 }
@@ -119,7 +142,7 @@ export function computeKeptQueueMemberKeys(
 /**
  * Emperium Overrun: kapag may weekly Fragment Card win na ang IGN (hal. natapos na ang
  * card round Tue/Thu), tanggalin sa lahat ng Fragment Card queues — puwede na lang
- * LND/TNS hanggang Monday rollover.
+ * Feathers hanggang Monday rollover.
  */
 /** Temporarily disabled — do not strip Fragment Card queues based on weekly win log. */
 export function stripEmperiumCardQueuesAfterFragmentWeeklyWin(
@@ -132,18 +155,31 @@ export function findOtherActiveQueueBlocking(
   eventMode: WeeklyEventType | undefined,
   items: AuctionItem[],
   members: GuildMember[],
-  ignLower: string,
+  ignRaw: string,
   targetItemId: string,
   targetType: ItemType,
   opts?: { skipHiddenBlockingItems?: boolean }
 ): AuctionItem | null {
-  const norm = ignLower.trim().toLowerCase();
-  const queueHasIgn = (it: AuctionItem) =>
-    it.interestedMemberIds.some((mid) => {
-      const n = members.find((m) => m.id === mid)?.name;
-      return n != null && n.trim().toLowerCase() === norm;
-    });
+  return findOtherActiveQueueBlockingWithMatch(
+    eventMode,
+    items,
+    members,
+    ignRaw,
+    targetItemId,
+    targetType,
+    opts
+  )?.item ?? null;
+}
 
+export function findOtherActiveQueueBlockingWithMatch(
+  eventMode: WeeklyEventType | undefined,
+  items: AuctionItem[],
+  members: GuildMember[],
+  ignRaw: string,
+  targetItemId: string,
+  targetType: ItemType,
+  opts?: { skipHiddenBlockingItems?: boolean }
+): { item: AuctionItem; matchedIgn: string } | null {
   const mode = defaultEventModeForQueues(eventMode);
 
   const skipHidden =
@@ -152,12 +188,30 @@ export function findOtherActiveQueueBlocking(
   for (const it of items) {
     if (it.status !== 'active' || it.id === targetItemId) continue;
     if (skipHidden && isAuctionItemHidden(it)) continue;
-    if (!queueHasIgn(it)) continue;
+
+    const queuedNames: string[] = [];
+    for (const mid of it.interestedMemberIds) {
+      const n = members.find((m) => m.id === mid)?.name;
+      if (n != null && n.trim()) queuedNames.push(n);
+    }
+    if (queuedNames.length === 0) continue;
+    const matchedIgn = findMatchingIgnName(ignRaw, queuedNames);
+    if (!matchedIgn) continue;
 
     if (mode !== 'Emperium Overrun') {
-      return it;
+      return { item: it, matchedIgn };
     }
-    if (emperiumSecondQueueBlocks(targetType, it.type)) return it;
+    if (emperiumSecondQueueBlocks(targetType, it.type)) {
+      return { item: it, matchedIgn };
+    }
+    // Emperium: same person may queue Fragment + Feathers once each, but not with alt IGNs.
+    if (
+      isEmperiumCenterType(targetType) &&
+      isEmperiumCenterType(it.type) &&
+      canonicalIgnKey(ignRaw) !== canonicalIgnKey(matchedIgn)
+    ) {
+      return { item: it, matchedIgn };
+    }
   }
   return null;
 }

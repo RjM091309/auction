@@ -1,8 +1,8 @@
 import type { DragEvent } from 'react';
 import type { AuctionState } from '../types';
+import { ignMatchesForQueueIdentity } from './ignQueueIdentity';
 import {
   findOtherActiveQueueBlocking,
-  weeklyTypeWinBlocksQueueJoin,
 } from './queueEligibility';
 
 export const QUEUE_DRAG_MIME = 'application/x-rooc-queue';
@@ -67,30 +67,16 @@ export function applyQueueMemberMove(
     return { error: 'no_change' };
   }
 
-  if (
-    fromItemId !== toItemId &&
-    weeklyTypeWinBlocksQueueJoin(
-      s.eventMode,
-      toItem.type,
-      s.weeklyTypeWins,
-      member.name
-    )
-  ) {
-    return { error: 'weekly_type_win', toItemName: toItem.name };
-  }
-
-  const ignLower = member.name.trim().toLowerCase();
-
   const fromList = fromItem.interestedMemberIds.filter((id) => id !== memberId);
 
   const toListBase =
     fromItemId === toItemId ? fromList : [...toItem.interestedMemberIds];
 
-  const nameTakenOnTarget = toListBase.some(
-    (id) =>
-      id !== memberId &&
-      s.members.find((m) => m.id === id)?.name.trim().toLowerCase() === ignLower
-  );
+  const nameTakenOnTarget = toListBase.some((id) => {
+    if (id === memberId) return false;
+    const n = s.members.find((m) => m.id === id)?.name;
+    return n != null && ignMatchesForQueueIdentity(n, member.name);
+  });
   if (nameTakenOnTarget) {
     return { error: 'name_conflict', toItemName: toItem.name };
   }
@@ -122,7 +108,7 @@ export function applyQueueMemberMove(
       s.eventMode,
       itemsSim,
       s.members,
-      ignLower,
+      member.name,
       toItemId,
       toItem.type
     );

@@ -30,6 +30,18 @@ import {
 } from './types';
 import { saveState } from './lib/storage';
 import { AUCTION_DATA_VERSION } from './data/auctionDefaults';
+import { featherLogTypeMatches } from './lib/featherMigration';
+import {
+  findMemberByIgnIdentity,
+  ignMatchesForQueueIdentity,
+  matchingIgnOnQueueItem,
+} from './lib/ignQueueIdentity';
+import { displayAuctionItemTypeBadge, auctionItemTypeColorClass } from './lib/auctionItemTypeColors';
+import {
+  defaultEventModeForQueues,
+  findOtherActiveQueueBlockingWithMatch,
+  shuffleLockClosesPublicSignup,
+} from './lib/queueEligibility';
 import {
   deactivateMemberOnServer,
   removeMemberFromItemQueueOnServer,
@@ -40,7 +52,6 @@ import {
 import { randomId } from './lib/randomId';
 import { nextTempMemberId } from './lib/tempMemberId';
 import {
-  swal2AlreadyWonTypeThisWeek,
   swal2QueueMemberAdded,
   swal2QueueAlreadyListed,
   swal2QueueAlreadyOnAnotherItem,
@@ -60,13 +71,9 @@ import {
 } from './lib/sweetAlert2';
 import {
   dedupeIgnAcrossActiveQueues,
+  normalizeQueuesForEventMode,
   pruneOrphanQueueMembers,
 } from './lib/dedupeIgnAcrossQueues';
-import {
-  findOtherActiveQueueBlocking,
-  shuffleLockClosesPublicSignup,
-  weeklyTypeWinBlocksQueueJoin,
-} from './lib/queueEligibility';
 import {
   applyQueueMemberMove,
   parseQueueDragPayload,
@@ -152,12 +159,10 @@ function auctionPollSnapshot(s: AuctionState): string {
 
 const DEFAULT_EVENT_MODE: WeeklyEventType = 'Emperium Overrun';
 
-function rankPresetLimits(rank: GuildRank): { fragment: number; lnd: number; tns: number } {
+function rankPresetLimits(rank: GuildRank): { fragment: number; feathers: number } {
   return {
-    // Winner set limit inputs are item totals from game rank rewards.
     fragment: totalItemsForTypeByRank('Fragment Card', rank),
-    lnd: totalItemsForTypeByRank('LND', rank),
-    tns: totalItemsForTypeByRank('TNS', rank),
+    feathers: totalItemsForTypeByRank('Feathers', rank),
   };
 }
 
@@ -180,6 +185,20 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const queueBaselineRef = useRef<QueueBaselineByItemId>(new Map());
   /** Skip one debounced persist after applying a read-only server poll. */
   const skipPersistAfterPollRef = useRef(false);
+  /** Skip one debounced persist after an immediate save (e.g. clear all queues). */
+  const skipPersistOnceRef = useRef(false);
+  const persistDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+  const [clearQueuesSaving, setClearQueuesSaving] = useState(false);
+
+  const cancelPendingPersist = () => {
+    if (persistDebounceTimerRef.current != null) {
+      window.clearTimeout(persistDebounceTimerRef.current);
+      persistDebounceTimerRef.current = null;
+    }
+    persistDebouncePendingRef.current = false;
+  };
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
   const [isAddItemOpen, setIsAddItemOpen] = useState(false);
@@ -192,8 +211,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const [winnerSetLimitForm, setWinnerSetLimitForm] = useState({
     rank: 'Bronze' as GuildRank,
     fragment: defaultWinnerPoolCapForType('Fragment Card'),
-    lnd: defaultWinnerPoolCapForType('LND'),
-    tns: defaultWinnerPoolCapForType('TNS'),
+    feathers: defaultWinnerPoolCapForType('Feathers'),
   });
   const winnerSlotsFromItems = (type: ItemType, items: number): number => {
     return winnerSlotsFromTotalItems(type, items, winnerSetLimitForm.rank);
@@ -220,28 +238,22 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       return { winners, pages, sample, hasMore: labels.length > 3 };
     };
     const fragmentBidders = queuedByType('Fragment Card');
-    const lndBidders = queuedByType('LND');
-    const tnsBidders = queuedByType('TNS');
+    const feathersBidders = queuedByType('Feathers');
     return {
       fragment: {
         bidders: fragmentBidders,
         ...build('Fragment Card', winnerSetLimitForm.fragment, fragmentBidders),
       },
-      lnd: {
-        bidders: lndBidders,
-        ...build('LND', winnerSetLimitForm.lnd, lndBidders),
-      },
-      tns: {
-        bidders: tnsBidders,
-        ...build('TNS', winnerSetLimitForm.tns, tnsBidders),
+      feathers: {
+        bidders: feathersBidders,
+        ...build('Feathers', winnerSetLimitForm.feathers, feathersBidders),
       },
     };
   }, [
     state?.items,
     winnerSetLimitForm.rank,
     winnerSetLimitForm.fragment,
-    winnerSetLimitForm.lnd,
-    winnerSetLimitForm.tns,
+    winnerSetLimitForm.feathers,
   ]);
 
   const [newItemName, setNewItemName] = useState('');
@@ -268,7 +280,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   const [bidderLogSearch, setBidderLogSearch] = useState('');
   const [bidderRankingSearch, setBidderRankingSearch] = useState('');
   const [weeklyLogFilter, setWeeklyLogFilter] = useState<
-    'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3'
+    'all' | BidderLogStateFilter | 'm1' | 'm2'
   >('all');
   const [eventModeDraft, setEventModeDraft] = useState<WeeklyEventType>(DEFAULT_EVENT_MODE);
   const [eventModeSaving, setEventModeSaving] = useState(false);
@@ -333,22 +345,29 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       skipPersistAfterPollRef.current = false;
       return;
     }
+    if (skipPersistOnceRef.current) {
+      skipPersistOnceRef.current = false;
+      return;
+    }
     if (skipInitialPersist.current > 0) {
       skipInitialPersist.current -= 1;
       return;
     }
     persistDebouncePendingRef.current = true;
+    cancelPendingPersist();
     const id = window.setTimeout(() => {
+      persistDebounceTimerRef.current = null;
       persistDebouncePendingRef.current = false;
       const snap = latestState.current;
       if (!snap) return;
       persistInFlightRef.current = true;
       (async () => {
         const remote = await fetchAuctionState();
-        const toSave =
+        const merged =
           remote != null
             ? mergeQueuesForPersist(snap, remote, queueBaselineRef.current)
             : snap;
+        const toSave = normalizeQueuesForEventMode(merged);
         return persistAuctionState(toSave);
       })()
         .then((server) => {
@@ -358,11 +377,19 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             if (!prev) return prev;
             return {
               ...prev,
+              members: server.members,
+              items: server.items,
               winnerMarkLog: server.winnerMarkLog ?? prev.winnerMarkLog,
               bidderStateLog: server.bidderStateLog ?? prev.bidderStateLog,
               weeklyTypeWins: server.weeklyTypeWins ?? prev.weeklyTypeWins,
               freeDrawChosenByItemId:
                 server.freeDrawChosenByItemId ?? prev.freeDrawChosenByItemId,
+              shuffleLocked: server.shuffleLocked ?? prev.shuffleLocked,
+              winnerShortlistUiEnabled:
+                server.winnerShortlistUiEnabled ?? prev.winnerShortlistUiEnabled,
+              eventMode: server.eventMode ?? prev.eventMode,
+              rewardRank: server.rewardRank ?? prev.rewardRank,
+              rewardItemCounts: server.rewardItemCounts ?? prev.rewardItemCounts,
             };
           });
         })
@@ -385,8 +412,12 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
           persistInFlightRef.current = false;
         });
     }, 450);
+    persistDebounceTimerRef.current = id;
     return () => {
       window.clearTimeout(id);
+      if (persistDebounceTimerRef.current === id) {
+        persistDebounceTimerRef.current = null;
+      }
       persistDebouncePendingRef.current = false;
     };
   }, [state]);
@@ -410,9 +441,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         return;
       }
       if (!remote) return;
-      const normalized = dedupeIgnAcrossActiveQueues(
-        pruneOrphanQueueMembers(remote)
-      );
+      const normalized = normalizeQueuesForEventMode(remote);
+      const guildDupesRemoved =
+        defaultEventModeForQueues(normalized.eventMode) === 'Guild League' &&
+        auctionPollSnapshot(remote) !== auctionPollSnapshot(normalized);
+
       setState((prev) => {
         if (
           persistDebouncePendingRef.current ||
@@ -428,6 +461,21 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         skipPersistAfterPollRef.current = true;
         return normalized;
       });
+
+      if (guildDupesRemoved) {
+        persistInFlightRef.current = true;
+        try {
+          const server = await persistAuctionState(normalized);
+          if (server) {
+            queueBaselineRef.current = buildQueueBaselineFromState(server);
+            setState(normalizeQueuesForEventMode(server));
+          }
+        } catch (e) {
+          console.error('[api] guild league dedupe persist failed', e);
+        } finally {
+          persistInFlightRef.current = false;
+        }
+      }
     };
 
     const intervalId = window.setInterval(
@@ -464,7 +512,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       .filter(
         (it) =>
           it.status === 'active' &&
-          (it.type === 'Fragment Card' || it.type === 'LND' || it.type === 'TNS')
+          (it.type === 'Fragment Card' || it.type === 'Feathers')
       )
       .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
     const rewardRank = parseGuildRank(state?.rewardRank);
@@ -475,9 +523,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       const totalItems =
         it.type === 'Fragment Card'
           ? counts.fragment
-          : it.type === 'LND'
-            ? counts.lnd
-            : counts.tns;
+          : counts.feathers;
       nextPage +=
         it.type === 'Fragment Card'
           ? fragmentGeneralPageSpan(totalItems)
@@ -546,8 +592,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       const weekKey = getAuctionWeekMondayKey();
       const outcomeFilter: BidderLogStateFilter =
         weeklyLogFilter === 'loss' || weeklyLogFilter === 'win' ? weeklyLogFilter : 'all';
-      const typeFilter: 'all' | 'm1' | 'm2' | 'm3' =
-        weeklyLogFilter === 'm1' || weeklyLogFilter === 'm2' || weeklyLogFilter === 'm3'
+      const typeFilter: 'all' | 'm1' | 'm2' =
+        weeklyLogFilter === 'm1' || weeklyLogFilter === 'm2'
           ? weeklyLogFilter
           : 'all';
 
@@ -557,8 +603,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
           row.state !== BIDDER_STATE_ONGOING &&
           (typeFilter === 'all' ||
             (typeFilter === 'm1' && row.itemType === 'Fragment Card') ||
-            (typeFilter === 'm2' && row.itemType === 'LND') ||
-            (typeFilter === 'm3' && row.itemType === 'TNS')) &&
+            (typeFilter === 'm2' && featherLogTypeMatches(row.itemType, 'm2'))) &&
           bidderLogEntryMatchesFilter(row, outcomeFilter) &&
           bidderLogEntryMatchesSearch(row, bidderLogSearch)
       );
@@ -629,8 +674,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         .filter((it) => it.type === type)
         .reduce((sum, it) => sum + it.interestedMemberIds.length, 0);
     const fragmentParticipants = participantCountByType('Fragment Card');
-    const lndParticipants = participantCountByType('LND');
-    const tnsParticipants = participantCountByType('TNS');
+    const feathersParticipants = participantCountByType('Feathers');
     const typeLimit = (type: ItemType) => {
       const ref = snapshot.items.find((it) => it.type === type);
       return maxQueueSlotsAfterShuffle(type, ref?.winnerPoolCap);
@@ -638,11 +682,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     const ok = await swal2ConfirmShuffleAllQueues({
       totalParticipants,
       fragmentParticipants,
-      lndParticipants,
-      tnsParticipants,
+      feathersParticipants,
       fragmentLimit: typeLimit('Fragment Card'),
-      lndLimit: typeLimit('LND'),
-      tnsLimit: typeLimit('TNS'),
+      feathersLimit: typeLimit('Feathers'),
     });
     if (!ok) return;
     shuffleRunningRef.current = true;
@@ -668,8 +710,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     const revealWindowForType = (
       type: ItemType
     ): { start: number; end: number } => {
-      if (type === 'TNS') return { start: 0.18, end: 0.50 };
-      if (type === 'LND') return { start: 0.50, end: 0.78 };
+      if (type === 'Feathers') return { start: 0.18, end: 0.78 };
       if (type === 'Fragment Card') return { start: 0.78, end: 1.0 };
       return { start: 0.55, end: 1.0 };
     };
@@ -772,15 +813,15 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     shuffleRafRef.current = requestAnimationFrame(tick);
   };
 
-  /** Re-randomize order below winner shortlist only (LND/TNS with partial free page). */
+  /** Re-randomize order below winner shortlist only (Feathers with partial free page). */
   const handleShuffleDrawFree = async (itemId: string) => {
     if (!state || state.shuffleLocked !== true || shuffleUi.active) return;
     const item = state.items.find((i) => i.id === itemId);
     if (!item || item.status !== 'active') return;
-    if (item.type !== 'LND' && item.type !== 'TNS') return;
+    if (item.type !== 'Feathers') return;
     const rank = parseGuildRank(state.rewardRank);
     const counts = state.rewardItemCounts ?? rankPresetLimits(rank);
-    const totalItems = item.type === 'LND' ? counts.lnd : counts.tns;
+    const totalItems = counts.feathers;
     if (freeItemsFromTotalItems(item.type, totalItems, rank) <= 0) return;
     const pool = maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap);
     const ids = item.interestedMemberIds;
@@ -821,35 +862,55 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     if (!state) return;
     const ok = await swal2ConfirmResetShuffleUnmark();
     if (!ok) return;
-    setState((prev) => {
-      if (!prev) return prev;
-      const ignKey = (memberId: number) => {
-        const n = prev.members.find((m) => m.id === memberId)?.name?.trim() ?? '';
-        return n.toLowerCase();
-      };
-      return {
-        ...prev,
-        shuffleLocked: false,
-        winnerShortlistUiEnabled: false,
-        freeDrawChosenByItemId: {},
-        items: prev.items.map((item) => {
-          const reopened = {
-            ...item,
-            status: 'active' as const,
-            winnerName: null,
-            recordedWinnerNames: [] as string[],
-          };
-          const ids = [...reopened.interestedMemberIds].sort((a, b) => {
-            const ka = ignKey(a);
-            const kb = ignKey(b);
-            const c = ka.localeCompare(kb, undefined, { sensitivity: 'base' });
-            if (c !== 0) return c;
-            return a.localeCompare(b);
-          });
-          return { ...reopened, interestedMemberIds: ids };
-        }),
-      };
-    });
+
+    const ignKey = (memberId: number) => {
+      const n = state.members.find((m) => m.id === memberId)?.name?.trim() ?? '';
+      return n.toLowerCase();
+    };
+    const next: AuctionState = {
+      ...state,
+      shuffleLocked: false,
+      winnerShortlistUiEnabled: false,
+      weeklyTypeWins: [],
+      freeDrawChosenByItemId: {},
+      items: state.items.map((item) => {
+        const reopened = {
+          ...item,
+          status: 'active' as const,
+          winnerName: null,
+          recordedWinnerNames: [] as string[],
+        };
+        const ids = [...reopened.interestedMemberIds].sort((a, b) => {
+          const ka = ignKey(a);
+          const kb = ignKey(b);
+          const c = ka.localeCompare(kb, undefined, { sensitivity: 'base' });
+          if (c !== 0) return c;
+          return a - b;
+        });
+        return { ...reopened, interestedMemberIds: ids };
+      }),
+    };
+
+    skipPersistOnceRef.current = true;
+    setState(next);
+    persistInFlightRef.current = true;
+    try {
+      const remote = await fetchAuctionState();
+      const toSave =
+        remote != null
+          ? mergeQueuesForPersist(next, remote, queueBaselineRef.current)
+          : next;
+      const server = await persistAuctionState(toSave);
+      if (server) {
+        queueBaselineRef.current = buildQueueBaselineFromState(server);
+        setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server)));
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      void swal2SaveError(msg || 'Could not reset shuffle');
+    } finally {
+      persistInFlightRef.current = false;
+    }
   };
 
   const handleQueueMove = async (payload: QueueMovePayload) => {
@@ -866,49 +927,21 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       /* keep base from local */
     }
 
-    const toItem = base.items.find((i) => i.id === payload.toItemId);
-    const member = base.members.find((m) => m.id === payload.memberId);
-    if (
-      member &&
-      toItem &&
-      payload.fromItemId !== payload.toItemId &&
-      weeklyTypeWinBlocksQueueJoin(
-        base.eventMode,
-        toItem.type,
-        base.weeklyTypeWins,
-        member.name
-      )
-    ) {
-      setState(base);
-      void swal2AlreadyWonTypeThisWeek({
-        ign: member.name,
-        itemName: displayAuctionItemName(toItem.name),
-        emperiumFragmentCardWinner:
-          (base.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
-          toItem.type === 'Fragment Card',
-      });
-      return;
-    }
-
     const next = applyQueueMemberMove(base, payload);
     if ('error' in next) {
       setState(base);
       if (next.error === 'name_conflict' && next.toItemName) {
         const ign =
           base.members.find((m) => m.id === payload.memberId)?.name ?? '';
+        const toItem = base.items.find((i) => i.id === payload.toItemId);
+        const matchedIgn =
+          toItem != null
+            ? matchingIgnOnQueueItem(toItem, base.members, ign)
+            : null;
         void swal2QueueAlreadyOnAnotherItem({
           ign,
           otherItemName: displayAuctionItemName(next.toItemName),
-        });
-      } else if (next.error === 'weekly_type_win' && next.toItemName) {
-        const ign =
-          base.members.find((m) => m.id === payload.memberId)?.name ?? '';
-        void swal2AlreadyWonTypeThisWeek({
-          ign,
-          itemName: displayAuctionItemName(next.toItemName),
-          emperiumFragmentCardWinner:
-            (base.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
-            toItem.type === 'Fragment Card',
+          matchedIgn: matchedIgn ?? undefined,
         });
       }
       return;
@@ -955,7 +988,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   };
 
   const handleClearAllQueues = async () => {
-    if (!state) return;
+    if (!state || clearQueuesSaving) return;
     const active = state.items.filter((i) => i.status === 'active');
     const totalEntries = active.reduce(
       (sum, it) => sum + it.interestedMemberIds.length,
@@ -967,17 +1000,38 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     ).length;
     const ok = await swal2ConfirmClearAllQueues(totalEntries, cardsWithBidders);
     if (!ok) return;
-    setState((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        items: prev.items.map((it) =>
-          it.status === 'active'
-            ? { ...it, interestedMemberIds: [] }
-            : it
+
+    cancelPendingPersist();
+    setClearQueuesSaving(true);
+    try {
+      const remote = await fetchAuctionState();
+      if (remote) {
+        queueBaselineRef.current = buildQueueBaselineFromState(remote);
+      }
+
+      const cleared: AuctionState = {
+        ...state,
+        items: state.items.map((it) =>
+          it.status === 'active' ? { ...it, interestedMemberIds: [] } : it
         ),
       };
-    });
+
+      skipPersistOnceRef.current = true;
+      setState(cleared);
+
+      persistInFlightRef.current = true;
+      const server = await persistAuctionState(cleared);
+      if (server) {
+        queueBaselineRef.current = buildQueueBaselineFromState(server);
+        setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server)));
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      void swal2SaveError(msg || 'Could not clear queues');
+    } finally {
+      persistInFlightRef.current = false;
+      setClearQueuesSaving(false);
+    }
   };
 
   const handleRemoveFromQueue = async (itemId: string, memberId: number) => {
@@ -1031,8 +1085,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     setWinnerSetLimitForm({
       rank,
       fragment: preset.fragment,
-      lnd: preset.lnd,
-      tns: preset.tns,
+      feathers: preset.feathers,
     });
     setWinnerSetLimitModalOpen(true);
   };
@@ -1045,8 +1098,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       rewardRank: winnerSetLimitForm.rank,
       rewardItemCounts: {
         fragment: winnerSetLimitForm.fragment,
-        lnd: winnerSetLimitForm.lnd,
-        tns: winnerSetLimitForm.tns,
+        feathers: winnerSetLimitForm.feathers,
       },
       items: state.items.map((it) => {
         if (it.type === 'Fragment Card') {
@@ -1058,16 +1110,10 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             ),
           };
         }
-        if (it.type === 'LND') {
+        if (it.type === 'Feathers') {
           return {
             ...it,
-            winnerPoolCap: winnerSlotsFromItems('LND', winnerSetLimitForm.lnd),
-          };
-        }
-        if (it.type === 'TNS') {
-          return {
-            ...it,
-            winnerPoolCap: winnerSlotsFromItems('TNS', winnerSetLimitForm.tns),
+            winnerPoolCap: winnerSlotsFromItems('Feathers', winnerSetLimitForm.feathers),
           };
         }
         return it;
@@ -1084,8 +1130,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
           'Fragment Card',
           winnerSetLimitForm.fragment
         ),
-        lndWinners: winnerSlotsFromItems('LND', winnerSetLimitForm.lnd),
-        tnsWinners: winnerSlotsFromItems('TNS', winnerSetLimitForm.tns),
+        feathersWinners: winnerSlotsFromItems('Feathers', winnerSetLimitForm.feathers),
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1109,12 +1154,14 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     const raw = editMemberNameInput.trim();
     if (!raw) return;
 
-    const ignLower = raw.toLowerCase();
-    const taken = state.members.some(
-      (m) => m.id !== editMemberId && m.name.trim().toLowerCase() === ignLower
+    const conflict = state.members.find(
+      (m) => m.id !== editMemberId && ignMatchesForQueueIdentity(m.name, raw)
     );
-    if (taken) {
-      void swal2NameAlreadyTaken();
+    if (conflict) {
+      void swal2NameAlreadyTaken({
+        ign: raw,
+        matchedIgn: conflict.name,
+      });
       return;
     }
 
@@ -1166,69 +1213,43 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         return;
       }
 
-      const ignLower = raw.toLowerCase();
-      const queueHasThisIgn = (it: AuctionItem) =>
-        it.interestedMemberIds.some((mid) => {
-          const n = base.members.find((m) => m.id === mid)?.name;
-          return n != null && n.trim().toLowerCase() === ignLower;
-        });
-
-      if (queueHasThisIgn(card)) {
+      const matchedOnCard = matchingIgnOnQueueItem(card, base.members, raw);
+      if (matchedOnCard) {
         setState(base);
         void swal2QueueAlreadyListed({
           ign: raw,
           itemName: displayAuctionItemName(card.name),
+          matchedIgn: matchedOnCard,
         });
         setQueueNameInput('');
         setQueueNameModalItemId(null);
         return;
       }
 
-      const otherCard = findOtherActiveQueueBlocking(
+      const otherBlock = findOtherActiveQueueBlockingWithMatch(
         base.eventMode,
         base.items,
         base.members,
-        ignLower,
+        raw,
         itemId,
         card.type
       );
-      if (otherCard) {
+      if (otherBlock) {
         setState(base);
         void swal2QueueAlreadyOnAnotherItem({
           ign: raw,
-          otherItemName: displayAuctionItemName(otherCard.name),
+          otherItemName: displayAuctionItemName(otherBlock.item.name),
+          matchedIgn: otherBlock.matchedIgn,
         });
         setQueueNameInput('');
         setQueueNameModalItemId(null);
         return;
       }
 
-      if (
-        weeklyTypeWinBlocksQueueJoin(
-          base.eventMode,
-          card.type,
-          base.weeklyTypeWins,
-          raw
-        )
-      ) {
-        setState(base);
-        void swal2AlreadyWonTypeThisWeek({
-          ign: raw,
-          itemName: displayAuctionItemName(card.name),
-          emperiumFragmentCardWinner:
-            (base.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
-            card.type === 'Fragment Card',
-        });
-        setQueueNameInput('');
-        setQueueNameModalItemId(null);
-        return;
-      }
-
-      const existing = base.members.find((m) => m.name.toLowerCase() === ignLower);
+      const existing = findMemberByIgnIdentity(base.members, raw);
       const memberId = existing?.id ?? nextTempMemberId();
-      const ex = base.members.find((m) => m.name.toLowerCase() === ignLower);
-      const mid = ex?.id ?? memberId;
-      const members = ex
+      const mid = existing?.id ?? memberId;
+      const members = existing
         ? base.members
         : [...base.members, { id: mid, name: raw, role: 'Member' as const }];
       const items = base.items.map((it) => {
@@ -1416,7 +1437,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           type="button"
                           onClick={() => void handleClearAllQueues()}
                           disabled={
-                            shuffleUi.active || totalActiveQueueEntries === 0
+                            shuffleUi.active ||
+                            clearQueuesSaving ||
+                            totalActiveQueueEntries === 0
                           }
                           title={
                             totalActiveQueueEntries === 0
@@ -1613,10 +1636,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                                 ['loss', 'Loss'] as const,
                                 ['win', 'Win'] as const,
                                 ['m1', 'PFC'] as const,
-                                ['m2', 'LND'] as const,
-                                ['m3', 'TNS'] as const,
+                                ['m2', 'LND & TNS'] as const,
                               ] satisfies readonly [
-                                'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3',
+                                'all' | BidderLogStateFilter | 'm1' | 'm2',
                                 string
                               ][]
                             ).map(([id, label]) => (
@@ -1828,8 +1850,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                   }}
                 >
                   <option value="Fragment Card">Fragment Card</option>
-                  <option value="LND">Light And Dark Feathers</option>
-                  <option value="TNS">Time And Space Feathers</option>
+                  <option value="Feathers">Feathers</option>
                   <option value="Ancient Item">Ancient gear</option>
                   <option value="Other">Miscellaneous</option>
                 </select>
@@ -1928,7 +1949,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
               </div>
               <div className="space-y-2">
                 <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
-                  LND
+                  Feathers
                 </label>
                 <input
                   type="text"
@@ -1936,11 +1957,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                   pattern="[0-9]*"
                   required
                   className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
-                  value={winnerSetLimitForm.lnd}
+                  value={winnerSetLimitForm.feathers}
                   onChange={(e) =>
                     setWinnerSetLimitForm((prev) => ({
                       ...prev,
-                      lnd: Math.max(
+                      feathers: Math.max(
                         0,
                         Math.floor(
                           Number((e.target.value || '0').replace(/[^\d]/g, '')) || 0
@@ -1950,39 +1971,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                   }
                 />
                 <p className="text-[11px] font-semibold text-slate-400">
-                  Bidders: {winnerSplitPreview.lnd.bidders} · Pages: {winnerSplitPreview.lnd.pages} · Winning bidders: {winnerSplitPreview.lnd.winners}
-                  {winnerSplitPreview.lnd.sample
-                    ? ` · Split: ${winnerSplitPreview.lnd.sample}${winnerSplitPreview.lnd.hasMore ? ', ...' : ''}`
-                    : ''}
-                </p>
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
-                  TNS
-                </label>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  required
-                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
-                  value={winnerSetLimitForm.tns}
-                  onChange={(e) =>
-                    setWinnerSetLimitForm((prev) => ({
-                      ...prev,
-                      tns: Math.max(
-                        0,
-                        Math.floor(
-                          Number((e.target.value || '0').replace(/[^\d]/g, '')) || 0
-                        )
-                      ),
-                    }))
-                  }
-                />
-                <p className="text-[11px] font-semibold text-slate-400">
-                  Bidders: {winnerSplitPreview.tns.bidders} · Pages: {winnerSplitPreview.tns.pages} · Winning bidders: {winnerSplitPreview.tns.winners}
-                  {winnerSplitPreview.tns.sample
-                    ? ` · Split: ${winnerSplitPreview.tns.sample}${winnerSplitPreview.tns.hasMore ? ', ...' : ''}`
+                  Bidders: {winnerSplitPreview.feathers.bidders} · Pages: {winnerSplitPreview.feathers.pages} · Winning bidders: {winnerSplitPreview.feathers.winners}
+                  {winnerSplitPreview.feathers.sample
+                    ? ` · Split: ${winnerSplitPreview.feathers.sample}${winnerSplitPreview.feathers.hasMore ? ', ...' : ''}`
                     : ''}
                 </p>
               </div>
@@ -2026,8 +2017,8 @@ function QueueCard({
   item: AuctionItem;
   members: GuildMember[];
   rewardRank: GuildRank;
-  rewardItemCounts: { fragment: number; lnd: number; tns: number };
-  /** Shared general page index for Fragment + LND + TNS (creation order). Fragment badges also show I# (one item per winner). */
+  rewardItemCounts: { fragment: number; feathers: number };
+  /** Shared general page index for Fragment + Feathers (creation order). Fragment badges also show I# (one item per winner). */
   featherPageStart?: number;
   /** While shuffle animation runs, hide names and show loading skeletons. */
   isShuffling: boolean;
@@ -2035,7 +2026,7 @@ function QueueCard({
   showWinnerShortlist: boolean;
   /** After main shuffle; enables free-draw shuffle for losers below shortlist. */
   shuffleLocked?: boolean;
-  /** Re-randomize only non-recorded queue rows below the shortlist (LND/TNS with free partial). */
+  /** Re-randomize only non-recorded queue rows below the shortlist (Feathers with free partial). */
   onShuffleDrawFree?: (itemId: string) => void | Promise<void>;
   /** Member highlighted as the free-draw pick (set only after “Shuffle draw free”). */
   freeDrawChosenMemberId?: number | null;
@@ -2059,15 +2050,7 @@ function QueueCard({
       ? shufflePreviewIds
       : item.interestedMemberIds;
 
-  const typeColors = {
-    'Fragment Card': 'text-purple-400 border-purple-500/30 bg-purple-500/10',
-    'LND': 'text-blue-400 border-blue-500/30 bg-blue-500/10',
-    'TNS': 'text-amber-400 border-amber-500/30 bg-amber-500/10',
-    'Ancient Item': 'text-red-400 border-red-500/30 bg-red-500/10',
-    'Other': 'text-slate-400 border-slate-700 bg-slate-800'
-  };
-
-  /** Rows in the post-shuffle winner draw pool — Frag 2 / LND 6 / TNS 8; else top 1; 0 when shortlist UI is off after reset. */
+  /** Rows in the post-shuffle winner draw pool — Frag 2 / Feathers 19; else top 1; 0 when shortlist UI is off after reset. */
   const shortlistSlots = showWinnerShortlist
     ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
     : 0;
@@ -2084,13 +2067,11 @@ function QueueCard({
     const totalItems =
       item.type === 'Fragment Card'
         ? rewardItemCounts.fragment
-        : item.type === 'LND'
-          ? rewardItemCounts.lnd
-          : item.type === 'TNS'
-            ? rewardItemCounts.tns
-            : 1;
+        : item.type === 'Feathers'
+          ? rewardItemCounts.feathers
+          : 1;
     const pageStart =
-      item.type === 'Fragment Card' || item.type === 'LND' || item.type === 'TNS'
+      item.type === 'Fragment Card' || item.type === 'Feathers'
         ? featherPageStart ?? 1
         : 1;
     return computeWinnerAssignmentLabelsFromItems(
@@ -2102,15 +2083,13 @@ function QueueCard({
     );
   })();
   const freeItems =
-    item.type === 'LND'
-      ? freeItemsFromTotalItems(item.type, rewardItemCounts.lnd, rewardRank)
-      : item.type === 'TNS'
-        ? freeItemsFromTotalItems(item.type, rewardItemCounts.tns, rewardRank)
-        : 0;
+    item.type === 'Feathers'
+      ? freeItemsFromTotalItems(item.type, rewardItemCounts.feathers, rewardRank)
+      : 0;
   const freePageInfo = (() => {
-    if (item.type !== 'LND' && item.type !== 'TNS') return null;
+    if (item.type !== 'Feathers') return null;
     const pageStart = featherPageStart ?? 1;
-    const totalItems = item.type === 'LND' ? rewardItemCounts.lnd : rewardItemCounts.tns;
+    const totalItems = rewardItemCounts.feathers;
     const offset = featherPageCountBeforePartialFree(item.type, totalItems, rewardRank);
     return freeItems > 0
       ? { pageLabel: `P${pageStart + offset}`, freeItems }
@@ -2145,8 +2124,8 @@ function QueueCard({
       className="group h-auto w-full min-w-0 max-w-full self-start bg-slate-900 border border-slate-800 rounded-[2.5rem] p-6 shadow-2xl sm:p-8 flex flex-col gap-5 sm:gap-6 cursor-pointer transition-[border-color,box-shadow,background-color,transform] duration-200 ease-out hover:border-blue-500/45 hover:bg-slate-800/60 hover:shadow-blue-900/25 hover:shadow-2xl hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.99]"
     >
       <div>
-        <span className={`text-[10px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-lg border font-mono ${typeColors[item.type]}`}>
-          {item.type}
+        <span className={`text-[10px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-lg border font-mono ${auctionItemTypeColorClass(item.type)}`}>
+          {displayAuctionItemTypeBadge(item.type)}
         </span>
         <h3 className="text-3xl font-black text-white mt-4 tracking-tight leading-none break-words">
           {displayAuctionItemName(item.name)}
@@ -2222,11 +2201,14 @@ function QueueCard({
                   shuffleLocked === true &&
                   showWinnerShortlist &&
                   freeItems > 0 &&
-                  (item.type === 'LND' || item.type === 'TNS') &&
+                  item.type === 'Feathers' &&
                   typeof freeDrawChosenMemberId === 'number' &&
                   freeDrawChosenMemberId === mid;
                 const pageLabel =
-                  !isShuffling && idx < shortlistSlots && idx < winnerPageRanges.length
+                  !isShuffling &&
+                  shuffleLocked !== true &&
+                  idx < shortlistSlots &&
+                  idx < winnerPageRanges.length
                     ? winnerPageRanges[idx]
                     : null;
                 return (

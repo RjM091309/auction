@@ -1,4 +1,5 @@
 import type { AuctionItem, AuctionState, GuildMember } from '../types';
+import { ignMatchesForQueueDedupe } from './ignQueueIdentity';
 
 /** Prefer stable DB id over temp id; then smallest positive id, or “least negative” temp. */
 function pickCanonicalMember(members: GuildMember[]): GuildMember {
@@ -35,16 +36,21 @@ export function dedupeRosterMembersByIgn(s: AuctionState): AuctionState {
     else keyed.push(m);
   }
 
-  const groups = new Map<string, GuildMember[]>();
+  const groups: GuildMember[][] = [];
   for (const m of keyed) {
-    const k = m.name.trim().toLowerCase();
-    const arr = groups.get(k) ?? [];
-    arr.push(m);
-    groups.set(k, arr);
+    let placed = false;
+    for (const g of groups) {
+      if (g.some((x) => ignMatchesForQueueDedupe(x.name, m.name))) {
+        g.push(m);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) groups.push([m]);
   }
 
   let hasDup = false;
-  for (const [, arr] of groups) {
+  for (const arr of groups) {
     if (arr.length > 1) {
       hasDup = true;
       break;
@@ -54,7 +60,7 @@ export function dedupeRosterMembersByIgn(s: AuctionState): AuctionState {
 
   const remap = new Map<number, number>();
   const kept: GuildMember[] = [...unkeyed];
-  for (const [, arr] of groups) {
+  for (const arr of groups) {
     const canonical = pickCanonicalMember(arr);
     kept.push(canonical);
     for (const m of arr) {

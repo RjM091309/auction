@@ -9,7 +9,7 @@ import { motion } from 'motion/react';
 import type { AuctionItem, GuildMember, GuildRank } from './types';
 import { maxQueueSlotsAfterShuffle } from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
-import { auctionItemTypeColors } from './lib/auctionItemTypeColors';
+import { displayAuctionItemTypeBadge, auctionItemTypeColorClass } from './lib/auctionItemTypeColors';
 import {
   computeWinnerAssignmentLabelsFromItems,
   featherItemsPerWinnerUnit,
@@ -37,8 +37,8 @@ export function PublicQueueCard({
   item: AuctionItem;
   members: GuildMember[];
   rewardRank?: GuildRank;
-  rewardItemCounts?: { fragment: number; lnd: number; tns: number };
-  /** Shared general page index (Fragment + LND + TNS). Fragment rows show I# · P# (one item per winner). */
+  rewardItemCounts?: { fragment: number; feathers: number };
+  /** Shared general page index (Fragment + Feathers). Fragment rows show I# · P# (one item per winner). */
   featherPageStart?: number;
   /** Optional visual loading phase; hide page assignment until final result is shown. */
   isShuffling?: boolean;
@@ -63,20 +63,17 @@ export function PublicQueueCard({
   );
   const counts = rewardItemCounts ?? {
     fragment: totalItemsForTypeByRank('Fragment Card', rewardRank),
-    lnd: totalItemsForTypeByRank('LND', rewardRank),
-    tns: totalItemsForTypeByRank('TNS', rewardRank),
+    feathers: totalItemsForTypeByRank('Feathers', rewardRank),
   };
   const winnerPageRanges = (() => {
     const totalItems =
       item.type === 'Fragment Card'
         ? counts.fragment
-        : item.type === 'LND'
-          ? counts.lnd
-          : item.type === 'TNS'
-            ? counts.tns
-            : 1;
+        : item.type === 'Feathers'
+          ? counts.feathers
+          : 1;
     const pageStart =
-      item.type === 'Fragment Card' || item.type === 'LND' || item.type === 'TNS'
+      item.type === 'Fragment Card' || item.type === 'Feathers'
         ? featherPageStart ?? 1
         : 1;
     return computeWinnerAssignmentLabelsFromItems(
@@ -88,15 +85,13 @@ export function PublicQueueCard({
     );
   })();
   const freeItems =
-    item.type === 'LND'
-      ? freeItemsFromTotalItems(item.type, counts.lnd, rewardRank)
-      : item.type === 'TNS'
-        ? freeItemsFromTotalItems(item.type, counts.tns, rewardRank)
-        : 0;
+    item.type === 'Feathers'
+      ? freeItemsFromTotalItems(item.type, counts.feathers, rewardRank)
+      : 0;
   const freePageInfo = (() => {
-    if (item.type !== 'LND' && item.type !== 'TNS') return null;
+    if (item.type !== 'Feathers') return null;
     const pageStart = featherPageStart ?? 1;
-    const totalItems = item.type === 'LND' ? counts.lnd : counts.tns;
+    const totalItems = counts.feathers;
     const offset = featherPageCountBeforePartialFree(item.type, totalItems, rewardRank);
     return freeItems > 0 ? { pageLabel: `P${pageStart + offset}`, freeItems } : null;
   })();
@@ -110,9 +105,9 @@ export function PublicQueueCard({
       <div className="mb-5 flex flex-col gap-4 sm:mb-6 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
         <div className="min-w-0 flex-1">
           <span
-            className={`inline-block rounded-lg border px-2.5 py-1 font-mono text-[9px] font-black uppercase tracking-[0.2em] sm:px-3 sm:text-[10px] ${auctionItemTypeColors[item.type]}`}
+            className={`inline-block rounded-lg border px-2.5 py-1 font-mono text-[9px] font-black uppercase tracking-[0.2em] sm:px-3 sm:text-[10px] ${auctionItemTypeColorClass(item.type)}`}
           >
-            {item.type}
+            {displayAuctionItemTypeBadge(item.type)}
           </span>
           <h2 className="mt-3 break-words text-2xl font-black leading-tight tracking-tight text-white sm:mt-4 sm:text-3xl sm:leading-none">
             {displayAuctionItemName(item.name)}
@@ -169,11 +164,14 @@ export function PublicQueueCard({
                 shuffleLocked === true &&
                 showWinnerShortlist &&
                 freeItems > 0 &&
-                (item.type === 'LND' || item.type === 'TNS') &&
+                item.type === 'Feathers' &&
                 typeof freeDrawChosenMemberId === 'number' &&
                 freeDrawChosenMemberId === mid;
               const pageLabel =
-                !isShuffling && shortlist && idx < winnerPageRanges.length
+                !isShuffling &&
+                shuffleLocked !== true &&
+                shortlist &&
+                idx < winnerPageRanges.length
                   ? winnerPageRanges[idx]
                   : null;
               return (

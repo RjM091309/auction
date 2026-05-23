@@ -1,5 +1,5 @@
 /** Keep in sync with `src/data/auctionDefaults.ts` */
-export const DATA_VERSION = 3;
+export const DATA_VERSION = 4;
 
 export const DEFAULT_AUCTION_ITEMS = [
   {
@@ -13,18 +13,9 @@ export const DEFAULT_AUCTION_ITEMS = [
   },
   {
     id: 'm2',
-    name: 'Light And Dark Feathers',
-    type: 'LND',
-    winnerPoolCap: 7,
-    winnerName: null,
-    status: 'active',
-    interestedMemberIds: [],
-  },
-  {
-    id: 'm3',
-    name: 'Time And Space Feathers',
-    type: 'TNS',
-    winnerPoolCap: 12,
+    name: 'Feathers',
+    type: 'Feathers',
+    winnerPoolCap: 19,
     winnerName: null,
     status: 'active',
     interestedMemberIds: [],

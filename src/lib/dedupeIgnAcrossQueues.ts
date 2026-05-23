@@ -19,7 +19,7 @@ export function pruneOrphanQueueMembers(s: AuctionState): AuctionState {
 /**
  * Guild League: one IGN per **visible** active auction (first slot by item order then
  * position); hidden boards are deduped separately so a hidden queue cannot steal the
- * only public slot. Emperium Overrun: one Fragment Card + one LND + one TNS; non-center
+ * only public slot. Emperium Overrun: one Fragment Card + one Feathers; non-center
  * types still one slot. Drops later duplicates (legacy / bad rows).
  */
 export function dedupeIgnAcrossActiveQueues(s: AuctionState): AuctionState {
@@ -61,4 +61,13 @@ export function dedupeIgnAcrossActiveQueues(s: AuctionState): AuctionState {
   });
 
   return { ...s0, items };
+}
+
+/** Guild League: one queue slot per person. Emperium: prune orphans only. */
+export function normalizeQueuesForEventMode(s: AuctionState): AuctionState {
+  const pruned = pruneOrphanQueueMembers(s);
+  if (defaultEventModeForQueues(pruned.eventMode) === 'Guild League') {
+    return dedupeIgnAcrossActiveQueues(pruned);
+  }
+  return pruned;
 }

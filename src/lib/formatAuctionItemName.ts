@@ -3,10 +3,10 @@
  * second line or at end of the title — `item.type` already shows the badge.
  */
 const TRAILING_TYPE_IN_PARENS =
-  /\s*\((?:LND|TNS|Fragment\s+Card|Ancient\s+Item|Other)\)\s*$/i;
+  /\s*\((?:Feathers|LND|TNS|Fragment\s+Card|Ancient\s+Item|Other)\)\s*$/i;
 
 const LINE_ONLY_TYPE_IN_PARENS =
-  /^\s*\((?:LND|TNS|Fragment\s+Card|Ancient\s+Item|Other)\)\s*$/i;
+  /^\s*\((?:Feathers|LND|TNS|Fragment\s+Card|Ancient\s+Item|Other)\)\s*$/i;
 
 export function displayAuctionItemName(raw: string): string {
   if (typeof raw !== 'string' || !raw.trim()) return raw;

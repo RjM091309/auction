@@ -2,8 +2,7 @@ import type { ItemType } from '../types';
 
 const DEFAULT_POOL_CAP_BY_TYPE: Record<ItemType, number> = {
   'Fragment Card': 2,
-  LND: 7,
-  TNS: 12,
+  Feathers: 19,
   'Ancient Item': 1,
   Other: 1,
 };

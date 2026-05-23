@@ -5,6 +5,8 @@ import {
   INITIAL_MEMBERS,
 } from '../data/auctionDefaults';
 import { dedupeRosterMembersByIgn } from './dedupeRosterMembersByIgn';
+import { migrateFeatherItems, parseRewardItemCounts } from './featherMigration';
+import { parseGuildRank } from './pageAssignment';
 
 const STORAGE_KEY = 'roo_auction_state';
 
@@ -64,27 +66,30 @@ export const loadState = (): AuctionState => {
         : INITIAL_MEMBERS;
     const storedVersion = parsed.dataVersion ?? 0;
     const rawItems = Array.isArray(parsed.items) ? parsed.items : [];
+    const rewardRank = parseGuildRank(parsed.rewardRank);
 
     if (storedVersion < AUCTION_DATA_VERSION) {
       const useDefaultRows =
         rawItems.length === 0 || isLegacyTwoCardSeed(rawItems);
-      const items = useDefaultRows
+      const baseItems = useDefaultRows
         ? DEFAULT_AUCTION_ITEMS.map((row) => ({ ...row, createdAt: Date.now() }))
         : rawItems.map((it) => ({
             ...it,
             interestedMemberIds: [],
           }));
       return dedupeRosterMembersByIgn({
-        items: normalizeAuctionItems(items),
+        items: migrateFeatherItems(normalizeAuctionItems(baseItems)),
         members,
         dataVersion: AUCTION_DATA_VERSION,
+        rewardItemCounts: parseRewardItemCounts(parsed.rewardItemCounts, rewardRank),
       });
     }
 
     return dedupeRosterMembersByIgn({
-      items: normalizeAuctionItems(rawItems),
+      items: migrateFeatherItems(normalizeAuctionItems(rawItems)),
       members,
       dataVersion: AUCTION_DATA_VERSION,
+      rewardItemCounts: parseRewardItemCounts(parsed.rewardItemCounts, rewardRank),
     });
   } catch (e) {
     console.error('Failed to load state', e);

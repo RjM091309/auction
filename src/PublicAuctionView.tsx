@@ -29,16 +29,17 @@ import {
   publicAddBidToQueue,
 } from './lib/apiState';
 import {
-  swal2AlreadyWonTypeThisWeek,
   swal2QueueAlreadyListed,
   swal2QueueAlreadyOnAnotherItem,
   swal2QueueMemberAdded,
 } from './lib/sweetAlert2';
 import {
-  findOtherActiveQueueBlocking,
+  findOtherActiveQueueBlockingWithMatch,
   shuffleLockClosesPublicSignup,
-  weeklyTypeWinBlocksQueueJoin,
 } from './lib/queueEligibility';
+import {
+  matchingIgnOnQueueItem,
+} from './lib/ignQueueIdentity';
 import {
   maxQueueSlotsAfterShuffle,
   shuffleQueueIdsForType,
@@ -77,16 +78,7 @@ import {
 } from './lib/bidderStateLogUi';
 import { BidderRankingExpandableRows } from './components/BidderRankingExpandableRows';
 
-const typeColors: Record<
-  ItemType,
-  string
-> = {
-  'Fragment Card': 'text-purple-400 border-purple-500/30 bg-purple-500/10',
-  LND: 'text-blue-400 border-blue-500/30 bg-blue-500/10',
-  TNS: 'text-amber-400 border-amber-500/30 bg-amber-500/10',
-  'Ancient Item': 'text-red-400 border-red-500/30 bg-red-500/10',
-  Other: 'text-slate-400 border-slate-700 bg-slate-800',
-};
+import { displayAuctionItemTypeBadge, auctionItemTypeColorClass } from './lib/auctionItemTypeColors';
 
 const PUBLIC_STATE_POLL_MS_RAW = Number(import.meta.env.VITE_PUBLIC_STATE_POLL_MS ?? 4000);
 const PUBLIC_STATE_POLL_MS =
@@ -127,7 +119,7 @@ export default function PublicAuctionView() {
   const [bidderLogSearch, setBidderLogSearch] = useState('');
   const [bidderRankingSearch, setBidderRankingSearch] = useState('');
   const [weeklyLogFilter, setWeeklyLogFilter] = useState<
-    'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3'
+    'all' | BidderLogStateFilter | 'm1' | 'm2'
   >('all');
   const prevShuffleLockedRef = useRef<boolean>(false);
   const hasInitialShuffleStateRef = useRef<boolean>(false);
@@ -159,8 +151,7 @@ export default function PublicAuctionView() {
     const revealWindowForType = (
       type: ItemType
     ): { start: number; end: number } => {
-      if (type === 'TNS') return { start: 0.18, end: 0.5 };
-      if (type === 'LND') return { start: 0.5, end: 0.78 };
+      if (type === 'Feathers') return { start: 0.18, end: 0.78 };
       if (type === 'Fragment Card') return { start: 0.78, end: 1.0 };
       return { start: 0.55, end: 1.0 };
     };
@@ -397,52 +388,31 @@ export default function PublicAuctionView() {
         return;
       }
 
-      const ignLower = raw.toLowerCase();
-      const queueHasThisIgn = (it: AuctionItem) =>
-        it.interestedMemberIds.some((mid) => {
-          const n = fresh.members.find((m) => m.id === mid)?.name;
-          return n != null && n.trim().toLowerCase() === ignLower;
-        });
 
-      if (queueHasThisIgn(card)) {
+      const matchedOnCard = matchingIgnOnQueueItem(card, fresh.members, raw);
+      if (matchedOnCard) {
         void swal2QueueAlreadyListed({
           ign: raw,
           itemName: displayAuctionItemName(card.name),
+          matchedIgn: matchedOnCard,
         });
         return;
       }
 
-      const otherCard = findOtherActiveQueueBlocking(
+      const otherBlock = findOtherActiveQueueBlockingWithMatch(
         fresh.eventMode,
         fresh.items,
         fresh.members,
-        ignLower,
+        raw,
         itemId,
         card.type,
         { skipHiddenBlockingItems: true }
       );
-      if (otherCard) {
+      if (otherBlock) {
         void swal2QueueAlreadyOnAnotherItem({
           ign: raw,
-          otherItemName: displayAuctionItemName(otherCard.name),
-        });
-        return;
-      }
-
-      if (
-        weeklyTypeWinBlocksQueueJoin(
-          fresh.eventMode,
-          card.type,
-          fresh.weeklyTypeWins,
-          raw
-        )
-      ) {
-        void swal2AlreadyWonTypeThisWeek({
-          ign: raw,
-          itemName: displayAuctionItemName(card.name),
-          emperiumFragmentCardWinner:
-            (fresh.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
-            card.type === 'Fragment Card',
+          otherItemName: displayAuctionItemName(otherBlock.item.name),
+          matchedIgn: otherBlock.matchedIgn,
         });
         return;
       }
@@ -464,6 +434,7 @@ export default function PublicAuctionView() {
             itemName: displayAuctionItemName(
               err.extra?.itemName ?? queueModalItem?.name ?? 'this item'
             ),
+            matchedIgn: err.extra?.matchedIgn,
           });
         } else if (err.code === 'on_other_item') {
           void swal2QueueAlreadyOnAnotherItem({
@@ -471,17 +442,7 @@ export default function PublicAuctionView() {
             otherItemName: displayAuctionItemName(
               err.extra?.otherItemName ?? 'another item'
             ),
-          });
-        } else if (err.code === 'already_won_type_this_week') {
-          const item = queueModalItem;
-          void swal2AlreadyWonTypeThisWeek({
-            ign: raw,
-            itemName: displayAuctionItemName(
-              err.extra?.itemName ?? item?.name ?? 'this item'
-            ),
-            emperiumFragmentCardWinner:
-              (state?.eventMode ?? 'Emperium Overrun') === 'Emperium Overrun' &&
-              item?.type === 'Fragment Card',
+            matchedIgn: err.extra?.matchedIgn,
           });
         } else if (err.code === 'shuffle_locked') {
           void Swal.fire({
@@ -532,14 +493,13 @@ export default function PublicAuctionView() {
     const rank = parseGuildRank(state?.rewardRank);
     const counts = state?.rewardItemCounts ?? {
       fragment: totalItemsForTypeByRank('Fragment Card', rank),
-      lnd: totalItemsForTypeByRank('LND', rank),
-      tns: totalItemsForTypeByRank('TNS', rank),
+      feathers: totalItemsForTypeByRank('Feathers', rank),
     };
     const featherItems = (state?.items ?? [])
       .filter(
         (it) =>
           it.status === 'active' &&
-          (it.type === 'Fragment Card' || it.type === 'LND' || it.type === 'TNS')
+          (it.type === 'Fragment Card' || it.type === 'Feathers')
       )
       .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
     const out: Record<string, number> = {};
@@ -549,9 +509,7 @@ export default function PublicAuctionView() {
       const totalItems =
         it.type === 'Fragment Card'
           ? counts.fragment
-          : it.type === 'LND'
-            ? counts.lnd
-            : counts.tns;
+          : counts.feathers;
       nextPage +=
         it.type === 'Fragment Card'
           ? fragmentGeneralPageSpan(totalItems)
@@ -568,8 +526,7 @@ export default function PublicAuctionView() {
     () =>
       state?.rewardItemCounts ?? {
         fragment: totalItemsForTypeByRank('Fragment Card', publicRewardRank),
-        lnd: totalItemsForTypeByRank('LND', publicRewardRank),
-        tns: totalItemsForTypeByRank('TNS', publicRewardRank),
+        feathers: totalItemsForTypeByRank('Feathers', publicRewardRank),
       },
     [state?.rewardItemCounts, publicRewardRank]
   );
@@ -625,8 +582,8 @@ export default function PublicAuctionView() {
       const weekKey = getAuctionWeekMondayKey();
       const outcomeFilter: BidderLogStateFilter =
         weeklyLogFilter === 'loss' || weeklyLogFilter === 'win' ? weeklyLogFilter : 'all';
-      const typeFilter: 'all' | 'm1' | 'm2' | 'm3' =
-        weeklyLogFilter === 'm1' || weeklyLogFilter === 'm2' || weeklyLogFilter === 'm3'
+      const typeFilter: 'all' | 'm1' | 'm2' =
+        weeklyLogFilter === 'm1' || weeklyLogFilter === 'm2'
           ? weeklyLogFilter
           : 'all';
 
@@ -636,8 +593,7 @@ export default function PublicAuctionView() {
           row.state !== BIDDER_STATE_ONGOING &&
           (typeFilter === 'all' ||
             (typeFilter === 'm1' && row.itemType === 'Fragment Card') ||
-            (typeFilter === 'm2' && row.itemType === 'LND') ||
-            (typeFilter === 'm3' && row.itemType === 'TNS')) &&
+            (typeFilter === 'm2' && (row.itemType === 'Feathers' || row.itemType === 'LND' || row.itemType === 'TNS'))) &&
           bidderLogEntryMatchesFilter(row, outcomeFilter) &&
           bidderLogEntryMatchesSearch(row, bidderLogSearch)
       );
@@ -924,10 +880,9 @@ export default function PublicAuctionView() {
                                 ['loss', 'Loss'] as const,
                                 ['win', 'Win'] as const,
                                 ['m1', 'PFC'] as const,
-                                ['m2', 'LND'] as const,
-                                ['m3', 'TNS'] as const,
+                                ['m2', 'LND & TNS'] as const,
                               ] satisfies readonly [
-                                'all' | BidderLogStateFilter | 'm1' | 'm2' | 'm3',
+                                'all' | BidderLogStateFilter | 'm1' | 'm2',
                                 string
                               ][]
                             ).map(([id, label]) => (
@@ -1178,7 +1133,7 @@ function PublicQueueCard({
   item: AuctionItem;
   members: GuildMember[];
   rewardRank: GuildRank;
-  rewardItemCounts: { fragment: number; lnd: number; tns: number };
+  rewardItemCounts: { fragment: number; feathers: number };
   featherPageStart?: number;
   isShuffling: boolean;
   shuffleSpinOffset?: number;
@@ -1212,13 +1167,11 @@ function PublicQueueCard({
     const totalItems =
       item.type === 'Fragment Card'
         ? rewardItemCounts.fragment
-        : item.type === 'LND'
-          ? rewardItemCounts.lnd
-          : item.type === 'TNS'
-            ? rewardItemCounts.tns
-            : 1;
+        : item.type === 'Feathers'
+          ? rewardItemCounts.feathers
+          : 1;
     const pageStart =
-      item.type === 'Fragment Card' || item.type === 'LND' || item.type === 'TNS'
+      item.type === 'Fragment Card' || item.type === 'Feathers'
         ? featherPageStart ?? 1
         : 1;
     return computeWinnerAssignmentLabelsFromItems(
@@ -1230,15 +1183,13 @@ function PublicQueueCard({
     );
   })();
   const freeItems =
-    item.type === 'LND'
-      ? freeItemsFromTotalItems(item.type, rewardItemCounts.lnd, rewardRank)
-      : item.type === 'TNS'
-        ? freeItemsFromTotalItems(item.type, rewardItemCounts.tns, rewardRank)
-        : 0;
+    item.type === 'Feathers'
+      ? freeItemsFromTotalItems(item.type, rewardItemCounts.feathers, rewardRank)
+      : 0;
   const freePageInfo = (() => {
-    if (item.type !== 'LND' && item.type !== 'TNS') return null;
+    if (item.type !== 'Feathers') return null;
     const pageStart = featherPageStart ?? 1;
-    const totalItems = item.type === 'LND' ? rewardItemCounts.lnd : rewardItemCounts.tns;
+    const totalItems = rewardItemCounts.feathers;
     const offset = featherPageCountBeforePartialFree(item.type, totalItems, rewardRank);
     return freeItems > 0 ? { pageLabel: `P${pageStart + offset}`, freeItems } : null;
   })();
@@ -1270,9 +1221,9 @@ function PublicQueueCard({
       <div className="mb-5 flex flex-col gap-4 sm:mb-6 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
         <div className="min-w-0 flex-1">
           <span
-            className={`inline-block rounded-lg border px-2.5 py-1 font-mono text-[9px] font-black uppercase tracking-[0.2em] sm:px-3 sm:text-[10px] ${typeColors[item.type]}`}
+            className={`inline-block rounded-lg border px-2.5 py-1 font-mono text-[9px] font-black uppercase tracking-[0.2em] sm:px-3 sm:text-[10px] ${auctionItemTypeColorClass(item.type)}`}
           >
-            {item.type}
+            {displayAuctionItemTypeBadge(item.type)}
           </span>
           <h2 className="mt-3 break-words text-2xl font-black leading-tight tracking-tight text-white sm:mt-4 sm:text-3xl sm:leading-none">
             {displayAuctionItemName(item.name)}
@@ -1330,11 +1281,14 @@ function PublicQueueCard({
                 shuffleLocked === true &&
                 showWinnerShortlist &&
                 freeItems > 0 &&
-                (item.type === 'LND' || item.type === 'TNS') &&
+                item.type === 'Feathers' &&
                 typeof freeDrawChosenMemberId === 'number' &&
                 freeDrawChosenMemberId === mid;
               const pageLabel =
-                !isShuffling && shortlist && idx < winnerPageRanges.length
+                !isShuffling &&
+                shuffleLocked !== true &&
+                shortlist &&
+                idx < winnerPageRanges.length
                   ? winnerPageRanges[idx]
                   : null;
               return (
