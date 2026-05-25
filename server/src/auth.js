@@ -74,10 +74,10 @@ export function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', buildSetCookie('', 0));
 }
 
-export function requireAuth(req, res, next) {
-  const token = getSessionToken(req);
-  if (verifySessionToken(token)) return next();
-  res.status(401).json({ error: 'Unauthorized' });
+export function requireAuth(_req, _res, next) {
+  // Auth temporarily disabled — frontend login page was removed, so the
+  // dashboard at `/` calls the API directly without a session cookie.
+  return next();
 }
 
 function timingSafeUtf8Equal(a, b) {

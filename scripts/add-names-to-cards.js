@@ -16,6 +16,7 @@
   /** @type {{ contains: string, names: string[] }[]} */
   const QUEUES = [
     { contains: 'Puppet Frag', names: ['Player_One', 'Player_Two'] },
+    { contains: 'Illusion Frag', names: [] },
     { contains: 'Light And Dark', names: ['Player_Three'] },
     { contains: 'Time And Space', names: ['Player_Four', 'Player_Five'] },
   ];

@@ -41,7 +41,8 @@ export async function initSchema(pool) {
     CREATE TABLE IF NOT EXISTS members (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
-      role ENUM('Leader', 'Member') NOT NULL,
+      role ENUM('Officer', 'Member', 'Developer', 'Admin') NOT NULL,
+      password VARCHAR(255) NOT NULL DEFAULT '',
       active TINYINT(1) NOT NULL DEFAULT 1,
       INDEX idx_members_name (name),
       INDEX idx_members_active (active)
@@ -116,7 +117,7 @@ export async function migrateMembersIntPk(pool) {
       CREATE TABLE members (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
-        role ENUM('Leader', 'Member') NOT NULL,
+        role ENUM('Officer', 'Member', 'Developer', 'Admin') NOT NULL,
         active TINYINT(1) NOT NULL DEFAULT 1,
         INDEX idx_members_name (name),
         INDEX idx_members_active (active)
@@ -125,9 +126,10 @@ export async function migrateMembersIntPk(pool) {
 
     const map = new Map();
     for (const m of oldMembers) {
+      const role = m.role === 'Leader' ? 'Officer' : m.role;
       const [ins] = await conn.query(
         `INSERT INTO members (name, role, active) VALUES (?, ?, ?)`,
-        [m.name, m.role, m.active]
+        [m.name, role, m.active]
       );
       map.set(String(m.id), Number(ins.insertId));
     }
@@ -250,6 +252,57 @@ export async function migrateWinnerMarkLogTable(pool) {
   await migrateLegacyWinnerMarkMetaToTable(pool);
 }
 
+/**
+ * Migrate `members.role` ENUM to ('Officer', 'Member', 'Developer', 'Admin'):
+ *   1. Widen the enum to accept the legacy `Leader` plus new `Developer` / `Admin`.
+ *   2. Rename legacy `Leader` rows → `Officer`.
+ *   3. Narrow the enum back, dropping `Leader`.
+ * Idempotent: if the column already matches the target shape, do nothing.
+ */
+export async function migrateMembersOfficerRole(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'members' AND COLUMN_NAME = 'role'
+     LIMIT 1`
+  );
+  const colType = String(rows[0]?.COLUMN_TYPE ?? '').toLowerCase();
+  const hasLeader = colType.includes("'leader'");
+  const hasDeveloper = colType.includes("'developer'");
+  const hasAdmin = colType.includes("'admin'");
+  if (!hasLeader && hasDeveloper && hasAdmin) return;
+
+  await pool.query(
+    `ALTER TABLE members MODIFY COLUMN role ENUM('Leader', 'Officer', 'Member', 'Developer', 'Admin') NOT NULL`
+  );
+  if (hasLeader) {
+    await pool.query(
+      `UPDATE members SET role = 'Officer' WHERE role = 'Leader'`
+    );
+  }
+  await pool.query(
+    `ALTER TABLE members MODIFY COLUMN role ENUM('Officer', 'Member', 'Developer', 'Admin') NOT NULL`
+  );
+}
+
+/**
+ * Add `members.password` column (defaults to the member id as string for
+ * existing rows). Used by the Bidder Registration page.
+ */
+export async function migrateMembersPasswordColumn(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'members' AND COLUMN_NAME = 'password'`
+  );
+  if (!Array.isArray(rows) || rows.length === 0) {
+    await pool.query(
+      `ALTER TABLE members ADD COLUMN password VARCHAR(255) NOT NULL DEFAULT '' AFTER role`
+    );
+  }
+  await pool.query(
+    `UPDATE members SET password = CAST(id AS CHAR) WHERE password IS NULL OR password = ''`
+  );
+}
+
 export async function migrateMembersActiveColumn(pool) {
   const [rows] = await pool.query(
     `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -260,6 +313,67 @@ export async function migrateMembersActiveColumn(pool) {
     `ALTER TABLE members ADD COLUMN active TINYINT(1) NOT NULL DEFAULT 1,
      ADD INDEX idx_members_active (active)`
   );
+}
+
+/** Keep Illusion Frag Card after Feathers in `ORDER BY created_at` lists. */
+export async function migrateIllusionFragCardDisplayOrder(pool) {
+  const [rows] = await pool.query(
+    `SELECT id, created_at AS createdAt FROM auction_items WHERE id IN ('m2', 'm4')`
+  );
+  if (!Array.isArray(rows) || rows.length < 2) return;
+  const m2 = rows.find((r) => r.id === 'm2');
+  const m4 = rows.find((r) => r.id === 'm4');
+  if (!m2 || !m4) return;
+  const feathersAt = Number(m2.createdAt);
+  const illusionAt = Number(m4.createdAt);
+  if (!Number.isFinite(feathersAt) || !Number.isFinite(illusionAt)) return;
+  if (illusionAt > feathersAt) return;
+  await pool.query('UPDATE auction_items SET created_at = ? WHERE id = ?', [
+    feathersAt + 1,
+    'm4',
+  ]);
+  console.log('[db] moved Illusion Frag Card after Feathers (created_at)');
+}
+
+/** Insert any default auction rows missing from DB (additive upgrades). */
+export async function migrateDefaultAuctionItems(pool) {
+  const [rows] = await pool.query('SELECT id, name FROM auction_items');
+  const existingIds = new Set(
+    (Array.isArray(rows) ? rows : []).map((r) => String(r.id))
+  );
+  const existingNames = new Set(
+    (Array.isArray(rows) ? rows : []).map((r) => String(r.name ?? '').trim())
+  );
+  const missing = DEFAULT_AUCTION_ITEMS.filter(
+    (it) => !existingIds.has(it.id) && !existingNames.has(it.name)
+  );
+  if (missing.length === 0) return;
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const now = Date.now();
+    for (const it of missing) {
+      await conn.query(
+        `INSERT INTO auction_items (id, name, type, winner_pool_cap, winner_name, winner_names_json, status, created_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+        [it.id, it.name, it.type, it.winnerPoolCap ?? null, it.winnerName, it.status, now]
+      );
+    }
+    await conn.query(
+      'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+      ['data_version', String(DATA_VERSION)]
+    );
+    await conn.commit();
+    console.log(
+      `[db] added default auction items: ${missing.map((it) => it.name).join(', ')}`
+    );
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
 }
 
 /** Seed default auction rows when DB has no items yet. */

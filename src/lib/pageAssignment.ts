@@ -32,9 +32,14 @@ export function totalItemsForTypeByRank(type: ItemType, rank: GuildRank = 'Bronz
   return TOTAL_ITEMS_BY_RANK_AND_TYPE[rank]?.[type] ?? 1;
 }
 
-/** Feathers: items per full winner slot (page unit). Emperium overrun uses 8; guild rank uses 4. */
+/** Feathers: items per winning bidder. Emperium overrun = 13; Bronze guild (Guild League event) = 8. */
 export function featherItemsPerWinnerUnit(rank: GuildRank): number {
-  return rank === 'Emperium overrun' ? 8 : 4;
+  return rank === 'Emperium overrun' ? 13 : 8;
+}
+
+/** Fragment cards: items per winning bidder (Emperium = 1 card each). */
+export function fragmentItemsPerWinner(rank: GuildRank): number {
+  return rank === 'Emperium overrun' ? 1 : 1;
 }
 
 /** Game rule: feather types use 4 (Bronze) or 8 (Emperium overrun) items per winner slot. */
@@ -101,7 +106,7 @@ export function freeItemsFromTotalItems(
 
 /**
  * How many general feather “P#” steps (each P = one 4-item page) come **before** the leftover partial-free block.
- * Emperium Overrun: each full 8-item winner slot spans **two** consecutive P-pages; Bronze: one P per 4-item slot.
+ * Emperium Overrun: each winner spans ceil(13/4) consecutive P-pages; Bronze: one P per 4-item slot.
  */
 export function featherPageCountBeforePartialFree(
   type: ItemType,
@@ -110,7 +115,10 @@ export function featherPageCountBeforePartialFree(
 ): number {
   if (type !== 'Feathers') return 0;
   const slots = winnerSlotsFromTotalItems(type, totalItems, rank);
-  return rank === 'Emperium overrun' ? slots * 2 : slots;
+  if (rank === 'Emperium overrun') {
+    return slots * Math.ceil(featherItemsPerWinnerUnit(rank) / 4);
+  }
+  return slots;
 }
 
 /**
@@ -139,7 +147,11 @@ export function winnerAssignmentLabelTitle(label: string): string {
   }
   const featherPair = /^P(\d+)-P(\d+)$/.exec(s);
   if (featherPair) {
-    return `Winner draw: general pages ${featherPair[1]}–${featherPair[2]} (each P = one 4-item page).`;
+    const lo = Number(featherPair[1]);
+    const hi = Number(featherPair[2]);
+    const pages = Number.isFinite(lo) && Number.isFinite(hi) ? hi - lo + 1 : 0;
+    const items = pages > 0 ? pages * 4 : 0;
+    return `Winner draw: general pages ${featherPair[1]}–${featherPair[2]} (${items} item slots at 4 per page; Emperium winners get 13 items when this span covers 4 pages).`;
   }
   if (s.startsWith('P')) {
     return `Assigned page ${s.slice(1)}`;
@@ -181,10 +193,12 @@ export function computeWinnerAssignmentLabelsFromItems(
     const winningBidders = Math.min(totalSlots, bidders);
     if (winningBidders <= 0) return [];
     if (rank === 'Emperium overrun') {
+      const itemsPerWinner = featherItemsPerWinnerUnit(rank);
+      const pagesEach = Math.max(1, Math.ceil(itemsPerWinner / 4));
       return Array.from({ length: winningBidders }, (_, i) => {
-        const pLo = pageStart + 2 * i;
-        const pHi = pLo + 1;
-        return `P${pLo}-P${pHi}`;
+        const pLo = pageStart + pagesEach * i;
+        const pHi = pLo + pagesEach - 1;
+        return pLo === pHi ? `P${pLo}` : `P${pLo}-P${pHi}`;
       });
     }
     const ranges = computeWinnerPageRanges(totalSlots, winningBidders);
@@ -197,9 +211,14 @@ export function computeWinnerAssignmentLabelsFromItems(
   if (type === 'Fragment Card') {
     const winners = Math.min(winnerSlotsFromTotalItems(type, totalItems, rank), bidders);
     if (winners <= 0) return [];
+    const perWinner = fragmentItemsPerWinner(rank);
     return Array.from({ length: winners }, (_v, i) => {
-      const slotOnPage = (i % 4) + 1;
-      const pageRel = Math.floor(i / 4);
+      const pageRel = Math.floor((i * perWinner) / 4);
+      if (rank === 'Emperium overrun' && perWinner === 1) {
+        const slotOnPage = (i % 4) + 1;
+        return `I${slotOnPage} · P${pageStart + pageRel}`;
+      }
+      const slotOnPage = ((i * perWinner) % 4) + 1;
       return `I${slotOnPage} - P${pageStart + pageRel}`;
     });
   }
@@ -244,9 +263,12 @@ export function computeWinnerAssignmentLabels(
       bidders == null ? totalSlots : Math.min(totalSlots, bidders);
     if (winningBidders <= 0) return [];
     if (rank === 'Emperium overrun') {
+      const itemsPerWinner = featherItemsPerWinnerUnit(rank);
+      const pagesEach = Math.max(1, Math.ceil(itemsPerWinner / 4));
       return Array.from({ length: winningBidders }, (_, i) => {
-        const pLo = pageStart + 2 * i;
-        return `P${pLo}-P${pLo + 1}`;
+        const pLo = pageStart + pagesEach * i;
+        const pHi = pLo + pagesEach - 1;
+        return pLo === pHi ? `P${pLo}` : `P${pLo}-P${pHi}`;
       });
     }
     const ranges = computeWinnerPageRanges(totalSlots, winningBidders);
@@ -262,9 +284,14 @@ export function computeWinnerAssignmentLabels(
     const winners =
       bidders == null ? Math.max(0, totalItems) : Math.min(Math.max(0, totalItems), bidders);
     if (winners <= 0) return [];
+    const perWinner = fragmentItemsPerWinner(rank);
     return Array.from({ length: winners }, (_v, i) => {
-      const slotOnPage = (i % 4) + 1;
-      const pageRel = Math.floor(i / 4);
+      const pageRel = Math.floor((i * perWinner) / 4);
+      if (rank === 'Emperium overrun' && perWinner === 1) {
+        const slotOnPage = (i % 4) + 1;
+        return `I${slotOnPage} · P${pageStart + pageRel}`;
+      }
+      const slotOnPage = ((i * perWinner) % 4) + 1;
       return `I${slotOnPage} - P${pageStart + pageRel}`;
     });
   }

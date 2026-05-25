@@ -43,7 +43,15 @@ export function parseAuctionState(json: unknown): AuctionState | null {
           ? parseInt(idRaw.trim(), 10)
           : NaN;
     const name = typeof m.name === 'string' ? m.name : '';
-    const role = m.role === 'Leader' || m.role === 'Member' ? m.role : 'Member';
+    const role =
+      m.role === 'Officer' ||
+      m.role === 'Member' ||
+      m.role === 'Developer' ||
+      m.role === 'Admin'
+        ? m.role
+        : m.role === 'Leader'
+          ? 'Officer'
+          : 'Member';
     if (!Number.isInteger(id) || id <= 0 || !name) return null;
     return { id, name, role };
   }).filter((m): m is GuildMember => m != null);
@@ -372,9 +380,16 @@ export async function publicAddBidToQueue(
  * Replace server state (members, items, queues). Called after local edits;
  * server maps this to `members`, `auction_items`, and `item_queue` rows.
  */
-/** Persists admin state; returns latest server snapshot (includes `winnerMarkLog`). */
+/**
+ * Persists admin state; returns latest server snapshot (includes `winnerMarkLog`).
+ *
+ * `opts.bearerToken` is optional — pass it when the change includes a
+ * privileged transition the server gates per-action (currently:
+ * `shuffleLocked` false → true, which requires Officer/Admin/Developer).
+ */
 export async function persistAuctionState(
-  state: AuctionState
+  state: AuctionState,
+  opts: { bearerToken?: string } = {}
 ): Promise<AuctionState | null> {
   const body = {
     items: state.items,
@@ -387,10 +402,12 @@ export async function persistAuctionState(
     rewardItemCounts: state.rewardItemCounts ?? { fragment: 2, feathers: 80 },
     freeDrawChosenByItemId: state.freeDrawChosenByItemId ?? {},
   };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (opts.bearerToken) headers.Authorization = `Bearer ${opts.bearerToken}`;
   const res = await fetch(apiUrl('/api/state'), {
     ...cred,
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -405,17 +422,85 @@ export async function persistAuctionState(
   }
 }
 
-/** Remove a member from one item queue only (admin). */
+/** Remove a member from one item queue only (admin). Requires a privileged
+ *  Bidders-tab session — pass the token returned by `/api/bidders/auth`. */
 export async function removeMemberFromItemQueueOnServer(
   itemId: string,
-  memberId: number
+  memberId: number,
+  bearerToken: string
 ): Promise<AuctionState> {
+  const headers: Record<string, string> = {};
+  if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
   const res = await fetch(
     apiUrl(
       `/api/items/${encodeURIComponent(itemId)}/queue/${encodeURIComponent(String(memberId))}`
     ),
-    { ...cred, method: 'DELETE' }
+    { ...cred, method: 'DELETE', headers }
   );
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    // Surface the server message verbatim so the caller can detect 401
+    // ("You must sign in...") and re-prompt for credentials.
+    throw new Error(text || `${res.status} ${res.statusText}`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error('Invalid JSON from server');
+  }
+  const parsed = parseAuctionState(json);
+  if (!parsed) throw new Error('Invalid auction state from server');
+  return parsed;
+}
+
+/**
+ * Privileged bulk-clear of every active item queue. Requires an
+ * Admin/Developer Bearer token; server rejects Officer / unauthenticated
+ * callers with 401 / 403.
+ */
+export async function clearAllActiveQueuesOnServer(
+  bearerToken: string
+): Promise<AuctionState> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
+  const res = await fetch(apiUrl('/api/state/clear-queues'), {
+    ...cred,
+    method: 'POST',
+    headers,
+  });
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    throw new Error(text || `${res.status} ${res.statusText}`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error('Invalid JSON from server');
+  }
+  const parsed = parseAuctionState(json);
+  if (!parsed) throw new Error('Invalid auction state from server');
+  return parsed;
+}
+
+/**
+ * Privileged event-mode toggle. Requires an Admin/Developer Bearer token
+ * (the same kind issued by `/api/bidders/auth`). Server rejects Officer
+ * or unauthenticated callers with 401/403.
+ */
+export async function setEventModeOnServer(
+  eventMode: 'Guild League' | 'Emperium Overrun',
+  bearerToken: string
+): Promise<AuctionState> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
+  const res = await fetch(apiUrl('/api/state/event-mode'), {
+    ...cred,
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ eventMode }),
+  });
   const text = await res.text().catch(() => '');
   if (!res.ok) {
     throw new Error(text || `${res.status} ${res.statusText}`);

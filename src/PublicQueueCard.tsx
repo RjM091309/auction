@@ -6,7 +6,8 @@
 import React from 'react';
 import { Check, UserPlus } from 'lucide-react';
 import { motion } from 'motion/react';
-import type { AuctionItem, GuildMember, GuildRank } from './types';
+import type { AuctionItem, GuildMember, GuildRank, RewardItemCounts } from './types';
+import { fragmentCountForItem } from './lib/featherMigration';
 import { maxQueueSlotsAfterShuffle } from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { displayAuctionItemTypeBadge, auctionItemTypeColorClass } from './lib/auctionItemTypeColors';
@@ -68,7 +69,7 @@ export function PublicQueueCard({
   const winnerPageRanges = (() => {
     const totalItems =
       item.type === 'Fragment Card'
-        ? counts.fragment
+        ? fragmentCountForItem(counts, item.id)
         : item.type === 'Feathers'
           ? counts.feathers
           : 1;

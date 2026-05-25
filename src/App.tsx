@@ -3,51 +3,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
-import { fetchAuthMe } from './lib/apiState';
-import { isAdminPath } from './lib/adminPath';
-import LoginPage from './LoginPage';
+import React, { useEffect, useState } from 'react';
 import AuctionDashboard from './AuctionDashboard';
-import PublicAuctionView from './PublicAuctionView';
+import RegistrationPage from './RegistrationPage';
+import { isKnownTabPath, isRegistrationPath } from './lib/tabRoute';
+
+/** Top-level route the app should mount for the current URL pathname. */
+type AppRoute = 'dashboard' | 'registration';
+
+function routeFor(pathname: string): AppRoute {
+  if (isRegistrationPath(pathname)) return 'registration';
+  return 'dashboard';
+}
 
 export default function App() {
-  const adminRoute = useMemo(() => isAdminPath(window.location.pathname), []);
-  const [session, setSession] = useState<'loading' | 'out' | 'in'>(() =>
-    adminRoute ? 'loading' : 'in'
+  const [route, setRoute] = useState<AppRoute>(() =>
+    routeFor(window.location.pathname)
   );
 
+  // Canonicalize the URL: dashboard tab paths (`/`, `/logs`, `/bidders`) and
+  // the public `/registration` page are the only supported entries. Anything
+  // else (e.g. `/admin`) is rewritten to the root.
   useEffect(() => {
-    if (!adminRoute) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const { authed } = await fetchAuthMe();
-        if (cancelled) return;
-        setSession(authed ? 'in' : 'out');
-      } catch {
-        if (!cancelled) setSession('out');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [adminRoute]);
+    const { pathname, search, hash } = window.location;
+    if (!isKnownTabPath(pathname) && !isRegistrationPath(pathname)) {
+      window.history.replaceState(null, '', `/${search}${hash}`);
+      setRoute('dashboard');
+    }
+  }, []);
 
-  if (!adminRoute) {
-    return <PublicAuctionView />;
-  }
+  // Re-render when the user hits Back/Forward across the registration page
+  // and the admin dashboard (popstate fires for browser nav only).
+  useEffect(() => {
+    const onPop = () => setRoute(routeFor(window.location.pathname));
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
 
-  if (session === 'loading') {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex items-center justify-center">
-        <p className="text-slate-500 text-sm font-medium">Checking session…</p>
-      </div>
-    );
-  }
-
-  if (session === 'out') {
-    return <LoginPage onLoggedIn={() => setSession('in')} />;
-  }
-
-  return <AuctionDashboard onLogout={() => setSession('out')} />;
+  if (route === 'registration') return <RegistrationPage />;
+  return <AuctionDashboard />;
 }

@@ -1,4 +1,5 @@
 import type { AuctionItem, ItemType, RewardItemCounts } from '../types';
+import { sortAuctionItemsForDisplay } from './auctionItemDisplayOrder';
 import { defaultWinnerPoolCapForType } from './shuffleCaps';
 import { totalItemsForTypeByRank } from './pageAssignment';
 import type { GuildRank } from '../types';
@@ -42,12 +43,54 @@ export function parseRewardItemCounts(
   const toInt = (v: unknown, d: number) =>
     Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d;
   const fragment = toInt(j.fragment, fallback.fragment);
+  let fragmentByItemId: Record<string, number> | undefined;
+  const rawById = j.fragmentByItemId;
+  if (rawById && typeof rawById === 'object' && !Array.isArray(rawById)) {
+    const map: Record<string, number> = {};
+    for (const [id, v] of Object.entries(rawById as Record<string, unknown>)) {
+      if (!id) continue;
+      map[id] = toInt(v, fragment);
+    }
+    if (Object.keys(map).length > 0) fragmentByItemId = map;
+  }
+  const base = { fragment, ...(fragmentByItemId ? { fragmentByItemId } : {}) };
   if (j.feathers != null && j.feathers !== '') {
-    return { fragment, feathers: toInt(j.feathers, fallback.feathers) };
+    return { ...base, feathers: toInt(j.feathers, fallback.feathers) };
   }
   const lnd = toInt(j.lnd, rank === 'Emperium overrun' ? 150 : 30);
   const tns = toInt(j.tns, rank === 'Emperium overrun' ? 170 : 50);
-  return { fragment, feathers: lnd + tns };
+  return { ...base, feathers: lnd + tns };
+}
+
+/** Item slots for a specific fragment card row (falls back to shared `fragment`). */
+export function fragmentCountForItem(
+  counts: RewardItemCounts,
+  itemId: string
+): number {
+  const override = counts.fragmentByItemId?.[itemId];
+  if (override != null && Number.isFinite(override)) {
+    return Math.max(0, Math.floor(override));
+  }
+  return counts.fragment;
+}
+
+export function activeFragmentAuctionItems(
+  items: AuctionItem[]
+): AuctionItem[] {
+  return sortAuctionItemsForDisplay(
+    items.filter((it) => it.status === 'active' && it.type === 'Fragment Card')
+  );
+}
+
+export function buildFragmentLimitsByItemId(
+  items: AuctionItem[],
+  counts: RewardItemCounts
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const it of activeFragmentAuctionItems(items)) {
+    out[it.id] = fragmentCountForItem(counts, it.id);
+  }
+  return out;
 }
 
 /** Merge legacy LND/TNS cards into one Feathers card; normalize existing Feathers rows. */
@@ -58,7 +101,8 @@ export function migrateFeatherItems(items: AuctionItem[]): AuctionItem[] {
     (it) => !isLegacyFeatherType(it.type) && it.type !== 'Feathers'
   );
 
-  if (legacy.length === 0) {
+  // Nothing to merge: zero or one Feathers row and no legacy LND/TNS rows.
+  if (legacy.length === 0 && existingFeathers.length <= 1) {
     return [
       ...rest,
       ...existingFeathers.map((it) =>
@@ -67,16 +111,19 @@ export function migrateFeatherItems(items: AuctionItem[]): AuctionItem[] {
     ];
   }
 
+  // Build a merge-source list from every Feathers-or-legacy row, ordered
+  // oldest-first so the earliest row becomes the primary survivor. This
+  // covers BOTH the legacy → Feathers migration AND the duplicate-Feathers
+  // case (which previously was a no-op and left two identical cards in the
+  // UI).
   const sortedLegacy = [...legacy].sort(
     (a, b) => Number(a.createdAt) - Number(b.createdAt)
   );
-  const primary = sortedLegacy[0]!;
-  const mergeSources =
-    existingFeathers.length > 0
-      ? [...sortedLegacy, ...existingFeathers].sort(
-          (a, b) => Number(a.createdAt) - Number(b.createdAt)
-        )
-      : sortedLegacy;
+  const allCandidates = [...sortedLegacy, ...existingFeathers].sort(
+    (a, b) => Number(a.createdAt) - Number(b.createdAt)
+  );
+  const primary = allCandidates[0]!;
+  const mergeSources = allCandidates;
 
   const seenMemberIds = new Set<number>();
   const mergedMemberIds: number[] = [];
@@ -127,9 +174,12 @@ export function migrateFeatherItems(items: AuctionItem[]): AuctionItem[] {
     createdAt: primary.createdAt,
   };
 
-  const cancelledLegacy = mergeSources
+  // Every non-survivor row (legacy LND/TNS AND any extra Feathers
+  // duplicates) is marked cancelled so the dashboard hides it; queues and
+  // recorded winners have already been merged into `feathers` above.
+  const cancelledExtras = mergeSources
     .filter((it) => it.id !== feathers.id)
     .map((it) => ({ ...it, status: 'cancelled' as const }));
 
-  return [...rest, feathers, ...cancelledLegacy];
+  return [...rest, feathers, ...cancelledExtras];
 }

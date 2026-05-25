@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS app_meta (
 CREATE TABLE IF NOT EXISTS members (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
-  role ENUM('Leader', 'Member') NOT NULL,
+  role ENUM('Officer', 'Member', 'Developer', 'Admin') NOT NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
   INDEX idx_members_name (name),
   INDEX idx_members_active (active)

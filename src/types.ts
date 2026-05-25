@@ -25,7 +25,7 @@ export interface AuctionItem {
 export interface GuildMember {
   id: number;
   name: string;
-  role: 'Leader' | 'Member';
+  role: 'Officer' | 'Member' | 'Developer' | 'Admin';
 }
 
 /** Lingguhang type lock: normalized IGN + item type (mula sa server `GET /api/state`). */
@@ -67,8 +67,11 @@ export type WeeklyEventType = 'Guild League' | 'Emperium Overrun';
 export type GuildRank = 'Bronze' | 'Emperium overrun';
 
 export interface RewardItemCounts {
+  /** Default item count for fragment cards without a per-id override. */
   fragment: number;
   feathers: number;
+  /** Per fragment auction item (e.g. m1 Puppet, m4 Illusion). */
+  fragmentByItemId?: Record<string, number>;
 }
 
 export interface AuctionState {

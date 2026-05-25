@@ -47,6 +47,11 @@ import {
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
 import { filterToCurrentAuctionWeek, getAuctionWeekMondayKey } from './lib/auctionWeek';
+import {
+  shuffleRevealWindowForItem,
+  sortAuctionItemsForDisplay,
+} from './lib/auctionItemDisplayOrder';
+import { fragmentCountForItem } from './lib/featherMigration';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import {
   computeWinnerAssignmentLabelsFromItems,
@@ -129,7 +134,9 @@ export default function PublicAuctionView() {
   const startPublicShuffleVisual = useCallback((snapshot: AuctionState) => {
     if (publicShuffleRunningRef.current) return;
     publicShuffleRunningRef.current = true;
-    const activeItems = snapshot.items.filter((it) => it.status === 'active');
+    const activeItems = sortAuctionItemsForDisplay(
+      snapshot.items.filter((it) => it.status === 'active')
+    );
     const previewQueueByItemId: Record<string, number[]> = {};
     for (const it of activeItems) {
       previewQueueByItemId[it.id] = shuffleQueueIdsForType(
@@ -148,14 +155,6 @@ export default function PublicAuctionView() {
     const activeItemIds = activeItems.map((it) => it.id);
     const spinOffsetByItemIdLocal: Record<string, number> = {};
     let lastPickAt = 0;
-    const revealWindowForType = (
-      type: ItemType
-    ): { start: number; end: number } => {
-      if (type === 'Feathers') return { start: 0.18, end: 0.78 };
-      if (type === 'Fragment Card') return { start: 0.78, end: 1.0 };
-      return { start: 0.55, end: 1.0 };
-    };
-
     const tick = (now: number) => {
       const raw = Math.min(1, (now - t0) / PUBLIC_SHUFFLE_VISUAL_MS);
       const pickIntervalMs = Math.round(75 + raw * 190);
@@ -171,7 +170,9 @@ export default function PublicAuctionView() {
             0,
             item ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap) : 0
           );
-          const window = item ? revealWindowForType(item.type) : { start: 0.55, end: 1.0 };
+          const window = item
+            ? shuffleRevealWindowForItem(item, activeItems)
+            : { start: 0.55, end: 1.0 };
           const revealProgress =
             raw <= window.start
               ? 0
@@ -480,9 +481,11 @@ export default function PublicAuctionView() {
 
   const activeItems = useMemo(
     () =>
-      state?.items.filter(
-        (i) => i.status === 'active' && !isAuctionItemHidden(i)
-      ) ?? [],
+      sortAuctionItemsForDisplay(
+        state?.items.filter(
+          (i) => i.status === 'active' && !isAuctionItemHidden(i)
+        ) ?? []
+      ),
     [state]
   );
 
@@ -508,7 +511,7 @@ export default function PublicAuctionView() {
       out[it.id] = nextPage;
       const totalItems =
         it.type === 'Fragment Card'
-          ? counts.fragment
+          ? fragmentCountForItem(counts, it.id)
           : counts.feathers;
       nextPage +=
         it.type === 'Fragment Card'
@@ -1166,7 +1169,7 @@ function PublicQueueCard({
   const winnerPageRanges = (() => {
     const totalItems =
       item.type === 'Fragment Card'
-        ? rewardItemCounts.fragment
+        ? fragmentCountForItem(rewardItemCounts, item.id)
         : item.type === 'Feathers'
           ? rewardItemCounts.feathers
           : 1;

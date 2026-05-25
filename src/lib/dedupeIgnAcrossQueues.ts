@@ -1,5 +1,6 @@
 import type { AuctionState } from '../types';
 import { isAuctionItemHidden } from './hiddenAuctionItems';
+import { parseGuildRank, winnerSlotsFromTotalItems } from './pageAssignment';
 import {
   computeKeptQueueMemberKeys,
   defaultEventModeForQueues,
@@ -66,8 +67,43 @@ export function dedupeIgnAcrossActiveQueues(s: AuctionState): AuctionState {
 /** Guild League: one queue slot per person. Emperium: prune orphans only. */
 export function normalizeQueuesForEventMode(s: AuctionState): AuctionState {
   const pruned = pruneOrphanQueueMembers(s);
-  if (defaultEventModeForQueues(pruned.eventMode) === 'Guild League') {
-    return dedupeIgnAcrossActiveQueues(pruned);
-  }
-  return pruned;
+  const normalized =
+    defaultEventModeForQueues(pruned.eventMode) === 'Guild League'
+      ? dedupeIgnAcrossActiveQueues(pruned)
+      : pruned;
+  return normalizeWinnerPoolCapsForLimits(normalized);
+}
+
+/**
+ * Recompute `winnerPoolCap` for Fragment Card and Feathers items based on the
+ * currently-saved `rewardItemCounts` + `rewardRank`. Other types (Ancient Item,
+ * Other) are untouched.
+ *
+ * Why: the "Winner Set Limit" modal is the source of truth for how many winners
+ * each card should have, but legacy/migrated items can carry a stale
+ * `winnerPoolCap` (e.g. the default 19 for Feathers from when the merger
+ * deduped multiple Feathers rows but didn't re-apply the current limit).
+ * Recomputing on load keeps the displayed winner count consistent with what
+ * the admin saved without forcing them to re-open and re-save the modal.
+ */
+export function normalizeWinnerPoolCapsForLimits(s: AuctionState): AuctionState {
+  const counts = s.rewardItemCounts;
+  if (!counts) return s;
+  const rank = parseGuildRank(s.rewardRank);
+  const items = s.items.map((it) => {
+    if (it.type === 'Fragment Card') {
+      const totalItems =
+        counts.fragmentByItemId?.[it.id] ?? counts.fragment ?? 0;
+      const next = winnerSlotsFromTotalItems('Fragment Card', totalItems, rank);
+      if (it.winnerPoolCap === next) return it;
+      return { ...it, winnerPoolCap: next };
+    }
+    if (it.type === 'Feathers') {
+      const next = winnerSlotsFromTotalItems('Feathers', counts.feathers ?? 0, rank);
+      if (it.winnerPoolCap === next) return it;
+      return { ...it, winnerPoolCap: next };
+    }
+    return it;
+  });
+  return { ...s, items };
 }

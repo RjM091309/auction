@@ -63,12 +63,22 @@ function parseRewardItemCounts(raw) {
     const toInt = (v, d) =>
       Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d;
     const fragment = toInt(j.fragment, fallback.fragment);
+    let fragmentByItemId;
+    if (j.fragmentByItemId && typeof j.fragmentByItemId === 'object' && !Array.isArray(j.fragmentByItemId)) {
+      fragmentByItemId = {};
+      for (const [id, v] of Object.entries(j.fragmentByItemId)) {
+        if (!id) continue;
+        fragmentByItemId[id] = toInt(v, fragment);
+      }
+      if (Object.keys(fragmentByItemId).length === 0) fragmentByItemId = undefined;
+    }
+    const base = fragmentByItemId ? { fragment, fragmentByItemId } : { fragment };
     if (j.feathers != null && j.feathers !== '') {
-      return { fragment, feathers: toInt(j.feathers, fallback.feathers) };
+      return { ...base, feathers: toInt(j.feathers, fallback.feathers) };
     }
     const lnd = toInt(j.lnd, 30);
     const tns = toInt(j.tns, 50);
-    return { fragment, feathers: lnd + tns };
+    return { ...base, feathers: lnd + tns };
   } catch {
     return fallback;
   }
@@ -121,11 +131,18 @@ function coerceMemberId(v) {
   return null;
 }
 
-function resolveQueueMemberId(raw, idRemap) {
+function resolveQueueMemberId(raw, idRemap, existingIds = null) {
   if (idRemap.has(raw)) return idRemap.get(raw);
   const s = String(raw);
   if (idRemap.has(s)) return idRemap.get(s);
-  return coerceMemberId(raw);
+  const coerced = coerceMemberId(raw);
+  if (coerced == null) return null;
+  // When the caller hands us an "existing id" gate, only allow the raw id
+  // through if it actually points to a live `members` row. This prevents
+  // a stale dashboard PUT from inserting `item_queue` rows that would
+  // violate the FK on `members(id)` (e.g. the member was just deleted).
+  if (existingIds && !existingIds.has(coerced)) return null;
+  return coerced;
 }
 
 function parseWinnerNamesJson(raw) {
@@ -159,6 +176,21 @@ function ignForRemappedMember(body, idRemap, resolvedId) {
     if (r === resolvedId && typeof m.name === 'string') return m.name;
   }
   return '';
+}
+
+/**
+ * Atomically update only the event mode (Guild League / Emperium Overrun).
+ * Used by the privileged Admin/Developer-gated `/api/state/event-mode`
+ * endpoint, which avoids resaving the whole auction state just to flip one
+ * flag. Returns the post-update full state.
+ */
+export async function setEventMode(pool, rawMode) {
+  const nextMode = sanitizeEventName(rawMode);
+  await pool.query(
+    'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+    [EVENT_MODE_META_KEY, nextMode]
+  );
+  return getFullState(pool);
 }
 
 export async function getFullState(pool) {
@@ -313,7 +345,12 @@ async function findOrCreateActiveMemberId(conn, rawName) {
     'INSERT INTO members (name, role, active) VALUES (?, ?, 1)',
     [name, 'Member']
   );
-  return Number(ins.insertId);
+  const newId = Number(ins.insertId);
+  await conn.query(
+    `UPDATE members SET password = ? WHERE id = ? AND (password IS NULL OR password = '')`,
+    [String(newId), newId]
+  );
+  return newId;
 }
 
 /** True if a matching IGN is already on this item queue. */
@@ -479,6 +516,20 @@ export async function removeMemberFromItemQueue(pool, itemId, memberId) {
   return getFullState(pool);
 }
 
+/**
+ * Bulk-clear `item_queue` for every currently-active auction item.
+ * Mirrors the "Clear all lists" admin button — destructive, hence gated to
+ * Admin/Developer at the API layer.
+ */
+export async function clearAllActiveQueues(pool) {
+  await pool.query(`
+    DELETE iq FROM item_queue iq
+    INNER JOIN auction_items ai ON ai.id = iq.item_id
+    WHERE ai.status = 'active'
+  `);
+  return getFullState(pool);
+}
+
 /** Soft-delete member (active=0) and remove from all queues; returns fresh state. */
 export async function deactivateMember(pool, memberId) {
   const id =
@@ -594,17 +645,46 @@ export async function replaceFullState(pool, body) {
 
     const idRemap = new Map();
 
+    // Existing members in DB keyed by id. We only ever UPDATE pre-existing
+    // rows from a dashboard state PUT. We never INSERT a missing id because
+    // membership lifecycle (create / hard-delete / soft-delete / reactivate)
+    // is owned by the Bidder Registration endpoints. Resurrecting a deleted
+    // row here used to leak empty-password rows and silently bring back
+    // members that an admin had just removed.
+    const [existingRows] = await conn.query(
+      `SELECT id, name, role, active FROM members`
+    );
+    const existingById = new Map(
+      (Array.isArray(existingRows) ? existingRows : []).map((r) => [
+        Number(r.id),
+        r,
+      ])
+    );
+
     for (const m of body.members) {
       const cid = coerceMemberId(m.id);
-      if (cid != null) {
-        await conn.query(
-          `INSERT INTO members (id, name, role, active) VALUES (?, ?, ?, 1)
-           ON DUPLICATE KEY UPDATE name = VALUES(name), role = VALUES(role), active = 1`,
-          [cid, m.name, m.role]
-        );
-        idRemap.set(m.id, cid);
-        idRemap.set(String(m.id), cid);
+      if (cid == null) continue;
+      const existing = existingById.get(cid);
+      if (!existing) {
+        // Row was hard-deleted server-side. Do NOT resurrect from a stale
+        // dashboard state body. Skip silently — the next poll on the client
+        // will drop this stale member.
+        continue;
       }
+      const nextName = String(m.name ?? existing.name);
+      const nextRole = String(m.role ?? existing.role);
+      const namesDiffer = existing.name !== nextName;
+      const rolesDiffer = existing.role !== nextRole;
+      if (namesDiffer || rolesDiffer) {
+        await conn.query(
+          `UPDATE members SET name = ?, role = ? WHERE id = ?`,
+          [nextName, nextRole, cid]
+        );
+      }
+      // Note: we intentionally never flip `active` here. Soft-delete /
+      // reactivation must go through dedicated endpoints.
+      idRemap.set(m.id, cid);
+      idRemap.set(String(m.id), cid);
     }
 
     for (const m of body.members) {
@@ -614,38 +694,32 @@ export async function replaceFullState(pool, body) {
         [m.name, m.role, 1]
       );
       const newId = Number(ins.insertId);
+      // Default bidder password to the assigned numeric id (Bidder Registration page).
+      await conn.query(
+        `UPDATE members SET password = ? WHERE id = ? AND (password IS NULL OR password = '')`,
+        [String(newId), newId]
+      );
       idRemap.set(m.id, newId);
       idRemap.set(String(m.id), newId);
     }
 
-    const memberIds = new Set();
-
-    for (const m of body.members) {
-      const cid = idRemap.get(m.id) ?? idRemap.get(String(m.id));
-      if (typeof cid === 'number' && !Number.isNaN(cid) && cid > 0) {
-        memberIds.add(cid);
+    // Build the "currently-live id" gate so queue inserts can never reference
+    // a member row that doesn't exist. This includes both rows that already
+    // existed in DB (existingById) and rows we just inserted via the
+    // "members without an explicit id" branch above (idRemap entries).
+    const existingMemberIds = new Set(existingById.keys());
+    for (const v of idRemap.values()) {
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+        existingMemberIds.add(v);
       }
     }
 
-    for (const it of body.items) {
-      const ids = Array.isArray(it.interestedMemberIds)
-        ? it.interestedMemberIds
-        : [];
-      for (const memberId of ids) {
-        const resolved = resolveQueueMemberId(memberId, idRemap);
-        if (resolved != null && resolved > 0) memberIds.add(resolved);
-      }
-    }
-
-    const memberIdList = [...memberIds];
-
-    if (memberIdList.length > 0) {
-      const ph = memberIdList.map(() => '?').join(',');
-      await conn.query(
-        `UPDATE members SET active = 0 WHERE id NOT IN (${ph})`,
-        memberIdList
-      );
-    }
+    // NOTE: we intentionally do NOT auto-deactivate members that are missing
+    // from `body.members`. Deactivation is owned by the dedicated bidder
+    // endpoints (`DELETE /api/bidders/:id` for hard-delete and
+    // `DELETE /api/state/members/:id` for soft-delete). A stale dashboard PUT
+    // used to silently flip `active=0` for any member it had not yet seen
+    // (e.g. an admin just created from the Bidders tab) — that race is gone.
 
     for (const it of body.items) {
       await conn.query(
@@ -669,7 +743,7 @@ export async function replaceFullState(pool, body) {
         : [];
       let pos = 0;
       for (const memberId of ids) {
-        const resolved = resolveQueueMemberId(memberId, idRemap);
+        const resolved = resolveQueueMemberId(memberId, idRemap, existingMemberIds);
         if (resolved == null || resolved <= 0) continue;
         await conn.query(
           'INSERT INTO item_queue (item_id, member_id, position) VALUES (?, ?, ?)',
@@ -738,7 +812,7 @@ export async function replaceFullState(pool, body) {
           : [];
         let idx = 0;
         for (const rawMid of ids) {
-          const resolved = resolveQueueMemberId(rawMid, idRemap);
+          const resolved = resolveQueueMemberId(rawMid, idRemap, existingMemberIds);
           if (resolved == null || resolved <= 0) {
             idx += 1;
             continue;
@@ -770,7 +844,7 @@ export async function replaceFullState(pool, body) {
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
         for (const [k, v] of Object.entries(raw)) {
           if (typeof k !== 'string' || !k) continue;
-          const mid = resolveQueueMemberId(v, idRemap);
+          const mid = resolveQueueMemberId(v, idRemap, existingMemberIds);
           if (mid != null && mid > 0) cleaned[k] = mid;
         }
       }

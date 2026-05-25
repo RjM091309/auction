@@ -27,14 +27,21 @@ function seenHasMatchingIgn(seen: Set<string>, ign: string): boolean {
 }
 
 /**
- * Before admin save: keep local queue order/edits, but always union in everyone
- * currently on the server (public bids). Never drop a remote queue row because
- * of poll baseline — that was deleting public joins after admin auto-save.
+ * Before admin save: keep local queue order/edits, union in NEW public bids
+ * the server has seen since our last sync, and honor admin removals/moves.
+ *
+ * The `baseline` (IGNs per item as of the last admin↔server sync) is the
+ * source of truth that lets us distinguish:
+ *   • Server row that was here AT baseline AND no longer in local =
+ *     intentional admin removal/move → drop it.
+ *   • Server row that is NOT in baseline = brand-new public bid that
+ *     arrived after our last sync → keep it (this is the bug the old
+ *     "always union remote" rule was protecting against).
  */
 export function mergeQueuesForPersist(
   local: AuctionState,
   remote: AuctionState,
-  _baseline?: QueueBaselineByItemId
+  baseline?: QueueBaselineByItemId
 ): AuctionState {
   const membersById = new Map<number, GuildMember>();
   for (const m of remote.members) membersById.set(m.id, m);
@@ -49,7 +56,9 @@ export function mergeQueuesForPersist(
 
     const localIds = it.interestedMemberIds;
     const remoteIds = remoteIt.interestedMemberIds;
+    const localIdSet = new Set(localIds);
     const remoteIdSet = new Set(remoteIds);
+    const baselineIgns = baseline?.get(it.id) ?? new Set<string>();
     const mergedIds: number[] = [];
     const seen = new Set<string>();
 
@@ -65,8 +74,15 @@ export function mergeQueuesForPersist(
       tryAppend(mid);
     }
 
-    // Always keep server/public rows (even if missing from stale local snapshot).
+    // Server rows: keep only those that the admin didn't intentionally
+    // remove. A row is an admin removal iff it was on this item at the
+    // last server sync AND is missing from `local` now. Anything else is
+    // either still in `local` (already appended above) or a brand-new
+    // public bid that should be preserved.
     for (const mid of remoteIds) {
+      if (localIdSet.has(mid)) continue;
+      const ign = membersById.get(mid)?.name.trim();
+      if (ign && seenHasMatchingIgn(baselineIgns, ign)) continue;
       tryAppend(mid);
     }
 

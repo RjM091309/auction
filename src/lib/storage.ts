@@ -44,6 +44,18 @@ function normalizeAuctionItems(items: AuctionItem[]): AuctionItem[] {
   );
 }
 
+/** Add default rows missing from persisted state (e.g. new Illusion Frag Card on v5). */
+export function mergeMissingDefaultAuctionItems(items: AuctionItem[]): AuctionItem[] {
+  const byId = new Map(items.map((it) => [it.id, it]));
+  const out = [...items];
+  for (const row of DEFAULT_AUCTION_ITEMS) {
+    if (!byId.has(row.id)) {
+      out.push({ ...row, createdAt: Date.now() });
+    }
+  }
+  return out;
+}
+
 export const saveState = (state: AuctionState) => {
   const payload: AuctionState = {
     ...state,
@@ -71,12 +83,16 @@ export const loadState = (): AuctionState => {
     if (storedVersion < AUCTION_DATA_VERSION) {
       const useDefaultRows =
         rawItems.length === 0 || isLegacyTwoCardSeed(rawItems);
+      const additiveUpgrade =
+        !useDefaultRows && storedVersion >= 4 && AUCTION_DATA_VERSION >= 5;
       const baseItems = useDefaultRows
         ? DEFAULT_AUCTION_ITEMS.map((row) => ({ ...row, createdAt: Date.now() }))
-        : rawItems.map((it) => ({
-            ...it,
-            interestedMemberIds: [],
-          }));
+        : additiveUpgrade
+          ? mergeMissingDefaultAuctionItems(normalizeAuctionItems(rawItems))
+          : rawItems.map((it) => ({
+              ...it,
+              interestedMemberIds: [],
+            }));
       return dedupeRosterMembersByIgn({
         items: migrateFeatherItems(normalizeAuctionItems(baseItems)),
         members,

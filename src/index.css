@@ -7,7 +7,15 @@
 
 @layer base {
   body {
-    @apply bg-slate-950 text-slate-100 antialiased;
+    @apply text-slate-100 antialiased;
+    background-color: rgb(2 6 23);
+    background-image:
+      linear-gradient(rgba(2, 6, 23, 0.88), rgba(2, 6, 23, 0.88)),
+      url('/images/bg-outlast.jpg');
+    background-size: cover;
+    background-position: center center;
+    background-attachment: fixed;
+    background-repeat: no-repeat;
   }
 
   /**

@@ -14,10 +14,13 @@ import {
   RotateCcw,
   Search,
   ListX,
-  Pencil,
   GripVertical,
-  LogOut,
+  UserPlus,
   XCircle,
+  Eye,
+  EyeOff,
+  Trophy,
+  Wrench,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -30,7 +33,12 @@ import {
 } from './types';
 import { saveState } from './lib/storage';
 import { AUCTION_DATA_VERSION } from './data/auctionDefaults';
-import { featherLogTypeMatches } from './lib/featherMigration';
+import {
+  activeFragmentAuctionItems,
+  buildFragmentLimitsByItemId,
+  featherLogTypeMatches,
+  fragmentCountForItem,
+} from './lib/featherMigration';
 import {
   findMemberByIgnIdentity,
   ignMatchesForQueueIdentity,
@@ -46,8 +54,9 @@ import {
   deactivateMemberOnServer,
   removeMemberFromItemQueueOnServer,
   fetchAuctionState,
-  logoutRequest,
   persistAuctionState,
+  setEventModeOnServer,
+  clearAllActiveQueuesOnServer,
 } from './lib/apiState';
 import { randomId } from './lib/randomId';
 import { nextTempMemberId } from './lib/tempMemberId';
@@ -71,6 +80,7 @@ import {
 } from './lib/sweetAlert2';
 import {
   dedupeIgnAcrossActiveQueues,
+  normalizeWinnerPoolCapsForLimits,
   normalizeQueuesForEventMode,
   pruneOrphanQueueMembers,
 } from './lib/dedupeIgnAcrossQueues';
@@ -92,11 +102,14 @@ import {
   shuffleQueueIdsForType,
 } from './lib/shuffleCaps';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
+import {
+  shuffleRevealWindowForItem,
+  sortAuctionItemsForDisplay,
+} from './lib/auctionItemDisplayOrder';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
 import { filterToCurrentAuctionWeek, getAuctionWeekMondayKey } from './lib/auctionWeek';
 import {
-  computeWinnerAssignmentLabelsFromItems,
   featherItemsPerWinnerUnit,
   featherPageCountBeforePartialFree,
   featherRewardSpanFourItemPages,
@@ -105,7 +118,6 @@ import {
   GUILD_RANK_OPTIONS,
   parseGuildRank,
   totalItemsForTypeByRank,
-  winnerAssignmentLabelTitle,
   winnerSlotsFromTotalItems,
   formatFreePoolPageDisplay,
   freePoolPageLabelTitle,
@@ -126,6 +138,19 @@ import {
   summarizeBidderStateLog,
 } from './lib/bidderStateLogUi';
 import { BidderRankingExpandableRows } from './components/BidderRankingExpandableRows';
+import BidderRegistration from './BidderRegistration';
+import BidderAuthModal from './BidderAuthModal';
+import { NameDropdown } from './BidderAuthGate';
+import {
+  ActiveMember,
+  BidderActor,
+  clearStoredActor,
+  fetchActiveMembers,
+  loadStoredActor,
+  storeActor,
+  verifyMemberRequest,
+} from './lib/apiBidders';
+import { DashboardTab, pathForTab, tabFromPath } from './lib/tabRoute';
 
 /** How often the admin dashboard pulls server state so public joins show up without manual refresh. */
 const ADMIN_STATE_POLL_MS = 2000;
@@ -171,7 +196,7 @@ function guildRankButtonLabel(rank: GuildRank): string {
   return rank;
 }
 
-export default function AuctionDashboard({ onLogout }: { onLogout: () => void }) {
+export default function AuctionDashboard() {
   const [state, setState] = useState<AuctionState | null>(null);
   const mayPersist = useRef(false);
   const skipInitialPersist = useRef(1);
@@ -200,61 +225,109 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     persistDebouncePendingRef.current = false;
   };
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
+  const [activeTab, setActiveTabState] = useState<DashboardTab>(() =>
+    typeof window === 'undefined' ? 'dashboard' : tabFromPath(window.location.pathname)
+  );
+
+  /** Switch tab and keep `window.location.pathname` in sync (back/forward works). */
+  const setActiveTab = (next: DashboardTab) => {
+    setActiveTabState((prev) => {
+      if (typeof window !== 'undefined') {
+        const targetPath = pathForTab(next);
+        const { pathname, search, hash } = window.location;
+        if (pathname !== targetPath) {
+          window.history.pushState(null, '', `${targetPath}${search}${hash}`);
+        }
+      }
+      return next === prev ? prev : next;
+    });
+  };
+
+  useEffect(() => {
+    const handler = () => setActiveTabState(tabFromPath(window.location.pathname));
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
+
+  /** Read-only ref so polling can early-return on tabs that do not need live state. */
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  /**
+   * Keep-alive set: once a tab has been opened we keep it mounted (hidden via
+   * CSS) so switching back is instant — React does not have to re-construct
+   * the heavy Queues/Logs DOM on every tab change.
+   */
+  const [visitedTabs, setVisitedTabs] = useState<Set<DashboardTab>>(
+    () => new Set([activeTab])
+  );
+  useEffect(() => {
+    setVisitedTabs((prev) => {
+      if (prev.has(activeTab)) return prev;
+      const next = new Set(prev);
+      next.add(activeTab);
+      return next;
+    });
+  }, [activeTab]);
   const [isAddItemOpen, setIsAddItemOpen] = useState(false);
   const [queueNameModalItemId, setQueueNameModalItemId] = useState<string | null>(null);
   const [queueNameInput, setQueueNameInput] = useState('');
+  const [queueJoinPassword, setQueueJoinPassword] = useState('');
+  const [queueJoinShowPassword, setQueueJoinShowPassword] = useState(false);
   const [queueAdminSubmitting, setQueueAdminSubmitting] = useState(false);
+  // List of every active member (any role) for the searchable Join-queue
+  // dropdown. Lazily fetched the first time the modal opens, then refreshed
+  // each subsequent open in case Bidders were added/removed in the interim.
+  const [activeMembersForJoin, setActiveMembersForJoin] = useState<ActiveMember[]>([]);
+  const [activeMembersLoading, setActiveMembersLoading] = useState(false);
+  const [activeMembersError, setActiveMembersError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!queueNameModalItemId) return;
+    let cancelled = false;
+    setActiveMembersLoading(true);
+    setActiveMembersError(null);
+    fetchActiveMembers()
+      .then((list) => {
+        if (!cancelled) setActiveMembersForJoin(list);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setActiveMembersError(e instanceof Error ? e.message : String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setActiveMembersLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [queueNameModalItemId]);
+
+  /** Reset every piece of state that backs the Join-queue modal. */
+  const closeJoinQueueModal = () => {
+    setQueueNameModalItemId(null);
+    setQueueNameInput('');
+    setQueueJoinPassword('');
+    setQueueJoinShowPassword(false);
+  };
   const [editMemberId, setEditMemberId] = useState<number | null>(null);
   const [editMemberNameInput, setEditMemberNameInput] = useState('');
   const [winnerSetLimitModalOpen, setWinnerSetLimitModalOpen] = useState(false);
-  const [winnerSetLimitForm, setWinnerSetLimitForm] = useState({
-    rank: 'Bronze' as GuildRank,
-    fragment: defaultWinnerPoolCapForType('Fragment Card'),
+  const [winnerSetLimitForm, setWinnerSetLimitForm] = useState<{
+    rank: GuildRank;
+    feathers: number;
+    fragmentByItemId: Record<string, number>;
+  }>({
+    rank: 'Bronze',
     feathers: defaultWinnerPoolCapForType('Feathers'),
+    fragmentByItemId: {},
   });
   const winnerSlotsFromItems = (type: ItemType, items: number): number => {
     return winnerSlotsFromTotalItems(type, items, winnerSetLimitForm.rank);
   };
-  const winnerSplitPreview = useMemo(() => {
-    const queuedByType = (type: ItemType) =>
-      (state?.items ?? [])
-        .filter((it) => it.status === 'active' && it.type === type)
-        .reduce((sum, it) => sum + it.interestedMemberIds.length, 0);
-    const build = (type: ItemType, items: number, bidders: number) => {
-      const pages =
-        type === 'Fragment Card'
-          ? fragmentGeneralPageSpan(items)
-          : winnerSlotsFromItems(type, items);
-      const labels = computeWinnerAssignmentLabelsFromItems(
-        type,
-        items,
-        bidders,
-        1,
-        winnerSetLimitForm.rank
-      );
-      const winners = labels.length;
-      const sample = labels.slice(0, 3).join(', ');
-      return { winners, pages, sample, hasMore: labels.length > 3 };
-    };
-    const fragmentBidders = queuedByType('Fragment Card');
-    const feathersBidders = queuedByType('Feathers');
-    return {
-      fragment: {
-        bidders: fragmentBidders,
-        ...build('Fragment Card', winnerSetLimitForm.fragment, fragmentBidders),
-      },
-      feathers: {
-        bidders: feathersBidders,
-        ...build('Feathers', winnerSetLimitForm.feathers, feathersBidders),
-      },
-    };
-  }, [
-    state?.items,
-    winnerSetLimitForm.rank,
-    winnerSetLimitForm.fragment,
-    winnerSetLimitForm.feathers,
-  ]);
 
   const [newItemName, setNewItemName] = useState('');
   const [newItemType, setNewItemType] = useState<ItemType>('Fragment Card');
@@ -307,8 +380,10 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         };
       queueBaselineRef.current = buildQueueBaselineFromState(initial);
       setState(
-        dedupeIgnAcrossActiveQueues(
-          pruneOrphanQueueMembers(initial)
+        normalizeWinnerPoolCapsForLimits(
+          dedupeIgnAcrossActiveQueues(
+            pruneOrphanQueueMembers(initial)
+          )
         )
       );
       mayPersist.current = true;
@@ -401,7 +476,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             const recovered = await fetchAuctionState();
             if (recovered) {
               setState(
-                dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(recovered))
+                normalizeWinnerPoolCapsForLimits(
+                  dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(recovered))
+                )
               );
             }
           } catch {
@@ -427,6 +504,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     const applyRemote = async () => {
       if (document.visibilityState === 'hidden') return;
       if (!mayPersist.current) return;
+      // Bidder Registration tab has its own data source (`/api/bidders`); polling
+      // the full auction state here just churns CPU on the parent component.
+      if (activeTabRef.current === 'bidders') return;
       if (
         persistDebouncePendingRef.current ||
         persistInFlightRef.current
@@ -494,7 +574,10 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
   }, []);
 
   const activeAuctions = useMemo(
-    () => state?.items.filter((item) => item.status === 'active') ?? [],
+    () =>
+      sortAuctionItemsForDisplay(
+        state?.items.filter((item) => item.status === 'active') ?? []
+      ),
     [state]
   );
 
@@ -522,7 +605,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       out[it.id] = nextPage;
       const totalItems =
         it.type === 'Fragment Card'
-          ? counts.fragment
+          ? fragmentCountForItem(counts, it.id)
           : counts.feathers;
       nextPage +=
         it.type === 'Fragment Card'
@@ -638,55 +721,131 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     setNewItemWinnerPoolCap(defaultWinnerPoolCapForType(newItemType));
   };
 
-  const handleSaveEventMode = async () => {
-    if (!state || eventModeDraft === eventModeActive || eventModeSaving) return;
-    const ok = await swal2ConfirmSaveEventMode(eventModeActive, eventModeDraft);
-    if (!ok) return;
+  // Event-mode change is restricted to Admin/Developer. We reuse the same
+  // session token / sign-in modal flow as queue-remove, but with a stricter
+  // role filter (Admin + Developer only). Server-side `/api/state/event-mode`
+  // also enforces this so a tampered client cannot bypass the check.
+  const [eventModeAuthPromptOpen, setEventModeAuthPromptOpen] = useState(false);
+  const pendingEventModeRef = useRef<'Guild League' | 'Emperium Overrun' | null>(
+    null
+  );
+
+  const performEventModeSave = async (
+    mode: 'Guild League' | 'Emperium Overrun',
+    token: string
+  ) => {
+    if (!state) return;
+    if (mode === eventModeActive) return;
     setEventModeSaving(true);
+
+    // Same immediate-save + polling-lockout pattern as `handleQueueMove` /
+    // `handleAddNameToQueue`. Without this lock, a polling cycle that was
+    // already mid-fetch when the user clicked Save returns AFTER the
+    // persist finishes, sees its (stale) snapshot, and reverts the event
+    // mode back to what was on the server before our save.
+    cancelPendingPersist();
+    persistInFlightRef.current = true;
+    skipPersistAfterPollRef.current = false;
+
     try {
-      const nextRaw: AuctionState = { ...state, eventMode: eventModeDraft };
-      const nextState = dedupeIgnAcrossActiveQueues(
-        pruneOrphanQueueMembers(nextRaw)
+      const server = await setEventModeOnServer(mode, token);
+      // Suppress the debounced save that would otherwise be scheduled by
+      // this setState — the server is already authoritative.
+      skipPersistOnceRef.current = true;
+      const finalState = normalizeWinnerPoolCapsForLimits(
+        dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
       );
-      const server = await persistAuctionState(nextState);
-      const merged = server ?? nextState;
-      setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(merged)));
-      void swal2EventModeSaved(merged.eventMode ?? eventModeDraft);
+      queueBaselineRef.current = buildQueueBaselineFromState(finalState);
+      setState(finalState);
+      void swal2EventModeSaved(server.eventMode ?? mode);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      if (/sign in|401|expired|admin or developer/i.test(msg)) {
+        // Stored token rejected or insufficient role — drop it and re-prompt.
+        clearStoredActor();
+        pendingEventModeRef.current = mode;
+        setEventModeAuthPromptOpen(true);
+        return;
+      }
       void swal2SaveError(msg || 'Could not save event mode');
+      try {
+        const recovered = await fetchAuctionState();
+        if (recovered) {
+          queueBaselineRef.current = buildQueueBaselineFromState(recovered);
+          setState(
+            normalizeWinnerPoolCapsForLimits(
+                  dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(recovered))
+                )
+          );
+        }
+      } catch {
+        /* ignore */
+      }
     } finally {
+      persistInFlightRef.current = false;
       setEventModeSaving(false);
     }
   };
 
-  const handleShuffleAllQueues = async () => {
+  const handleSaveEventMode = async () => {
+    if (!state || eventModeDraft === eventModeActive || eventModeSaving) return;
+    const ok = await swal2ConfirmSaveEventMode(eventModeActive, eventModeDraft);
+    if (!ok) return;
+
+    // Admin/Developer gate: reuse the stored Bidders-tab session if its role
+    // qualifies; otherwise pop the sign-in modal restricted to those roles.
+    const stored = loadStoredActor();
+    if (stored && (stored.role === 'Admin' || stored.role === 'Developer')) {
+      await performEventModeSave(eventModeDraft, stored.token);
+      return;
+    }
+    pendingEventModeRef.current = eventModeDraft;
+    setEventModeAuthPromptOpen(true);
+  };
+
+  const handleEventModeAuthSuccess = (actor: BidderActor) => {
+    storeActor(actor);
+    setEventModeAuthPromptOpen(false);
+    const pending = pendingEventModeRef.current;
+    pendingEventModeRef.current = null;
+    if (pending && (actor.role === 'Admin' || actor.role === 'Developer')) {
+      void performEventModeSave(pending, actor.token);
+    }
+  };
+
+  const handleEventModeAuthCancel = () => {
+    setEventModeAuthPromptOpen(false);
+    pendingEventModeRef.current = null;
+  };
+
+  // Bearer token that authorizes the privileged shuffle-lock transition on
+  // the server. Captured at "Start Shuffle" time (either from a fresh
+  // sessionStorage actor or from the sign-in modal) and passed through to
+  // `persistAuctionState` when the 20-second animation completes.
+  const shuffleBearerRef = useRef<string | null>(null);
+  const [shuffleAuthPromptOpen, setShuffleAuthPromptOpen] = useState(false);
+
+  const startShuffleNow = async (bearerToken: string) => {
     if (!latestState.current || shuffleRunningRef.current) return;
     if (latestState.current.shuffleLocked === true) return;
     const snapshot = latestState.current;
-    const activeItemsForShuffle = snapshot.items.filter((it) => it.status === 'active');
+    const activeItemsForShuffle = sortAuctionItemsForDisplay<AuctionItem>(
+      snapshot.items.filter((it) => it.status === 'active')
+    );
     const totalParticipants = activeItemsForShuffle.reduce(
       (sum, it) => sum + it.interestedMemberIds.length,
       0
     );
-    const participantCountByType = (type: ItemType) =>
-      activeItemsForShuffle
-        .filter((it) => it.type === type)
-        .reduce((sum, it) => sum + it.interestedMemberIds.length, 0);
-    const fragmentParticipants = participantCountByType('Fragment Card');
-    const feathersParticipants = participantCountByType('Feathers');
-    const typeLimit = (type: ItemType) => {
-      const ref = snapshot.items.find((it) => it.type === type);
-      return maxQueueSlotsAfterShuffle(type, ref?.winnerPoolCap);
-    };
     const ok = await swal2ConfirmShuffleAllQueues({
       totalParticipants,
-      fragmentParticipants,
-      feathersParticipants,
-      fragmentLimit: typeLimit('Fragment Card'),
-      feathersLimit: typeLimit('Feathers'),
+      cards: activeItemsForShuffle.map((it) => ({
+        name: displayAuctionItemName(it.name),
+        bidders: it.interestedMemberIds.length,
+        winnerLimit: maxQueueSlotsAfterShuffle(it.type, it.winnerPoolCap),
+      })),
     });
     if (!ok) return;
+    shuffleBearerRef.current = bearerToken;
     shuffleRunningRef.current = true;
     const previewQueueByItemId: Record<string, number[]> = {};
     for (const it of activeItemsForShuffle) {
@@ -707,14 +866,6 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     const activeItemIds = activeItemsForShuffle.map((it) => it.id);
     let lastPickAt = 0;
     const spinOffsetByItemIdLocal: Record<string, number> = {};
-    const revealWindowForType = (
-      type: ItemType
-    ): { start: number; end: number } => {
-      if (type === 'Feathers') return { start: 0.18, end: 0.78 };
-      if (type === 'Fragment Card') return { start: 0.78, end: 1.0 };
-      return { start: 0.55, end: 1.0 };
-    };
-
     const tick = (now: number) => {
       if (shuffleUnmountRef.current) {
         shuffleRunningRef.current = false;
@@ -742,7 +893,9 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             0,
             item ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap) : 0
           );
-          const window = item ? revealWindowForType(item.type) : { start: 0.55, end: 1.0 };
+          const window = item
+            ? shuffleRevealWindowForItem(item, activeItemsForShuffle)
+            : { start: 0.55, end: 1.0 };
           const revealProgress =
             raw <= window.start
               ? 0
@@ -783,34 +936,109 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
 
       shuffleRafRef.current = null;
       shuffleRunningRef.current = false;
-      setState((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          shuffleLocked: true,
-          winnerShortlistUiEnabled: true,
-          freeDrawChosenByItemId: {},
-          items: prev.items.map((item) => {
-            if (item.status !== 'active') return item;
-            return {
-              ...item,
-              /** Green checks tinatanggal lang sa Reset shuffle; queue pinapanatili ang lahat ng member. */
-              interestedMemberIds:
-                previewQueueByItemId[item.id] ??
-                shuffleQueueIdsForType(item.interestedMemberIds, item.type),
-            };
-          }),
-        };
-      });
+      const bearer = shuffleBearerRef.current ?? '';
+      shuffleBearerRef.current = null;
+
+      const prevState = latestState.current;
+      if (!prevState) {
+        setShuffleUi({
+          active: false,
+          spinOffsetByItemId: {},
+          revealCountByItemId: {},
+          previewQueueByItemId: {},
+        });
+        return;
+      }
+      const nextOptimistic: AuctionState = {
+        ...prevState,
+        shuffleLocked: true,
+        winnerShortlistUiEnabled: true,
+        freeDrawChosenByItemId: {},
+        items: prevState.items.map((item) => {
+          if (item.status !== 'active') return item;
+          return {
+            ...item,
+            /** Green checks tinatanggal lang sa Reset shuffle; queue pinapanatili ang lahat ng member. */
+            interestedMemberIds:
+              previewQueueByItemId[item.id] ??
+              shuffleQueueIdsForType(item.interestedMemberIds, item.type),
+          };
+        }),
+      };
+
+      // Optimistic render (winners visible immediately), followed by an
+      // immediate-save that lock-outs polling and sends the privileged
+      // bearer. Server gates the shuffleLocked false→true transition; a
+      // 401 means the stored session expired or got demoted.
+      cancelPendingPersist();
+      persistInFlightRef.current = true;
+      skipPersistAfterPollRef.current = false;
+      skipPersistOnceRef.current = true;
+      setState(nextOptimistic);
       setShuffleUi({
         active: false,
         spinOffsetByItemId: {},
         revealCountByItemId: {},
         previewQueueByItemId: {},
       });
+
+      void (async () => {
+        try {
+          const server = await persistAuctionState(nextOptimistic, {
+            bearerToken: bearer,
+          });
+          const merged = server ?? nextOptimistic;
+          skipPersistOnceRef.current = true;
+          const finalState = normalizeWinnerPoolCapsForLimits(
+            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(merged))
+          );
+          queueBaselineRef.current = buildQueueBaselineFromState(finalState);
+          setState(finalState);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/sign in|401|expired|officer/i.test(msg)) clearStoredActor();
+          void swal2SaveError(msg || 'Could not save shuffle result');
+          try {
+            const recovered = await fetchAuctionState();
+            if (recovered) {
+              queueBaselineRef.current = buildQueueBaselineFromState(recovered);
+              setState(
+                normalizeWinnerPoolCapsForLimits(
+                  dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(recovered))
+                )
+              );
+            }
+          } catch {
+            /* ignore */
+          }
+        } finally {
+          persistInFlightRef.current = false;
+        }
+      })();
     };
 
     shuffleRafRef.current = requestAnimationFrame(tick);
+  };
+
+  const handleShuffleAllQueues = async () => {
+    if (!latestState.current || shuffleRunningRef.current) return;
+    if (latestState.current.shuffleLocked === true) return;
+    const stored = loadStoredActor();
+    if (stored) {
+      await startShuffleNow(stored.token);
+      return;
+    }
+    setShuffleAuthPromptOpen(true);
+  };
+
+  const handleShuffleAuthSuccess = (actor: BidderActor) => {
+    storeActor(actor);
+    setShuffleAuthPromptOpen(false);
+    void startShuffleNow(actor.token);
+  };
+
+  const handleShuffleAuthCancel = () => {
+    setShuffleAuthPromptOpen(false);
   };
 
   /** Re-randomize order below winner shortlist only (Feathers with partial free page). */
@@ -855,14 +1083,22 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         it.id === itemId ? { ...it, interestedMemberIds: nextIds } : it
       ),
     };
-    setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(nextState)));
+    setState(
+      normalizeWinnerPoolCapsForLimits(
+        dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(nextState))
+      )
+    );
   };
 
-  const handleResetShuffleUnmarkAll = async () => {
-    if (!state) return;
-    const ok = await swal2ConfirmResetShuffleUnmark();
-    if (!ok) return;
+  // Reset shuffle is stricter than Start shuffle: Admin / Developer only.
+  // Same session-token flow — if the stored Bidders-tab actor already
+  // qualifies, skip the modal; otherwise pop the auth dialog with the
+  // tightened role filter.
+  const [resetShuffleAuthPromptOpen, setResetShuffleAuthPromptOpen] =
+    useState(false);
 
+  const performResetShuffleUnmarkAll = async (bearerToken: string) => {
+    if (!state) return;
     const ignKey = (memberId: number) => {
       const n = state.members.find((m) => m.id === memberId)?.name?.trim() ?? '';
       return n.toLowerCase();
@@ -874,9 +1110,14 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       weeklyTypeWins: [],
       freeDrawChosenByItemId: {},
       items: state.items.map((item) => {
-        const reopened = {
+        // Cancelled items stay cancelled — they include duplicate Feathers
+        // rows that `migrateFeatherItems` merged into a single survivor.
+        // Force-flipping them to "active" briefly resurrected ghost cards
+        // (e.g. a 2nd Feathers card flashing in after Reset shuffle) until
+        // the server response re-applied the migration.
+        const reopened: AuctionItem = {
           ...item,
-          status: 'active' as const,
+          status: item.status === 'cancelled' ? 'cancelled' : 'active',
           winnerName: null,
           recordedWinnerNames: [] as string[],
         };
@@ -900,53 +1141,147 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         remote != null
           ? mergeQueuesForPersist(next, remote, queueBaselineRef.current)
           : next;
-      const server = await persistAuctionState(toSave);
+      const server = await persistAuctionState(toSave, { bearerToken });
       if (server) {
         queueBaselineRef.current = buildQueueBaselineFromState(server);
-        setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server)));
+        setState(
+          normalizeWinnerPoolCapsForLimits(
+            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
+          )
+        );
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      if (/sign in|401|expired|admin or developer/i.test(msg)) {
+        clearStoredActor();
+        setResetShuffleAuthPromptOpen(true);
+        return;
+      }
       void swal2SaveError(msg || 'Could not reset shuffle');
     } finally {
       persistInFlightRef.current = false;
     }
   };
 
-  const handleQueueMove = async (payload: QueueMovePayload) => {
+  const handleResetShuffleUnmarkAll = async () => {
     if (!state) return;
-    let base: AuctionState = dedupeIgnAcrossActiveQueues(
-      pruneOrphanQueueMembers(state)
-    );
-    try {
-      const remote = await fetchAuctionState();
-      if (remote) {
-        base = dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote));
-      }
-    } catch {
-      /* keep base from local */
-    }
-
-    const next = applyQueueMemberMove(base, payload);
-    if ('error' in next) {
-      setState(base);
-      if (next.error === 'name_conflict' && next.toItemName) {
-        const ign =
-          base.members.find((m) => m.id === payload.memberId)?.name ?? '';
-        const toItem = base.items.find((i) => i.id === payload.toItemId);
-        const matchedIgn =
-          toItem != null
-            ? matchingIgnOnQueueItem(toItem, base.members, ign)
-            : null;
-        void swal2QueueAlreadyOnAnotherItem({
-          ign,
-          otherItemName: displayAuctionItemName(next.toItemName),
-          matchedIgn: matchedIgn ?? undefined,
-        });
-      }
+    const ok = await swal2ConfirmResetShuffleUnmark();
+    if (!ok) return;
+    const stored = loadStoredActor();
+    if (stored && (stored.role === 'Admin' || stored.role === 'Developer')) {
+      await performResetShuffleUnmarkAll(stored.token);
       return;
     }
-    setState(next);
+    setResetShuffleAuthPromptOpen(true);
+  };
+
+  const handleResetShuffleAuthSuccess = (actor: BidderActor) => {
+    storeActor(actor);
+    setResetShuffleAuthPromptOpen(false);
+    if (actor.role === 'Admin' || actor.role === 'Developer') {
+      void performResetShuffleUnmarkAll(actor.token);
+    }
+  };
+
+  const handleResetShuffleAuthCancel = () => {
+    setResetShuffleAuthPromptOpen(false);
+  };
+
+  /**
+   * Drag-and-drop queue move. Saves the move IMMEDIATELY via PUT /api/state
+   * instead of relying on the debounced auto-persist. This eliminates the
+   * race-condition class where polling + merge could resurrect the bidder
+   * on the source card mid-flight, which was the cause of every "the drag
+   * reverts to the original card" report.
+   *
+   * Pattern mirrors `handleClearAllQueues`: cancel any pending debounce,
+   * mark the persist as in-flight (so the 2s poll skips this cycle), apply
+   * the move locally for instant UI feedback, then synchronously persist
+   * and adopt the server's response.
+   */
+  const handleQueueMove = async (payload: QueueMovePayload) => {
+    if (!state) return;
+
+    // Cancel any debounced save that was pending — we're going to do an
+    // immediate save instead, and we don't want a stale debounce to fire
+    // afterwards with our pre-move snapshot.
+    cancelPendingPersist();
+    // Block the polling loop for the full round-trip.
+    persistInFlightRef.current = true;
+    skipPersistAfterPollRef.current = false;
+
+    try {
+      let base: AuctionState = normalizeWinnerPoolCapsForLimits(
+        dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(state))
+      );
+      try {
+        const remote = await fetchAuctionState();
+        if (remote) {
+          base = normalizeWinnerPoolCapsForLimits(
+            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote))
+          );
+        }
+      } catch {
+        /* keep base from local */
+      }
+
+      const next = applyQueueMemberMove(base, payload);
+      if ('error' in next) {
+        setState(base);
+        if (next.error === 'name_conflict' && next.toItemName) {
+          const ign =
+            base.members.find((m) => m.id === payload.memberId)?.name ?? '';
+          const toItem = base.items.find((i) => i.id === payload.toItemId);
+          const matchedIgn =
+            toItem != null
+              ? matchingIgnOnQueueItem(toItem, base.members, ign)
+              : null;
+          void swal2QueueAlreadyOnAnotherItem({
+            ign,
+            otherItemName: displayAuctionItemName(next.toItemName),
+            matchedIgn: matchedIgn ?? undefined,
+          });
+        }
+        return;
+      }
+
+      // Optimistic apply for instant feedback, AND tell the state-effect
+      // not to schedule a debounced save (we're saving right now).
+      skipPersistOnceRef.current = true;
+      setState(next);
+
+      const server = await persistAuctionState(next);
+      if (server) {
+        queueBaselineRef.current = buildQueueBaselineFromState(server);
+        // Suppress the redundant debounced save that the post-server
+        // setState would otherwise schedule.
+        skipPersistOnceRef.current = true;
+        setState(
+          normalizeWinnerPoolCapsForLimits(
+            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
+          )
+        );
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      void swal2SaveError(msg || 'Could not move bid');
+      // Roll back to whatever the server actually has.
+      try {
+        const recovered = await fetchAuctionState();
+        if (recovered) {
+          queueBaselineRef.current = buildQueueBaselineFromState(recovered);
+          setState(
+            normalizeWinnerPoolCapsForLimits(
+                  dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(recovered))
+                )
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      persistInFlightRef.current = false;
+    }
   };
 
   const handleCompleteAuction = (itemId: string, winnerName: string | null) => {
@@ -987,6 +1322,66 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     });
   };
 
+  // Clear-all-lists is destructive (wipes every active queue) — restricted
+  // to Admin / Developer with the same session-token flow as event-mode and
+  // reset-shuffle. Server enforces the role at `/api/state/clear-queues`.
+  const [clearQueuesAuthPromptOpen, setClearQueuesAuthPromptOpen] =
+    useState(false);
+
+  const performClearAllQueues = async (bearerToken: string) => {
+    if (!state || clearQueuesSaving) return;
+    cancelPendingPersist();
+    setClearQueuesSaving(true);
+    // Same immediate-save + polling-lockout pattern used for shuffle/event-
+    // mode. Without this, a poll mid-clear could overwrite the empty queues.
+    persistInFlightRef.current = true;
+    skipPersistAfterPollRef.current = false;
+
+    try {
+      // Optimistic local clear for instant UI feedback.
+      const cleared: AuctionState = {
+        ...state,
+        items: state.items.map((it) =>
+          it.status === 'active' ? { ...it, interestedMemberIds: [] } : it
+        ),
+      };
+      skipPersistOnceRef.current = true;
+      setState(cleared);
+
+      const server = await clearAllActiveQueuesOnServer(bearerToken);
+      skipPersistOnceRef.current = true;
+      const finalState = normalizeWinnerPoolCapsForLimits(
+        dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
+      );
+      queueBaselineRef.current = buildQueueBaselineFromState(finalState);
+      setState(finalState);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/sign in|401|expired|admin or developer/i.test(msg)) {
+        clearStoredActor();
+        setClearQueuesAuthPromptOpen(true);
+        return;
+      }
+      void swal2SaveError(msg || 'Could not clear queues');
+      try {
+        const recovered = await fetchAuctionState();
+        if (recovered) {
+          queueBaselineRef.current = buildQueueBaselineFromState(recovered);
+          setState(
+            normalizeWinnerPoolCapsForLimits(
+                  dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(recovered))
+                )
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      persistInFlightRef.current = false;
+      setClearQueuesSaving(false);
+    }
+  };
+
   const handleClearAllQueues = async () => {
     if (!state || clearQueuesSaving) return;
     const active = state.items.filter((i) => i.status === 'active');
@@ -1000,37 +1395,80 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     ).length;
     const ok = await swal2ConfirmClearAllQueues(totalEntries, cardsWithBidders);
     if (!ok) return;
+    const stored = loadStoredActor();
+    if (stored && (stored.role === 'Admin' || stored.role === 'Developer')) {
+      await performClearAllQueues(stored.token);
+      return;
+    }
+    setClearQueuesAuthPromptOpen(true);
+  };
 
-    cancelPendingPersist();
-    setClearQueuesSaving(true);
+  const handleClearQueuesAuthSuccess = (actor: BidderActor) => {
+    storeActor(actor);
+    setClearQueuesAuthPromptOpen(false);
+    if (actor.role === 'Admin' || actor.role === 'Developer') {
+      void performClearAllQueues(actor.token);
+    }
+  };
+
+  const handleClearQueuesAuthCancel = () => {
+    setClearQueuesAuthPromptOpen(false);
+  };
+
+  // -- Privileged queue-remove flow --------------------------------------
+  //
+  // Removing a bidder from a per-item queue is restricted to Officer / Admin
+  // / Developer accounts. We reuse the same session token the Bidders page
+  // hands out:
+  //   1. If sessionStorage already has a valid token, the remove proceeds
+  //      immediately (after a confirm dialog).
+  //   2. If not, we pop up `BidderAuthModal` to collect IGN + password; on
+  //      success the token is stored and the deferred remove runs.
+  // The token is sent as `Authorization: Bearer …` and re-validated server-
+  // side on every call — so even if the cached role goes stale, the API
+  // rejects the request.
+  const [authPromptOpen, setAuthPromptOpen] = useState(false);
+  const pendingRemoveRef = useRef<
+    | { itemId: string; memberId: number; memberName: string; itemDisplayName: string }
+    | null
+  >(null);
+
+  const performQueueRemove = async (
+    itemId: string,
+    memberId: number,
+    memberName: string,
+    itemDisplayName: string,
+    token: string
+  ) => {
+    const ok = await swal2ConfirmRemoveFromQueue(memberName, itemDisplayName);
+    if (!ok) return;
     try {
-      const remote = await fetchAuctionState();
-      if (remote) {
-        queueBaselineRef.current = buildQueueBaselineFromState(remote);
-      }
-
-      const cleared: AuctionState = {
-        ...state,
-        items: state.items.map((it) =>
-          it.status === 'active' ? { ...it, interestedMemberIds: [] } : it
-        ),
-      };
-
-      skipPersistOnceRef.current = true;
-      setState(cleared);
-
-      persistInFlightRef.current = true;
-      const server = await persistAuctionState(cleared);
-      if (server) {
-        queueBaselineRef.current = buildQueueBaselineFromState(server);
-        setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server)));
-      }
+      const server = await removeMemberFromItemQueueOnServer(
+        itemId,
+        memberId,
+        token
+      );
+      queueBaselineRef.current = buildQueueBaselineFromState(server);
+      setState(
+          normalizeWinnerPoolCapsForLimits(
+            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
+          )
+        );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      void swal2SaveError(msg || 'Could not clear queues');
-    } finally {
-      persistInFlightRef.current = false;
-      setClearQueuesSaving(false);
+      if (/sign in|401|expired/i.test(msg)) {
+        // Stored token rejected — drop it and ask the user to re-auth.
+        clearStoredActor();
+        pendingRemoveRef.current = {
+          itemId,
+          memberId,
+          memberName,
+          itemDisplayName,
+        };
+        setAuthPromptOpen(true);
+        return;
+      }
+      void swal2SaveError(msg || 'Could not remove from queue');
     }
   };
 
@@ -1039,19 +1477,49 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     const item = state.items.find((i) => i.id === itemId);
     const m = state.members.find((x) => x.id === memberId);
     if (!item || !m) return;
-    const ok = await swal2ConfirmRemoveFromQueue(
-      m.name,
-      displayAuctionItemName(item.name)
-    );
-    if (!ok) return;
-    try {
-      const server = await removeMemberFromItemQueueOnServer(itemId, memberId);
-      queueBaselineRef.current = buildQueueBaselineFromState(server);
-      setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server)));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      void swal2SaveError(msg || 'Could not remove from queue');
+    const memberName = m.name;
+    const itemDisplayName = displayAuctionItemName(item.name);
+
+    const stored = loadStoredActor();
+    if (stored) {
+      await performQueueRemove(
+        itemId,
+        memberId,
+        memberName,
+        itemDisplayName,
+        stored.token
+      );
+      return;
     }
+    // Defer until the user authenticates via the modal.
+    pendingRemoveRef.current = {
+      itemId,
+      memberId,
+      memberName,
+      itemDisplayName,
+    };
+    setAuthPromptOpen(true);
+  };
+
+  const handleAuthPromptSuccess = (actor: BidderActor) => {
+    storeActor(actor);
+    setAuthPromptOpen(false);
+    const pending = pendingRemoveRef.current;
+    pendingRemoveRef.current = null;
+    if (pending) {
+      void performQueueRemove(
+        pending.itemId,
+        pending.memberId,
+        pending.memberName,
+        pending.itemDisplayName,
+        actor.token
+      );
+    }
+  };
+
+  const handleAuthPromptCancel = () => {
+    setAuthPromptOpen(false);
+    pendingRemoveRef.current = null;
   };
 
   const handleDeactivateMember = async (memberId: number) => {
@@ -1062,7 +1530,11 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     if (!ok) return;
     try {
       const next = await deactivateMemberOnServer(memberId);
-      setState(dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(next)));
+      setState(
+        normalizeWinnerPoolCapsForLimits(
+          dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(next))
+        )
+      );
       setEditMemberId(null);
       setEditMemberNameInput('');
     } catch (e) {
@@ -1080,62 +1552,138 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
 
   const openWinnerSetLimitModal = () => {
     if (!state) return;
-    const rank = parseGuildRank(state.rewardRank);
-    const preset = state.rewardItemCounts ?? rankPresetLimits(rank);
+    const persistedRank = parseGuildRank(state.rewardRank);
+    // Each event mode pins its rank preset (Guild League → Bronze,
+    // Emperium Overrun → Emperium overrun). If the persisted rank doesn't
+    // match the current event mode (e.g. event was flipped without re-
+    // saving limits), coerce to the matching rank and recompute presets so
+    // the modal opens in a valid state.
+    const requiredRank: GuildRank =
+      eventModeActive === 'Guild League' ? 'Bronze' : 'Emperium overrun';
+    const rank: GuildRank =
+      persistedRank === requiredRank ? persistedRank : requiredRank;
+    const preset =
+      rank === persistedRank
+        ? state.rewardItemCounts ?? rankPresetLimits(rank)
+        : rankPresetLimits(rank);
     setWinnerSetLimitForm({
       rank,
-      fragment: preset.fragment,
       feathers: preset.feathers,
+      fragmentByItemId: buildFragmentLimitsByItemId(state.items, preset),
     });
     setWinnerSetLimitModalOpen(true);
   };
 
-  const handleSaveWinnerSetLimit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Winner set limit change requires Officer/Admin/Developer. The save flow
+  // splits into a thin gate (cache-check + maybe-open-modal) and the actual
+  // performSaveWinnerSetLimit that runs the immediate-save with bearer.
+  const [winnerSetLimitAuthPromptOpen, setWinnerSetLimitAuthPromptOpen] =
+    useState(false);
+  const pendingWinnerSetLimitRef = useRef<typeof winnerSetLimitForm | null>(
+    null
+  );
+
+  const performSaveWinnerSetLimit = async (
+    formSnap: typeof winnerSetLimitForm,
+    bearerToken: string
+  ) => {
     if (!state) return;
     const nextState: AuctionState = {
       ...state,
-      rewardRank: winnerSetLimitForm.rank,
+      rewardRank: formSnap.rank,
       rewardItemCounts: {
-        fragment: winnerSetLimitForm.fragment,
-        feathers: winnerSetLimitForm.feathers,
+        fragment:
+          formSnap.fragmentByItemId.m1 ??
+          Object.values(formSnap.fragmentByItemId)[0] ??
+          totalItemsForTypeByRank('Fragment Card', formSnap.rank),
+        feathers: formSnap.feathers,
+        fragmentByItemId: { ...formSnap.fragmentByItemId },
       },
       items: state.items.map((it) => {
         if (it.type === 'Fragment Card') {
+          const fragItems =
+            formSnap.fragmentByItemId[it.id] ??
+            totalItemsForTypeByRank('Fragment Card', formSnap.rank);
           return {
             ...it,
-            winnerPoolCap: winnerSlotsFromItems(
-              'Fragment Card',
-              winnerSetLimitForm.fragment
-            ),
+            winnerPoolCap: winnerSlotsFromItems('Fragment Card', fragItems),
           };
         }
         if (it.type === 'Feathers') {
           return {
             ...it,
-            winnerPoolCap: winnerSlotsFromItems('Feathers', winnerSetLimitForm.feathers),
+            winnerPoolCap: winnerSlotsFromItems('Feathers', formSnap.feathers),
           };
         }
         return it;
       }),
     };
+    // Lock out polling for the round-trip — see `handleQueueMove` for the
+    // race this prevents (otherwise the saved limits can be reverted by a
+    // poll that started before the save).
+    cancelPendingPersist();
+    persistInFlightRef.current = true;
+    skipPersistAfterPollRef.current = false;
+
+    skipPersistOnceRef.current = true;
     setState(nextState);
     setWinnerSetLimitModalOpen(false);
     try {
-      const server = await persistAuctionState(nextState);
+      const server = await persistAuctionState(nextState, { bearerToken });
       const merged = server ?? nextState;
+      queueBaselineRef.current = buildQueueBaselineFromState(merged);
+      skipPersistOnceRef.current = true;
       setState(merged);
       void swal2WinnerLimitsUpdated({
-        fragmentWinners: winnerSlotsFromItems(
-          'Fragment Card',
-          winnerSetLimitForm.fragment
-        ),
-        feathersWinners: winnerSlotsFromItems('Feathers', winnerSetLimitForm.feathers),
+        fragmentCards: activeFragmentAuctionItems(merged.items).map((it) => ({
+          name: it.name,
+          winners: winnerSlotsFromItems(
+            'Fragment Card',
+            formSnap.fragmentByItemId[it.id] ?? 0
+          ),
+        })),
+        feathersWinners: winnerSlotsFromItems('Feathers', formSnap.feathers),
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      if (/sign in|401|expired|officer/i.test(msg)) {
+        clearStoredActor();
+        pendingWinnerSetLimitRef.current = formSnap;
+        setWinnerSetLimitAuthPromptOpen(true);
+        return;
+      }
       void swal2SaveError(msg || 'Could not save winner set limit');
+    } finally {
+      persistInFlightRef.current = false;
     }
+  };
+
+  const handleSaveWinnerSetLimit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!state) return;
+    const formSnap = winnerSetLimitForm;
+    const stored = loadStoredActor();
+    if (stored) {
+      await performSaveWinnerSetLimit(formSnap, stored.token);
+      return;
+    }
+    pendingWinnerSetLimitRef.current = formSnap;
+    setWinnerSetLimitAuthPromptOpen(true);
+  };
+
+  const handleWinnerSetLimitAuthSuccess = (actor: BidderActor) => {
+    storeActor(actor);
+    setWinnerSetLimitAuthPromptOpen(false);
+    const pending = pendingWinnerSetLimitRef.current;
+    pendingWinnerSetLimitRef.current = null;
+    if (pending) {
+      void performSaveWinnerSetLimit(pending, actor.token);
+    }
+  };
+
+  const handleWinnerSetLimitAuthCancel = () => {
+    setWinnerSetLimitAuthPromptOpen(false);
+    pendingWinnerSetLimitRef.current = null;
   };
 
   const openEditMember = (memberId: number) => {
@@ -1193,13 +1741,55 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
     const itemId = queueNameModalItemId;
     if (!raw || !itemId || queueAdminSubmitting) return;
 
+    // The IGN must come from the dropdown (i.e. exist in the members table).
+    // The dropdown only lets you pick existing names so this is a belt-and-
+    // braces check against URL/state tampering.
+    const picked = activeMembersForJoin.find(
+      (m) => m.name.trim().toLowerCase() === raw.toLowerCase()
+    );
+    if (!picked) {
+      void swal2SaveError(
+        'That IGN is not registered. Please register first on the Bidders page.'
+      );
+      return;
+    }
+
+    const password = queueJoinPassword.trim();
+    if (!password) {
+      void swal2SaveError(
+        'Password / ingame ID number is required to join the queue.'
+      );
+      return;
+    }
+
     setQueueAdminSubmitting(true);
     try {
+      // Verify identity FIRST. If creds are wrong, abort before mutating state.
+      try {
+        await verifyMemberRequest(picked.name, password);
+      } catch (authErr) {
+        const msg =
+          authErr instanceof Error ? authErr.message : String(authErr);
+        void swal2SaveError(msg || 'Invalid IGN or password');
+        return;
+      }
+
+      // Same immediate-save pattern as `handleQueueMove` — no debounced
+      // optimistic update + polling race; the result of this user action
+      // becomes the new server state in one round-trip.
+      cancelPendingPersist();
+      persistInFlightRef.current = true;
+      skipPersistAfterPollRef.current = false;
+
       const remote = await fetchAuctionState();
       const base = remote
-        ? dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote))
+        ? normalizeWinnerPoolCapsForLimits(
+            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote))
+          )
         : state
-          ? dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(state))
+          ? normalizeWinnerPoolCapsForLimits(
+              dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(state))
+            )
           : null;
       if (!base) {
         void swal2SaveError('Could not load latest auction state.');
@@ -1209,7 +1799,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       const card = base.items.find((it) => it.id === itemId);
       if (!card) {
         void swal2SaveError('Auction card not found.');
-        setQueueNameModalItemId(null);
+        closeJoinQueueModal();
         return;
       }
 
@@ -1221,8 +1811,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
           itemName: displayAuctionItemName(card.name),
           matchedIgn: matchedOnCard,
         });
-        setQueueNameInput('');
-        setQueueNameModalItemId(null);
+        closeJoinQueueModal();
         return;
       }
 
@@ -1241,8 +1830,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
           otherItemName: displayAuctionItemName(otherBlock.item.name),
           matchedIgn: otherBlock.matchedIgn,
         });
-        setQueueNameInput('');
-        setQueueNameModalItemId(null);
+        closeJoinQueueModal();
         return;
       }
 
@@ -1258,28 +1846,58 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
         return { ...it, interestedMemberIds: [...it.interestedMemberIds, mid] };
       });
 
-      setState({ ...base, members, items });
+      // Optimistic apply + tell state-effect not to schedule a debounce.
+      skipPersistOnceRef.current = true;
+      const nextState: AuctionState = { ...base, members, items };
+      setState(nextState);
+
+      const server = await persistAuctionState(nextState);
+      if (server) {
+        queueBaselineRef.current = buildQueueBaselineFromState(server);
+        skipPersistOnceRef.current = true;
+        setState(
+          normalizeWinnerPoolCapsForLimits(
+            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
+          )
+        );
+      }
       void swal2QueueMemberAdded({
         ign: raw,
         itemName: displayAuctionItemName(card.name),
       });
-      setQueueNameInput('');
-      setQueueNameModalItemId(null);
+      closeJoinQueueModal();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      void swal2SaveError(msg || 'Could not join the queue');
+      try {
+        const recovered = await fetchAuctionState();
+        if (recovered) {
+          queueBaselineRef.current = buildQueueBaselineFromState(recovered);
+          setState(
+            normalizeWinnerPoolCapsForLimits(
+                  dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(recovered))
+                )
+          );
+        }
+      } catch {
+        /* ignore */
+      }
     } finally {
+      persistInFlightRef.current = false;
       setQueueAdminSubmitting(false);
     }
   };
 
   if (!state) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex items-center justify-center">
+      <div className="min-h-screen text-slate-100 font-sans flex items-center justify-center">
         <p className="text-slate-500 text-sm font-medium">Loading auction…</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
+    <div className="min-h-screen text-slate-100 font-sans">
       <header className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md">
         <div className="max-w-screen-2xl mx-auto px-6 sm:px-8 py-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-4 min-w-0">
@@ -1329,55 +1947,43 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                 <History className="w-4 h-4 shrink-0" aria-hidden />
                 Logs
               </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('bidders')}
+                className={`flex flex-1 sm:flex-initial items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all ${
+                  activeTab === 'bidders'
+                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800/80'
+                }`}
+              >
+                <UserPlus className="w-4 h-4 shrink-0" aria-hidden />
+                Bidders
+              </button>
             </nav>
-            <a
-              href="/"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-xs font-black uppercase tracking-wide text-slate-300 transition-colors hover:border-slate-500 hover:bg-slate-800 hover:text-white sm:w-auto"
-            >
-              Public board
-            </a>
-            <button
-              type="button"
-              onClick={() => {
-                void (async () => {
-                  await logoutRequest();
-                  onLogout();
-                })();
-              }}
-              className="inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-xs font-black uppercase tracking-wide text-slate-300 transition-colors hover:border-slate-500 hover:bg-slate-800 hover:text-white sm:w-auto"
-            >
-              <LogOut className="h-4 w-4 shrink-0" aria-hidden />
-              Sign out
-            </button>
           </div>
         </div>
       </header>
 
       <main className="min-h-screen">
-        <div className="max-w-screen-2xl mx-auto px-6 sm:px-8 py-10 sm:py-12">
-          <AnimatePresence mode="wait">
-            {activeTab === 'dashboard' && (
-              <motion.div 
-                key="dashboard"
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: 10 }}
-                className="space-y-8"
-              >
+        <div className="max-w-screen-2xl mx-auto px-4 sm:px-8 py-6 sm:py-12">
+          {visitedTabs.has('dashboard') && (
+            <div
+              key="dashboard"
+              hidden={activeTab !== 'dashboard'}
+              className="space-y-8"
+            >
                 {visibleActiveAuctions.length > 0 && (
                   <div className="flex w-full min-w-0 flex-col items-stretch gap-3 sm:items-end">
                     <div className="w-full">
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                        <div className="inline-flex w-fit rounded-xl border border-slate-700 bg-slate-900 p-1">
+                        <div className="grid w-full grid-cols-2 rounded-xl border border-slate-700 bg-slate-900 p-1 sm:inline-flex sm:w-fit">
                           {(['Guild League', 'Emperium Overrun'] as const).map((mode) => (
                             <button
                               key={mode}
                               type="button"
                               onClick={() => setEventModeDraft(mode)}
                               disabled={eventModeSaving}
-                              className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs font-black uppercase tracking-wide transition-colors disabled:cursor-not-allowed ${
+                              className={`cursor-pointer rounded-lg px-3 py-1.5 text-center text-[11px] font-black uppercase tracking-wide transition-colors disabled:cursor-not-allowed sm:text-xs ${
                                 eventModeDraft === mode
                                   ? 'bg-blue-600 text-white'
                                   : 'text-slate-300 hover:bg-slate-800'
@@ -1394,13 +2000,13 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                             eventModeSaving ||
                             eventModeDraft === eventModeActive
                           }
-                          className="inline-flex cursor-pointer items-center justify-center rounded-xl bg-blue-600 px-4 py-2 text-xs font-black uppercase tracking-wide text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="inline-flex w-full cursor-pointer items-center justify-center rounded-xl bg-blue-600 px-4 py-2 text-xs font-black uppercase tracking-wide text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
                         >
                           {eventModeSaving ? 'Saving...' : 'Save Event Mode'}
                         </button>
                       </div>
                     </div>
-                    <div className="flex w-full flex-wrap items-center justify-end gap-2">
+                    <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:justify-end">
                         <button
                           type="button"
                           onClick={() => void handleShuffleAllQueues()}
@@ -1411,7 +2017,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                               ? 'Already shuffled this round — use Reset shuffle / Unmark all to unlock shuffle again.'
                               : undefined
                           }
-                          className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 text-[10px] font-black uppercase tracking-wide text-white transition-all hover:bg-blue-600 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-blue-600 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:px-4"
                         >
                           <Shuffle className="h-4 w-4 shrink-0" aria-hidden />
                           {state?.shuffleLocked === true ? 'Shuffle Used' : 'Start Shuffle'}
@@ -1420,16 +2026,17 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                           type="button"
                           onClick={() => void handleResetShuffleUnmarkAll()}
                           disabled={shuffleUi.active}
-                          className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 text-[10px] font-black uppercase tracking-wide text-white transition-all hover:bg-amber-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-amber-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:px-4"
                         >
                           <RotateCcw className="h-4 w-4 shrink-0" aria-hidden />
-                          Reset shuffle / Unmark all
+                          <span className="sm:hidden">Reset / Unmark</span>
+                          <span className="hidden sm:inline">Reset shuffle / Unmark all</span>
                         </button>
                         <button
                           type="button"
                           onClick={openWinnerSetLimitModal}
                           disabled={shuffleUi.active}
-                          className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 text-[10px] font-black uppercase tracking-wide text-white transition-all hover:bg-blue-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-blue-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:px-4"
                         >
                           Winner set limit
                         </button>
@@ -1446,7 +2053,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                               ? 'No bidders in any active queue'
                               : 'Empty every active auction card’s queue (roster unchanged)'
                           }
-                          className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 text-[10px] font-black uppercase tracking-wide text-white transition-all hover:bg-amber-900/80 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-amber-900/80 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:px-4"
                         >
                           <ListX className="h-4 w-4 shrink-0" aria-hidden />
                           Clear all lists
@@ -1486,7 +2093,6 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                             state.winnerShortlistUiEnabled === true
                           }
                           onOpenAddName={openQueueNameModal}
-                          onEditMember={openEditMember}
                           onRemoveFromQueue={(memberId) =>
                             void handleRemoveFromQueue(item.id, memberId)
                           }
@@ -1514,47 +2120,41 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                     <p className="text-slate-500 font-medium">No items listed. Use Add Item to get started.</p>
                   </div>
                 )}
-              </motion.div>
-            )}
+            </div>
+          )}
 
-            {activeTab === 'history' && (
-              <motion.div 
-                key="history"
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: 10 }}
-                className="space-y-10"
-              >
+          {visitedTabs.has('history') && (
+            <div
+              key="history"
+              hidden={activeTab !== 'history'}
+              className="space-y-10"
+            >
                 <section className="space-y-4" aria-label="Bid outcomes">
-                  <nav
-                    className="mx-auto flex w-full min-w-0 max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-1 sm:mx-0"
-                    aria-label="Ranking and weekly log"
+                  <div
+                    className="mx-auto flex w-full max-w-2xl flex-col items-center gap-4 rounded-3xl border border-dashed border-amber-500/40 bg-amber-500/5 px-6 py-12 text-center"
+                    role="status"
+                    aria-live="polite"
                   >
-                    <button
-                      type="button"
-                      onClick={() => setBidderLogSubTab('ranking')}
-                      className={`flex min-h-10 min-w-0 flex-1 cursor-pointer touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
-                        bidderLogSubTab === 'ranking'
-                          ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                          : 'text-slate-400 hover:bg-slate-800/80 hover:text-white'
-                      }`}
-                    >
-                      Ranking
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setBidderLogSubTab('weekly')}
-                      className={`flex min-h-10 min-w-0 flex-1 cursor-pointer touch-manipulation items-center justify-center rounded-xl px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition-all sm:px-4 sm:text-sm ${
-                        bidderLogSubTab === 'weekly'
-                          ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                          : 'text-slate-400 hover:bg-slate-800/80 hover:text-white'
-                      }`}
-                    >
-                      Weekly logs
-                    </button>
-                  </nav>
+                    <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-500/40 bg-amber-500/10">
+                      <Wrench
+                        className="h-7 w-7 text-amber-300"
+                        aria-hidden
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-black uppercase tracking-[0.3em] text-amber-300/80">
+                        Under maintenance
+                      </p>
+                      <h3 className="text-xl font-black text-white sm:text-2xl">
+                        Ranking &amp; Weekly logs are temporarily offline
+                      </h3>
+                      <p className="text-sm font-medium text-slate-400">
+                        We&rsquo;re improving this page. Please check back later.
+                      </p>
+                    </div>
+                  </div>
 
-                  {bidderLogSubTab === 'ranking' &&
+                  {false && bidderLogSubTab === 'ranking' &&
                     (bidderStatsByIgn.length > 0 ? (
                       <div className="space-y-3">
                         <div className="flex w-full flex-col gap-3 sm:flex-row sm:justify-start">
@@ -1599,7 +2199,7 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                       </div>
                     ))}
 
-                  {bidderLogSubTab === 'weekly' &&
+                  {false && bidderLogSubTab === 'weekly' &&
                     (bidderStateLogEntries.length === 0 ? (
                       <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center">
                         <p className="font-medium text-slate-500">
@@ -1729,9 +2329,18 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                       </div>
                     ))}
                 </section>
-              </motion.div>
-            )}
-          </AnimatePresence>
+            </div>
+          )}
+
+          {visitedTabs.has('bidders') && (
+            <div
+              key="bidders"
+              hidden={activeTab !== 'bidders'}
+              className="space-y-8"
+            >
+              <BidderRegistration />
+            </div>
+          )}
         </div>
       </main>
 
@@ -1739,11 +2348,8 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
       <AnimatePresence>
         {queueNameModalItemId && queueModalItem && (
           <Modal
-            title="Add name to queue"
-            onClose={() => {
-              setQueueNameModalItemId(null);
-              setQueueNameInput('');
-            }}
+            title="Join queue"
+            onClose={closeJoinQueueModal}
           >
             <form key={queueNameModalItemId} onSubmit={handleAddNameToQueue} className="space-y-6">
               <p className="text-sm text-slate-400 font-medium leading-relaxed">
@@ -1756,21 +2362,122 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                 <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] font-mono ml-1">
                   Character name (IGN)
                 </label>
-                <input
-                  autoFocus
-                  required
-                  placeholder="e.g. ShadowHunter"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
-                  value={queueNameInput}
-                  onChange={e => setQueueNameInput(e.target.value)}
-                />
+                {(() => {
+                  // Hide IGNs that are already disqualified from joining this
+                  // queue — either they are on this card's queue already, or
+                  // they have a bid on another card that the current event
+                  // mode considers blocking (Guild League = any other card;
+                  // Emperium Overrun = same center type / cross-alt rules).
+                  const filteredMembers = (() => {
+                    if (!state || !queueModalItem) return activeMembersForJoin;
+                    return activeMembersForJoin.filter((opt) => {
+                      const ignRaw = opt.name;
+                      if (
+                        matchingIgnOnQueueItem(
+                          queueModalItem,
+                          state.members,
+                          ignRaw
+                        )
+                      ) {
+                        return false;
+                      }
+                      const blocker = findOtherActiveQueueBlockingWithMatch(
+                        state.eventMode,
+                        state.items,
+                        state.members,
+                        ignRaw,
+                        queueModalItem.id,
+                        queueModalItem.type
+                      );
+                      return blocker == null;
+                    });
+                  })();
+                  const hiddenCount =
+                    activeMembersForJoin.length - filteredMembers.length;
+                  return (
+                    <>
+                      <NameDropdown
+                        options={filteredMembers}
+                        value={queueNameInput}
+                        onChange={setQueueNameInput}
+                        disabled={activeMembersLoading || queueAdminSubmitting}
+                        placeholder={
+                          activeMembersLoading ? 'Loading IGNs…' : '— Select your IGN —'
+                        }
+                        emptyMessage={
+                          hiddenCount > 0 && activeMembersForJoin.length > 0
+                            ? 'Every registered IGN is already in this or another active queue.'
+                            : 'No registered IGNs. Please register on the Bidders page first.'
+                        }
+                      />
+                      {activeMembersError && (
+                        <p className="text-[11px] font-bold text-rose-300">
+                          {activeMembersError}
+                        </p>
+                      )}
+                      {!activeMembersLoading &&
+                        !activeMembersError &&
+                        filteredMembers.length > 0 && (
+                          <p className="text-[11px] font-medium text-slate-500 ml-1">
+                            Don&apos;t see your name?{' '}
+                            {hiddenCount > 0 ? (
+                              <>
+                                {hiddenCount} IGN
+                                {hiddenCount === 1 ? ' is' : 's are'} hidden
+                                because they already joined a queue. Otherwise
+                                you need to register on the Bidders page.
+                              </>
+                            ) : (
+                              <>You need to register first on the Bidders page.</>
+                            )}
+                          </p>
+                        )}
+                    </>
+                  );
+                })()}
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] font-mono ml-1">
+                  Password / ingame ID number
+                </label>
+                <div className="relative">
+                  <input
+                    type={queueJoinShowPassword ? 'text' : 'password'}
+                    required
+                    autoComplete="current-password"
+                    placeholder="Enter your password or ingame ID number"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 pr-14 font-mono text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
+                    value={queueJoinPassword}
+                    onChange={(e) => setQueueJoinPassword(e.target.value)}
+                    disabled={queueAdminSubmitting}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setQueueJoinShowPassword((v) => !v)}
+                    disabled={queueAdminSubmitting}
+                    aria-label={
+                      queueJoinShowPassword ? 'Hide password' : 'Show password'
+                    }
+                    title={
+                      queueJoinShowPassword ? 'Hide password' : 'Show password'
+                    }
+                    tabIndex={-1}
+                    className="absolute right-3 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-700 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {queueJoinShowPassword ? (
+                      <EyeOff className="h-4 w-4" aria-hidden />
+                    ) : (
+                      <Eye className="h-4 w-4" aria-hidden />
+                    )}
+                  </button>
+                </div>
               </div>
               <button
                 type="submit"
                 disabled={queueAdminSubmitting}
                 className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:pointer-events-none text-white font-black py-5 rounded-[1.25rem] shadow-xl shadow-blue-600/20 active:scale-[0.98] uppercase tracking-widest"
               >
-                {queueAdminSubmitting ? 'Checking…' : 'Add to queue'}
+                {queueAdminSubmitting ? 'Verifying…' : 'Join queue'}
               </button>
             </form>
           </Modal>
@@ -1824,6 +2531,63 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
             </form>
           </Modal>
         )}
+
+        <BidderAuthModal
+          open={authPromptOpen}
+          title="Sign in to remove from queue"
+          description="Officer, Admin, or Developer access required to remove a bidder from a queue."
+          submitLabel="Sign in & continue"
+          onAuth={handleAuthPromptSuccess}
+          onCancel={handleAuthPromptCancel}
+        />
+
+        <BidderAuthModal
+          open={eventModeAuthPromptOpen}
+          title="Sign in to change event mode"
+          description="Admin or Developer access required to switch between Guild League and Emperium Overrun."
+          submitLabel="Sign in & save"
+          allowedRoles={['Admin', 'Developer']}
+          onAuth={handleEventModeAuthSuccess}
+          onCancel={handleEventModeAuthCancel}
+        />
+
+        <BidderAuthModal
+          open={shuffleAuthPromptOpen}
+          title="Sign in to start shuffle"
+          description="Officer, Admin, or Developer access required to start the auction shuffle."
+          submitLabel="Sign in & start shuffle"
+          onAuth={handleShuffleAuthSuccess}
+          onCancel={handleShuffleAuthCancel}
+        />
+
+        <BidderAuthModal
+          open={resetShuffleAuthPromptOpen}
+          title="Sign in to reset shuffle"
+          description="Admin or Developer access required to reset the shuffle and unmark all winners."
+          submitLabel="Sign in & reset"
+          allowedRoles={['Admin', 'Developer']}
+          onAuth={handleResetShuffleAuthSuccess}
+          onCancel={handleResetShuffleAuthCancel}
+        />
+
+        <BidderAuthModal
+          open={winnerSetLimitAuthPromptOpen}
+          title="Sign in to save winner set limit"
+          description="Officer, Admin, or Developer access required to change winner set limits."
+          submitLabel="Sign in & save"
+          onAuth={handleWinnerSetLimitAuthSuccess}
+          onCancel={handleWinnerSetLimitAuthCancel}
+        />
+
+        <BidderAuthModal
+          open={clearQueuesAuthPromptOpen}
+          title="Sign in to clear all lists"
+          description="Admin or Developer access required to clear every active auction queue."
+          submitLabel="Sign in & clear"
+          allowedRoles={['Admin', 'Developer']}
+          onAuth={handleClearQueuesAuthSuccess}
+          onCancel={handleClearQueuesAuthCancel}
+        />
 
         {isAddItemOpen && (
           <Modal title="New bid item" onClose={() => setIsAddItemOpen(false)}>
@@ -1894,59 +2658,81 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                   Rank
                 </label>
                 <div className="inline-flex w-full rounded-xl border border-slate-700 bg-slate-900 p-1">
-                  {GUILD_RANK_OPTIONS.map((rank) => (
-                    <button
-                      key={rank}
-                      type="button"
-                      onClick={() =>
-                        setWinnerSetLimitForm((prev) => ({
-                          ...prev,
-                          rank,
-                          ...rankPresetLimits(rank),
-                        }))
-                      }
-                      className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-black uppercase tracking-wide transition-colors ${
-                        winnerSetLimitForm.rank === rank
-                          ? 'bg-blue-600 text-white'
-                          : 'text-slate-300 hover:bg-slate-800'
-                      }`}
-                    >
-                      {guildRankButtonLabel(rank)}
-                    </button>
-                  ))}
+                  {GUILD_RANK_OPTIONS
+                    // Each event mode pins its rank preset:
+                    //   • Guild League     → Bronze only
+                    //   • Emperium Overrun → Emperium overrun only
+                    // The off-mode rank button is hidden so users can't pick
+                    // a mismatching preset.
+                    .filter((rank) =>
+                      eventModeActive === 'Guild League'
+                        ? rank === 'Bronze'
+                        : rank === 'Emperium overrun'
+                    )
+                    .map((rank) => (
+                      <button
+                        key={rank}
+                        type="button"
+                        onClick={() =>
+                          setWinnerSetLimitForm((prev) => {
+                            const preset = rankPresetLimits(rank);
+                            return {
+                              ...prev,
+                              rank,
+                              feathers: preset.feathers,
+                              fragmentByItemId: Object.fromEntries(
+                                activeFragmentAuctionItems(state?.items ?? []).map(
+                                  (it) => [it.id, preset.fragment]
+                                )
+                              ),
+                            };
+                          })
+                        }
+                        className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-black uppercase tracking-wide transition-colors ${
+                          winnerSetLimitForm.rank === rank
+                            ? 'bg-blue-600 text-white'
+                            : 'text-slate-300 hover:bg-slate-800'
+                        }`}
+                      >
+                        {guildRankButtonLabel(rank)}
+                      </button>
+                    ))}
                 </div>
               </div>
-              <div className="space-y-2">
-                <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
-                  Puppet Frag Card
-                </label>
-                <input
-                  autoFocus
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  required
-                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
-                  value={winnerSetLimitForm.fragment}
-                  onChange={(e) =>
-                    setWinnerSetLimitForm((prev) => ({
-                      ...prev,
-                      fragment: Math.max(
-                        0,
-                        Math.floor(
-                          Number((e.target.value || '0').replace(/[^\d]/g, '')) || 0
-                        )
-                      ),
-                    }))
-                  }
-                />
-                <p className="text-[11px] font-semibold text-slate-400">
-                  Bidders: {winnerSplitPreview.fragment.bidders} · Pages: {winnerSplitPreview.fragment.pages} · Winning bidders: {winnerSplitPreview.fragment.winners}
-                  {winnerSplitPreview.fragment.sample
-                    ? ` · Split: ${winnerSplitPreview.fragment.sample}${winnerSplitPreview.fragment.hasMore ? ', ...' : ''}`
-                    : ''}
-                </p>
-              </div>
+              {activeFragmentAuctionItems(state?.items ?? []).map((card, idx) => {
+                const value = winnerSetLimitForm.fragmentByItemId[card.id] ?? 0;
+                return (
+                  <div key={card.id} className="space-y-2">
+                    <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
+                      {displayAuctionItemName(card.name)}
+                    </label>
+                    <input
+                      autoFocus={idx === 0}
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      required
+                      className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
+                      value={value}
+                      onChange={(e) =>
+                        setWinnerSetLimitForm((prev) => ({
+                          ...prev,
+                          fragmentByItemId: {
+                            ...prev.fragmentByItemId,
+                            [card.id]: Math.max(
+                              0,
+                              Math.floor(
+                                Number((e.target.value || '0').replace(/[^\d]/g, '')) ||
+                                  0
+                              )
+                            ),
+                          },
+                        }))
+                      }
+                    />
+                  </div>
+                );
+              })}
               <div className="space-y-2">
                 <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
                   Feathers
@@ -1970,12 +2756,6 @@ export default function AuctionDashboard({ onLogout }: { onLogout: () => void })
                     }))
                   }
                 />
-                <p className="text-[11px] font-semibold text-slate-400">
-                  Bidders: {winnerSplitPreview.feathers.bidders} · Pages: {winnerSplitPreview.feathers.pages} · Winning bidders: {winnerSplitPreview.feathers.winners}
-                  {winnerSplitPreview.feathers.sample
-                    ? ` · Split: ${winnerSplitPreview.feathers.sample}${winnerSplitPreview.feathers.hasMore ? ', ...' : ''}`
-                    : ''}
-                </p>
               </div>
               <button
                 type="submit"
@@ -2001,7 +2781,6 @@ function QueueCard({
   isShuffling,
   showWinnerShortlist,
   onOpenAddName,
-  onEditMember,
   onRemoveFromQueue,
   onMoveQueueMember,
   onComplete,
@@ -2017,7 +2796,11 @@ function QueueCard({
   item: AuctionItem;
   members: GuildMember[];
   rewardRank: GuildRank;
-  rewardItemCounts: { fragment: number; feathers: number };
+  rewardItemCounts: {
+    fragment: number;
+    feathers: number;
+    fragmentByItemId?: Record<string, number>;
+  };
   /** Shared general page index for Fragment + Feathers (creation order). Fragment badges also show I# (one item per winner). */
   featherPageStart?: number;
   /** While shuffle animation runs, hide names and show loading skeletons. */
@@ -2031,7 +2814,6 @@ function QueueCard({
   /** Member highlighted as the free-draw pick (set only after “Shuffle draw free”). */
   freeDrawChosenMemberId?: number | null;
   onOpenAddName: (itemId: string) => void;
-  onEditMember: (memberId: number) => void;
   onRemoveFromQueue: (memberId: number) => void | Promise<void>;
   onMoveQueueMember: (p: QueueMovePayload) => void;
   onComplete: (id: string, winner: string | null) => void;
@@ -2058,30 +2840,6 @@ function QueueCard({
   const recorded = item.recordedWinnerNames ?? [];
   const canMarkMoreWinners = recorded.length < poolCap;
 
-  /**
-   * Auto-assign game auction pages to winners.
-   * Bronze LND/TNS: split all full pages across top winners evenly.
-   * Emperium overrun LND/TNS: exactly 2 full pages per winner (in order); leftover full pages are free.
-   */
-  const winnerPageRanges = (() => {
-    const totalItems =
-      item.type === 'Fragment Card'
-        ? rewardItemCounts.fragment
-        : item.type === 'Feathers'
-          ? rewardItemCounts.feathers
-          : 1;
-    const pageStart =
-      item.type === 'Fragment Card' || item.type === 'Feathers'
-        ? featherPageStart ?? 1
-        : 1;
-    return computeWinnerAssignmentLabelsFromItems(
-      item.type,
-      totalItems,
-      displayIds.length,
-      pageStart,
-      rewardRank
-    );
-  })();
   const freeItems =
     item.type === 'Feathers'
       ? freeItemsFromTotalItems(item.type, rewardItemCounts.feathers, rewardRank)
@@ -2117,19 +2875,80 @@ function QueueCard({
   })();
 
   return (
-    <motion.div 
+    <motion.div
       layout
-      onClick={() => onOpenAddName(item.id)}
-      title="Click to add a name to this queue"
-      className="group h-auto w-full min-w-0 max-w-full self-start bg-slate-900 border border-slate-800 rounded-[2.5rem] p-6 shadow-2xl sm:p-8 flex flex-col gap-5 sm:gap-6 cursor-pointer transition-[border-color,box-shadow,background-color,transform] duration-200 ease-out hover:border-blue-500/45 hover:bg-slate-800/60 hover:shadow-blue-900/25 hover:shadow-2xl hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.99]"
+      className="group h-auto w-full min-w-0 max-w-full self-start bg-slate-900 border border-slate-800 rounded-[2.5rem] p-6 shadow-2xl sm:p-8 flex flex-col gap-5 sm:gap-6 transition-[border-color,box-shadow,background-color] duration-200 ease-out hover:border-blue-500/30 hover:shadow-blue-900/20 hover:shadow-2xl"
     >
       <div>
-        <span className={`text-[10px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-lg border font-mono ${auctionItemTypeColorClass(item.type)}`}>
-          {displayAuctionItemTypeBadge(item.type)}
-        </span>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <span className={`text-[10px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-lg border font-mono ${auctionItemTypeColorClass(item.type)}`}>
+            {displayAuctionItemTypeBadge(item.type)}
+          </span>
+          {(() => {
+            // Once the shuffle has been drawn, the queue is frozen until an
+            // officer presses Reset shuffle — block any new joiners so the
+            // displayed winner pool stays consistent with what was rolled.
+            const joinDisabled = isShuffling || shuffleLocked === true;
+            const joinTitle =
+              shuffleLocked === true
+                ? 'Shuffle results are showing — reset shuffle to reopen the queue'
+                : `Join the queue for ${displayAuctionItemName(item.name)}`;
+            return (
+              <button
+                type="button"
+                disabled={joinDisabled}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (joinDisabled) return;
+                  onOpenAddName(item.id);
+                }}
+                title={joinTitle}
+                aria-label={joinTitle}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-blue-500/50 bg-blue-600/20 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-blue-100 transition-colors hover:border-blue-400/70 hover:bg-blue-600/35 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <UserPlus className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                {shuffleLocked === true ? 'Queue locked' : 'Join queue'}
+              </button>
+            );
+          })()}
+        </div>
         <h3 className="text-3xl font-black text-white mt-4 tracking-tight leading-none break-words">
           {displayAuctionItemName(item.name)}
         </h3>
+        {(() => {
+          const winnerCount = poolCap;
+          const totalItems =
+            item.type === 'Feathers'
+              ? rewardItemCounts.feathers
+              : item.type === 'Fragment Card'
+                ? (rewardItemCounts.fragmentByItemId?.[item.id] ??
+                    rewardItemCounts.fragment)
+                : null;
+          const winnerLabel = winnerCount === 1 ? 'winner' : 'winners';
+          const itemNoun = totalItems === 1 ? 'item' : 'items';
+          const winnerTitle =
+            item.type === 'Feathers'
+              ? `${winnerCount} ${winnerLabel} get ${featherSlotUnit} feathers each (${totalItems} total items)`
+              : item.type === 'Fragment Card'
+                ? `${winnerCount} ${winnerLabel} — ${totalItems} ${itemNoun} total`
+                : `${winnerCount} ${winnerLabel}`;
+          return (
+            <p
+              title={winnerTitle}
+              className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-bold leading-snug text-amber-300/90"
+            >
+              <Trophy className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span className="font-mono text-amber-200">{winnerCount}</span>
+              <span className="uppercase tracking-wide">{winnerLabel}</span>
+              {totalItems != null &&
+              (item.type === 'Feathers' || item.type === 'Fragment Card') ? (
+                <span className="text-amber-400/60">
+                  · <span className="font-mono">{totalItems}</span> {itemNoun}
+                </span>
+              ) : null}
+            </p>
+          );
+        })()}
         {recorded.length > 0 ? (
           <p className="mt-3 text-xs font-bold leading-snug text-green-400/95">
             Marked winners ({recorded.length}/{poolCap}):{' '}
@@ -2180,7 +2999,9 @@ function QueueCard({
               }}
             >
               <p className="text-xs text-slate-500 font-bold text-center">
-                No one in queue yet. Click the card to add a name.
+                No one in queue yet. Use the{' '}
+                <span className="text-blue-300">Join queue</span> button above
+                to add a name.
               </p>
               <p className="text-[10px] font-bold uppercase tracking-wide text-slate-600">
                 Or drop a bid here to move it to this card
@@ -2204,13 +3025,6 @@ function QueueCard({
                   item.type === 'Feathers' &&
                   typeof freeDrawChosenMemberId === 'number' &&
                   freeDrawChosenMemberId === mid;
-                const pageLabel =
-                  !isShuffling &&
-                  shuffleLocked !== true &&
-                  idx < shortlistSlots &&
-                  idx < winnerPageRanges.length
-                    ? winnerPageRanges[idx]
-                    : null;
                 return (
                   <motion.div
                     layout
@@ -2320,14 +3134,6 @@ function QueueCard({
                           </span>
                         )
                       ) : null}
-                      {pageLabel && (
-                        <span
-                          title={winnerAssignmentLabelTitle(pageLabel)}
-                          className="shrink-0 rounded-lg border border-blue-500/60 bg-blue-500/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-blue-200"
-                        >
-                          {pageLabel}
-                        </span>
-                      )}
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
                       <button
@@ -2335,22 +3141,9 @@ function QueueCard({
                         disabled={isShuffling}
                         onClick={(e) => {
                           e.stopPropagation();
-                          onEditMember(mid);
-                        }}
-                        title="Edit name"
-                        aria-label="Edit character name"
-                        className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isShuffling}
-                        onClick={(e) => {
-                          e.stopPropagation();
                           void onRemoveFromQueue(mid);
                         }}
-                        title="Remove from this queue only"
+                        title="Remove from this queue only (Officer/Admin/Developer)"
                         aria-label={`Remove ${m.name} from ${displayAuctionItemName(item.name)}`}
                         className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-red-950/50 hover:text-red-400"
                       >

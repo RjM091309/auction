@@ -47,14 +47,13 @@ export function isFeatherType(t: ItemType | string): boolean {
 }
 
 /**
- * Emperium Overrun: one Fragment Card queue + one Feathers queue per bidder.
+ * Emperium Overrun: one queue per Fragment Card item + one Feathers queue per bidder.
  * Guild / non-center: second active queue blocks.
  */
 export function emperiumSecondQueueBlocks(targetType: ItemType | string, otherType: ItemType | string): boolean {
   if (!isEmperiumCenterType(targetType) || !isEmperiumCenterType(otherType)) {
     return true;
   }
-  if (targetType === 'Fragment Card' && otherType === 'Fragment Card') return true;
   if (isFeatherType(targetType) && isFeatherType(otherType)) {
     return true;
   }
@@ -86,7 +85,7 @@ function groupEntriesByIgnIdentity<T extends { name: string }>(
 
 /**
  * Guild: keep first active queue row per IGN (item order, then queue order).
- * Emperium: keep first Fragment Card + first Feathers; non-center queues stay one slot.
+ * Emperium: keep one queue per Fragment Card item + first Feathers; non-center queues stay one slot.
  *
  * @param activeItemPredicate — optional; when set, only active items matching this predicate
  *   are considered (e.g. visible-only vs hidden-only split for Guild League dedupe).
@@ -127,11 +126,16 @@ export function computeKeptQueueMemberKeys(
       keep.add(queueMemberKey(o.itemId, o.mid));
       continue;
     }
-    const firstCard = [...group].reverse().find((e) => e.type === 'Fragment Card');
+    const cardByItemId = new Map<string, Entry>();
+    for (const e of group) {
+      if (e.type === 'Fragment Card') cardByItemId.set(e.itemId, e);
+    }
+    for (const e of cardByItemId.values()) {
+      keep.add(queueMemberKey(e.itemId, e.mid));
+    }
     const firstFeathers = [...group]
       .reverse()
       .find((e) => isFeatherType(e.type));
-    if (firstCard) keep.add(queueMemberKey(firstCard.itemId, firstCard.mid));
     if (firstFeathers) {
       keep.add(queueMemberKey(firstFeathers.itemId, firstFeathers.mid));
     }

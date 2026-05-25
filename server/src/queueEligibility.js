@@ -36,7 +36,6 @@ export function emperiumSecondQueueBlocks(targetType, otherType) {
   if (!isEmperiumCenterType(targetType) || !isEmperiumCenterType(otherType)) {
     return true;
   }
-  if (targetType === 'Fragment Card' && otherType === 'Fragment Card') return true;
   if (isFeatherType(targetType) && isFeatherType(otherType)) {
     return true;
   }
