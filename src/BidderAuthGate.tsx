@@ -9,7 +9,7 @@
  * the parent component stores in `sessionStorage`.
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   Check,
   ChevronDown,
@@ -102,6 +102,10 @@ export function NameDropdown({
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
+  // React's `useId` gives us a stable-but-unique suffix per mount so the
+  // input's `name` attribute (e.g. `ign-filter-:r3:`) is unguessable by
+  // Chrome/Edge autofill, which key off well-known names like `username`.
+  const inputDomId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -116,8 +120,21 @@ export function NameDropdown({
   useEffect(() => {
     if (open) {
       // Defer focus so the panel is in the DOM first.
-      const t = setTimeout(() => inputRef.current?.focus(), 0);
-      return () => clearTimeout(t);
+      const t1 = setTimeout(() => inputRef.current?.focus(), 0);
+      // Chrome/Edge will sometimes still drop a cached value into a text
+      // input even with `autoComplete="off"` (especially if the user once
+      // typed e.g. "admin" into a since-removed login form on the same
+      // origin). We force-clear on the next two macrotasks so any sneaky
+      // autofill — whether it fires on mount, on focus, or slightly later
+      // from a password manager — is reset before the user notices.
+      setQuery('');
+      const t2 = setTimeout(() => setQuery(''), 0);
+      const t3 = setTimeout(() => setQuery(''), 60);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+      };
     }
     setQuery('');
     setActiveIdx(0);
@@ -225,12 +242,30 @@ export function NameDropdown({
             />
             <input
               ref={inputRef}
-              type="text"
+              // Layered defence against browser autofill (Chrome/Edge will
+              // happily drop a cached "admin"/"username" into ANY text-ish
+              // input that lives near a form). `type="search"` + a
+              // randomized `name` + every password-manager opt-out, plus
+              // the explicit `setQuery('')` resets in the `open` effect,
+              // is what it takes to keep this filter field truly empty
+              // when the dropdown opens.
+              type="search"
+              name={`ign-filter-${inputDomId}`}
+              id={`ign-filter-${inputDomId}`}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              data-lpignore="true"
+              data-1p-ignore="true"
+              data-bwignore="true"
+              data-form-type="other"
+              aria-autocomplete="list"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={onInputKey}
               placeholder="Search IGN or role…"
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 py-1.5 pl-8 pr-7 text-xs text-slate-100 outline-none transition-colors placeholder:text-slate-500 focus:border-blue-500"
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 py-1.5 pl-8 pr-7 text-xs text-slate-100 outline-none transition-colors placeholder:text-slate-500 focus:border-blue-500 [&::-webkit-search-cancel-button]:hidden"
             />
             {query && (
               <button

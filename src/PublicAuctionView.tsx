@@ -44,6 +44,7 @@ import {
   maxQueueSlotsAfterShuffle,
   shuffleQueueIdsForType,
 } from './lib/shuffleCaps';
+import { applySureWinPin } from './lib/sureWinPin';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
 import { filterToCurrentAuctionWeek, getAuctionWeekMondayKey } from './lib/auctionWeek';
@@ -139,10 +140,13 @@ export default function PublicAuctionView() {
     );
     const previewQueueByItemId: Record<string, number[]> = {};
     for (const it of activeItems) {
-      previewQueueByItemId[it.id] = shuffleQueueIdsForType(
+      // Mirror the dashboard: shuffle then apply the optional `.env` sure-win
+      // pin so the public reveal animation matches what the server persists.
+      const shuffled = shuffleQueueIdsForType(
         it.interestedMemberIds,
         it.type
       );
+      previewQueueByItemId[it.id] = applySureWinPin(shuffled, it.name);
     }
     setPublicShuffleUi({
       active: true,

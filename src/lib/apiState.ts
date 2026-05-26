@@ -276,47 +276,6 @@ export function parseAuctionState(json: unknown): AuctionState | null {
 
 const cred: RequestInit = { credentials: 'include' };
 
-/** Session check (HttpOnly cookie set by POST /api/auth/login). */
-export async function fetchAuthMe(): Promise<{ authed: boolean }> {
-  try {
-    const res = await fetch(apiUrl('/api/auth/me'), cred);
-    if (!res.ok) return { authed: false };
-    const j = (await res.json()) as { authed?: boolean };
-    return { authed: Boolean(j.authed) };
-  } catch {
-    return { authed: false };
-  }
-}
-
-export async function loginRequest(
-  username: string,
-  password: string
-): Promise<{ ok: true } | { error: string }> {
-  const res = await fetch(apiUrl('/api/auth/login'), {
-    ...cred,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  });
-  if (res.ok) return { ok: true as const };
-  let msg = `${res.status} ${res.statusText}`;
-  try {
-    const j = (await res.json()) as { error?: string };
-    if (j?.error) msg = j.error;
-  } catch {
-    /* ignore */
-  }
-  return { error: msg };
-}
-
-export async function logoutRequest(): Promise<void> {
-  try {
-    await fetch(apiUrl('/api/auth/logout'), { ...cred, method: 'POST' });
-  } catch {
-    /* ignore */
-  }
-}
-
 /** Load full auction state from the API (MySQL-backed). */
 export async function fetchAuctionState(): Promise<AuctionState | null> {
   try {

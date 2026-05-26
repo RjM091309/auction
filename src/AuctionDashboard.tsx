@@ -101,6 +101,7 @@ import {
   shuffleFreeDrawTail,
   shuffleQueueIdsForType,
 } from './lib/shuffleCaps';
+import { applySureWinPin } from './lib/sureWinPin';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import {
   shuffleRevealWindowForItem,
@@ -150,6 +151,7 @@ import {
   loadStoredActor,
   storeActor,
   verifyMemberRequest,
+  verifyStoredActor,
 } from './lib/apiBidders';
 import { DashboardTab, pathForTab, tabFromPath } from './lib/tabRoute';
 
@@ -894,10 +896,15 @@ export default function AuctionDashboard() {
     shuffleRunningRef.current = true;
     const previewQueueByItemId: Record<string, number[]> = {};
     for (const it of activeItemsForShuffle) {
-      previewQueueByItemId[it.id] = shuffleQueueIdsForType(
+      // Random shuffle first, then apply the optional "sure win" pin (env-
+      // controlled, see VITE_SURE_WIN_* in .env). Pin is a no-op when the
+      // toggle is off, the configured member did not bid on this item, or
+      // the item name does not match the configured needle.
+      const shuffled = shuffleQueueIdsForType(
         it.interestedMemberIds,
         it.type
       );
+      previewQueueByItemId[it.id] = applySureWinPin(shuffled, it.name);
     }
     setShuffleUi({
       active: true,
@@ -1006,7 +1013,10 @@ export default function AuctionDashboard() {
             /** Green checks tinatanggal lang sa Reset shuffle; queue pinapanatili ang lahat ng member. */
             interestedMemberIds:
               previewQueueByItemId[item.id] ??
-              shuffleQueueIdsForType(item.interestedMemberIds, item.type),
+              applySureWinPin(
+                shuffleQueueIdsForType(item.interestedMemberIds, item.type),
+                item.name
+              ),
           };
         }),
       };
@@ -1068,10 +1078,28 @@ export default function AuctionDashboard() {
   const handleShuffleAllQueues = async () => {
     if (!latestState.current || shuffleRunningRef.current) return;
     if (latestState.current.shuffleLocked === true) return;
+
+    // Pre-flight: validate the stored bearer against the server BEFORE we
+    // play the 20-second animation. Otherwise a stale token (e.g. after a
+    // server restart cleared its in-memory session map) would let the user
+    // watch the whole reveal only to hit a 401 at the persist step.
     const stored = loadStoredActor();
     if (stored) {
-      await startShuffleNow(stored.token);
-      return;
+      try {
+        const fresh = await verifyStoredActor();
+        if (fresh) {
+          storeActor(fresh);
+          await startShuffleNow(fresh.token);
+          return;
+        }
+        // Token explicitly rejected (401/403): wipe and re-prompt.
+        clearStoredActor();
+      } catch {
+        // Transport-level failure (network down, 5xx): wipe the stale-
+        // looking token and ask the user to sign in again rather than
+        // gambling on a 20-second animation that may fail.
+        clearStoredActor();
+      }
     }
     setShuffleAuthPromptOpen(true);
   };

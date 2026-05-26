@@ -28,12 +28,7 @@ import {
   setEventMode,
   clearAllActiveQueues,
 } from './stateRepo.js';
-import {
-  handleLogin,
-  handleLogout,
-  handleMe,
-  requireAuth,
-} from './auth.js';
+import { requireAuth } from './auth.js';
 import { clientIp, describeAdminStatePut } from './auditLog.js';
 import {
   listBidders,
@@ -80,10 +75,6 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
 
 const pool = createPool();
-
-app.post('/api/auth/login', handleLogin);
-app.post('/api/auth/logout', handleLogout);
-app.get('/api/auth/me', handleMe);
 
 app.get('/api/health', async (_req, res) => {
   try {

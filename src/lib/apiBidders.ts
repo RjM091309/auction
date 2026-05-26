@@ -271,6 +271,37 @@ export async function authBidderRequest(
   return { token, ...actor };
 }
 
+/**
+ * Re-validate the stored bearer token against `/api/bidders/me`. Used as a
+ * pre-flight check before kicking off a long privileged action (e.g. the
+ * 20-second shuffle animation) so the user isn't made to wait through the
+ * animation only to see "session expired" at the end.
+ *
+ *   • Returns the refreshed `BidderActor` (name/role re-read from DB) when
+ *     the server accepts the token.
+ *   • Returns `null` when there is no stored token, or the server rejects
+ *     it (401/403). The caller should clear storage and prompt for re-auth.
+ *   • Throws on transport errors (network down, bad JSON, 5xx) — the caller
+ *     decides whether to block the action or let it proceed and surface the
+ *     real error from the actual API call.
+ */
+export async function verifyStoredActor(): Promise<BidderActor | null> {
+  const stored = loadStoredActor();
+  if (!stored) return null;
+  const res = await fetch(apiUrl('/api/bidders/me'), {
+    ...cred,
+    headers: { Authorization: `Bearer ${stored.token}` },
+  });
+  if (res.status === 401 || res.status === 403) return null;
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
+  const json = await readJson(res);
+  const actor = parseActor((json as { actor?: unknown })?.actor);
+  if (!actor) return null;
+  return { token: stored.token, ...actor };
+}
+
 export async function signOutBidderRequest(): Promise<void> {
   try {
     await fetch(apiUrl('/api/bidders/signout'), {

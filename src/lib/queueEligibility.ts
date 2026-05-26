@@ -14,6 +14,7 @@ import {
   ignMatchesForQueueDedupe,
   ignMatchesForQueueIdentity,
 } from './ignQueueIdentity';
+import { isItemExemptFromBidLimit } from './bidLimitExempt';
 
 export function defaultEventModeForQueues(m?: WeeklyEventType): WeeklyEventType {
   return m ?? 'Emperium Overrun';
@@ -115,25 +116,34 @@ export function computeKeptQueueMemberKeys(
       : ignMatchesForQueueIdentity;
   const identityGroups = groupEntriesByIgnIdentity(entries, samePerson);
   for (const group of identityGroups) {
+    // Exempt items (VITE_BID_LIMIT_EXEMPT_ITEM_IDS) bypass the dedupe
+    // entirely — they're always kept and never count toward the
+    // "first active queue" budget that gates the non-exempt entries.
+    const exemptEntries = group.filter((e) => isItemExemptFromBidLimit(e.itemId));
+    for (const e of exemptEntries) {
+      keep.add(queueMemberKey(e.itemId, e.mid));
+    }
+    const nonExempt = group.filter((e) => !isItemExemptFromBidLimit(e.itemId));
+
     if (mode !== 'Emperium Overrun') {
-      const first = group[0];
+      const first = nonExempt[0];
       if (first) keep.add(queueMemberKey(first.itemId, first.mid));
       continue;
     }
-    const others = group.filter((e) => !isEmperiumCenterType(e.type));
+    const others = nonExempt.filter((e) => !isEmperiumCenterType(e.type));
     if (others.length > 0) {
       const o = others[0];
       keep.add(queueMemberKey(o.itemId, o.mid));
       continue;
     }
     const cardByItemId = new Map<string, Entry>();
-    for (const e of group) {
+    for (const e of nonExempt) {
       if (e.type === 'Fragment Card') cardByItemId.set(e.itemId, e);
     }
     for (const e of cardByItemId.values()) {
       keep.add(queueMemberKey(e.itemId, e.mid));
     }
-    const firstFeathers = [...group]
+    const firstFeathers = [...nonExempt]
       .reverse()
       .find((e) => isFeatherType(e.type));
     if (firstFeathers) {
@@ -186,12 +196,19 @@ export function findOtherActiveQueueBlockingWithMatch(
 ): { item: AuctionItem; matchedIgn: string } | null {
   const mode = defaultEventModeForQueues(eventMode);
 
+  // Joining an exempt item (see VITE_BID_LIMIT_EXEMPT_ITEM_IDS) is never
+  // blocked by an existing bid on another item.
+  if (isItemExemptFromBidLimit(targetItemId)) return null;
+
   const skipHidden =
     opts?.skipHiddenBlockingItems === true && mode !== 'Emperium Overrun';
 
   for (const it of items) {
     if (it.status !== 'active' || it.id === targetItemId) continue;
     if (skipHidden && isAuctionItemHidden(it)) continue;
+    // Existing bids on exempt items don't count against the bid limit
+    // either, so they cannot become a blocker for a different target.
+    if (isItemExemptFromBidLimit(it.id)) continue;
 
     const queuedNames: string[] = [];
     for (const mid of it.interestedMemberIds) {

@@ -4,6 +4,7 @@
 
 import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
 import { findMatchingIgnName, canonicalIgnKey } from './ignQueueIdentity.js';
+import { isItemExemptFromBidLimit } from './bidLimitExempt.js';
 
 /** @param {string | undefined} m */
 export function defaultEventModeForQueues(m) {
@@ -86,12 +87,19 @@ export function findOtherActiveQueueBlockingWithMatch(
 ) {
   const mode = defaultEventModeForQueues(eventMode);
 
+  // Joining an exempt item (see VITE_BID_LIMIT_EXEMPT_ITEM_IDS) is never
+  // blocked by an existing bid on another item.
+  if (isItemExemptFromBidLimit(targetItemId)) return null;
+
   const skipHidden =
     opts && opts.skipHiddenBlockingItems === true && mode !== 'Emperium Overrun';
 
   for (const it of items) {
     if (it.status !== 'active' || it.id === targetItemId) continue;
     if (skipHidden && isAuctionItemHiddenForPublic(it)) continue;
+    // Existing bids on exempt items don't count against the bid limit
+    // either, so they cannot become a blocker for a different target.
+    if (isItemExemptFromBidLimit(it.id)) continue;
 
     const queuedNames = [];
     for (const mid of it.interestedMemberIds) {
