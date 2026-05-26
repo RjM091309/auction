@@ -5,6 +5,7 @@ import {
   createPool,
   initSchema,
   migrateMembersActiveColumn,
+  migrateMembersApprovalStatusColumn,
   migrateMembersOfficerRole,
   migrateMembersPasswordColumn,
   migrateAuctionWinnerNamesJson,
@@ -36,6 +37,9 @@ import {
 import { clientIp, describeAdminStatePut } from './auditLog.js';
 import {
   listBidders,
+  listPendingBidders,
+  approvePendingBidder,
+  rejectPendingBidder,
   createBidder,
   updateBidder,
   deleteBidder,
@@ -472,6 +476,52 @@ app.get('/api/bidders', requireAuth, async (req, res) => {
   }
 });
 
+/** List pending public registrations awaiting Approve / Reject decisions. */
+app.get('/api/bidders/pending', requireAuth, async (req, res) => {
+  try {
+    const actor = await getFreshActor(pool, bearerToken(req));
+    if (!actor) return res.status(401).json({ error: 'You must sign in to perform this action' });
+    const bidders = await listPendingBidders(pool, actor);
+    res.json({ bidders });
+  } catch (e) {
+    const code = e.statusCode ?? 500;
+    if (code >= 500) console.error(e);
+    res.status(code).json({ error: String(e.message) });
+  }
+});
+
+app.post('/api/bidders/:id/approve', requireAuth, async (req, res) => {
+  try {
+    const actor = await getFreshActor(pool, bearerToken(req));
+    if (!actor) return res.status(401).json({ error: 'You must sign in to perform this action' });
+    const bidder = await approvePendingBidder(pool, req.params.id, actor);
+    console.log(
+      `[audit] bidder approve id=${bidder.id} name="${bidder.name}" by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
+    );
+    res.json({ bidder });
+  } catch (e) {
+    const code = e.statusCode ?? 500;
+    if (code >= 500) console.error(e);
+    res.status(code).json({ error: String(e.message) });
+  }
+});
+
+app.post('/api/bidders/:id/reject', requireAuth, async (req, res) => {
+  try {
+    const actor = await getFreshActor(pool, bearerToken(req));
+    if (!actor) return res.status(401).json({ error: 'You must sign in to perform this action' });
+    const bidder = await rejectPendingBidder(pool, req.params.id, actor);
+    console.log(
+      `[audit] bidder reject id=${bidder.id} name="${bidder.name}" by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
+    );
+    res.json({ bidder });
+  } catch (e) {
+    const code = e.statusCode ?? 500;
+    if (code >= 500) console.error(e);
+    res.status(code).json({ error: String(e.message) });
+  }
+});
+
 app.post('/api/bidders', requireAuth, async (req, res) => {
   try {
     const actor = await getFreshActor(pool, bearerToken(req));
@@ -629,6 +679,7 @@ async function main() {
   await migrateMembersActiveColumn(pool);
   await migrateMembersOfficerRole(pool);
   await migrateMembersPasswordColumn(pool);
+  await migrateMembersApprovalStatusColumn(pool);
   await migrateAuctionWinnerNamesJson(pool);
   await migrateAuctionWinnerPoolCapColumn(pool);
   await migrateWinnerMarkLogTable(pool);

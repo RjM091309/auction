@@ -146,6 +146,7 @@ import {
   BidderActor,
   clearStoredActor,
   fetchActiveMembers,
+  fetchPendingBidders,
   loadStoredActor,
   storeActor,
   verifyMemberRequest,
@@ -283,6 +284,50 @@ export default function AuctionDashboard() {
   const [activeMembersForJoin, setActiveMembersForJoin] = useState<ActiveMember[]>([]);
   const [activeMembersLoading, setActiveMembersLoading] = useState(false);
   const [activeMembersError, setActiveMembersError] = useState<string | null>(null);
+
+  // Pending public registrations awaiting Approve / Reject. We only poll for
+  // this count when the visitor is signed in as a privileged actor (the
+  // `/api/bidders/pending` endpoint requires that gate anyway). The number
+  // is surfaced as a badge on the BIDDERS tab in the top nav so officers /
+  // admins / developers see at a glance that there's work to do, without
+  // having to open the Bidders tab first.
+  const [pendingBidderCount, setPendingBidderCount] = useState(0);
+  useEffect(() => {
+    const stored = loadStoredActor();
+    if (!stored) {
+      setPendingBidderCount(0);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const list = await fetchPendingBidders();
+        if (!cancelled) setPendingBidderCount(list.length);
+      } catch {
+        // Silent — the badge is best-effort. If the session expired the
+        // Bidders tab itself will surface the error when the user opens it.
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => {
+      void tick();
+    }, 15_000);
+    // BidderRegistration broadcasts this custom event after an Approve /
+    // Reject so the badge updates instantly instead of waiting for the next
+    // poll. Keeps the parent decoupled from the child's internals.
+    const onMutated = () => {
+      void tick();
+    };
+    window.addEventListener('pendingBiddersChanged', onMutated);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+      window.removeEventListener('pendingBiddersChanged', onMutated);
+    };
+    // We intentionally re-evaluate whenever the active tab changes so that a
+    // freshly-signed-in actor (returning from the Bidders gate) starts
+    // populating the badge immediately, and signing out clears it.
+  }, [activeTab]);
 
   useEffect(() => {
     if (!queueNameModalItemId) return;
@@ -1950,14 +1995,31 @@ export default function AuctionDashboard() {
               <button
                 type="button"
                 onClick={() => setActiveTab('bidders')}
-                className={`flex flex-1 sm:flex-initial items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all ${
+                className={`relative flex flex-1 sm:flex-initial items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all ${
                   activeTab === 'bidders'
                     ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
                     : 'text-slate-400 hover:text-white hover:bg-slate-800/80'
                 }`}
+                aria-label={
+                  pendingBidderCount > 0
+                    ? `Bidders (${pendingBidderCount} pending approval)`
+                    : 'Bidders'
+                }
               >
                 <UserPlus className="w-4 h-4 shrink-0" aria-hidden />
                 Bidders
+                {pendingBidderCount > 0 && (
+                  <span
+                    title={`${pendingBidderCount} pending approval`}
+                    className={`ml-1 inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full px-1.5 text-[10px] font-black leading-none ring-2 ring-slate-900 ${
+                      activeTab === 'bidders'
+                        ? 'bg-amber-300 text-amber-950'
+                        : 'animate-pulse bg-amber-400 text-amber-950'
+                    }`}
+                  >
+                    {pendingBidderCount > 99 ? '99+' : pendingBidderCount}
+                  </span>
+                )}
               </button>
             </nav>
           </div>

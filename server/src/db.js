@@ -315,6 +315,36 @@ export async function migrateMembersActiveColumn(pool) {
   );
 }
 
+/**
+ * Add `members.approval_status` for the public registration approval gate.
+ *
+ *   - 'approved' (default for all existing rows): full bidder access.
+ *   - 'pending':  created by the public `/registration` page; cannot bid
+ *                 or sign in until an Officer/Admin/Developer approves.
+ *   - 'rejected': declined by an admin; effectively soft-deleted, but the
+ *                 row is kept so the IGN remains reserved and the audit
+ *                 trail survives.
+ */
+export async function migrateMembersApprovalStatusColumn(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'members' AND COLUMN_NAME = 'approval_status'`
+  );
+  if (!Array.isArray(rows) || rows.length === 0) {
+    await pool.query(
+      `ALTER TABLE members
+         ADD COLUMN approval_status ENUM('pending', 'approved', 'rejected')
+                                   NOT NULL DEFAULT 'approved' AFTER active,
+         ADD INDEX idx_members_approval (approval_status)`
+    );
+    // Backfill: every pre-existing row was created by an admin (or migrated
+    // from an older schema), so they're implicitly approved.
+    await pool.query(
+      `UPDATE members SET approval_status = 'approved' WHERE approval_status IS NULL OR approval_status = ''`
+    );
+  }
+}
+
 /** Keep Illusion Frag Card after Feathers in `ORDER BY created_at` lists. */
 export async function migrateIllusionFragCardDisplayOrder(pool) {
   const [rows] = await pool.query(

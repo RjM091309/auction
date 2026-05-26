@@ -11,16 +11,19 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Clock,
   LogOut,
   Pencil,
   Plus,
   Search,
+  ShieldCheck,
   Trash2,
   UserPlus,
   X,
 } from 'lucide-react';
 import Swal from 'sweetalert2';
 import {
+  approveBidderRequest,
   Bidder,
   BidderActor,
   BidderInput,
@@ -30,7 +33,9 @@ import {
   createBidderRequest,
   deleteBidderRequest,
   fetchBidders,
+  fetchPendingBidders,
   loadStoredActor,
+  rejectBidderRequest,
   signOutBidderRequest,
   storeActor,
   updateBidderRequest,
@@ -209,6 +214,23 @@ async function swalConfirmDelete(name: string, id: number): Promise<boolean> {
     html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center"><strong>${safeName}</strong> (id ${id}) will be permanently removed and dropped from every auction queue. This cannot be undone.</p>`,
     showCancelButton: true,
     confirmButtonText: 'Delete bidder',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#dc2626',
+  });
+  return Boolean(result.isConfirmed);
+}
+
+async function swalConfirmReject(name: string): Promise<boolean> {
+  const safeName = escapeHtml(name);
+  const result = await Swal.fire({
+    ...SWAL_DARK,
+    icon: 'warning',
+    title: 'Reject this registration?',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center"><strong>${safeName}</strong> will be marked rejected and will not be able to bid. The IGN stays reserved — delete from the main list if you want to free it.</p>`,
+    showCancelButton: true,
+    confirmButtonText: 'Reject',
     cancelButtonText: 'Cancel',
     confirmButtonColor: '#dc2626',
   });
@@ -407,6 +429,11 @@ function BidderRegistrationAuthed({
   const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
   const [page, setPage] = useState(1);
 
+  const [pendingBidders, setPendingBidders] = useState<Bidder[]>([]);
+  const [pendingLoading, setPendingLoading] = useState(true);
+  const [pendingError, setPendingError] = useState<string | null>(null);
+  const [pendingBusyId, setPendingBusyId] = useState<number | null>(null);
+
   const [modalOpen, setModalOpen] = useState(false);
   const [draft, setDraft] = useState<EditDraft>(EMPTY_DRAFT);
   const [saving, setSaving] = useState(false);
@@ -452,6 +479,95 @@ function BidderRegistrationAuthed({
       cancelled = true;
     };
   }, [onExpired]);
+
+  // Pending approvals: load on mount and refresh periodically so new public
+  // registrations show up without the admin having to refresh the page.
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const list = await fetchPendingBidders();
+        if (!cancelled) {
+          setPendingBidders(list);
+          setPendingError(null);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/sign in|401|expired/i.test(msg)) {
+          if (!cancelled) onExpired();
+          return;
+        }
+        if (!cancelled) setPendingError(msg);
+      } finally {
+        if (!cancelled) setPendingLoading(false);
+      }
+    };
+    void load();
+    const id = window.setInterval(() => {
+      void load();
+    }, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [onExpired]);
+
+  const handleApprovePending = useCallback(
+    async (b: Bidder) => {
+      setPendingBusyId(b.id);
+      try {
+        const approved = await approveBidderRequest(b.id);
+        setPendingBidders((prev) => prev.filter((row) => row.id !== b.id));
+        setBidders((prev) => {
+          const without = prev.filter((row) => row.id !== approved.id);
+          return [approved, ...without];
+        });
+        // Tell the parent nav (AuctionDashboard) to refresh its pending badge.
+        window.dispatchEvent(new Event('pendingBiddersChanged'));
+        void swalSuccess(`"${approved.name}" has been approved.`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/sign in|401|expired/i.test(msg)) {
+          onExpired();
+          return;
+        }
+        void swalError(msg);
+      } finally {
+        setPendingBusyId(null);
+      }
+    },
+    [onExpired]
+  );
+
+  const handleRejectPending = useCallback(
+    async (b: Bidder) => {
+      const ok = await swalConfirmReject(b.name);
+      if (!ok) return;
+      setPendingBusyId(b.id);
+      try {
+        const rejected = await rejectBidderRequest(b.id);
+        setPendingBidders((prev) => prev.filter((row) => row.id !== b.id));
+        // Surface the rejected row in the main table as Inactive so the admin
+        // can still see it / hard-delete it later if desired.
+        setBidders((prev) => {
+          const without = prev.filter((row) => row.id !== rejected.id);
+          return [rejected, ...without];
+        });
+        window.dispatchEvent(new Event('pendingBiddersChanged'));
+        void swalSuccess(`"${rejected.name}" has been rejected.`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/sign in|401|expired/i.test(msg)) {
+          onExpired();
+          return;
+        }
+        void swalError(msg);
+      } finally {
+        setPendingBusyId(null);
+      }
+    },
+    [onExpired]
+  );
 
   const filtered = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
@@ -655,7 +771,7 @@ function BidderRegistrationAuthed({
         </div>
       </header>
 
-      <div className="grid grid-cols-3 gap-3 sm:max-w-md">
+      <div className="grid grid-cols-2 gap-3 sm:max-w-xl sm:grid-cols-4">
         <div className="rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3">
           <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
             Total
@@ -674,7 +790,104 @@ function BidderRegistrationAuthed({
           </p>
           <p className="text-2xl font-bold text-white">{counts.inactive}</p>
         </div>
+        <div className="rounded-2xl border border-amber-900/50 bg-amber-950/30 px-4 py-3">
+          <p className="text-[10px] font-black uppercase tracking-widest text-amber-300">
+            Pending
+          </p>
+          <p className="text-2xl font-bold text-white">{pendingBidders.length}</p>
+        </div>
       </div>
+
+      <section
+        className="overflow-hidden rounded-2xl border border-amber-900/50 bg-gradient-to-br from-amber-950/40 via-slate-900 to-slate-900"
+        aria-labelledby="pending-bidders-heading"
+      >
+        <header className="flex items-center justify-between gap-3 border-b border-amber-900/40 bg-amber-950/30 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <div className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500/20 text-amber-300">
+              <Clock className="h-4 w-4" aria-hidden />
+            </div>
+            <div>
+              <h3
+                id="pending-bidders-heading"
+                className="text-sm font-bold text-white"
+              >
+                Pending registrations
+              </h3>
+              <p className="text-[11px] text-amber-200/70">
+                Public sign-ups from <span className="font-mono">/registration</span>. Until approved, they cannot bid.
+              </p>
+            </div>
+          </div>
+          {pendingBidders.length > 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/20 px-2.5 py-0.5 text-[11px] font-black uppercase tracking-widest text-amber-200">
+              {pendingBidders.length} waiting
+            </span>
+          )}
+        </header>
+        {pendingError && (
+          <div className="border-b border-rose-900/40 bg-rose-950/40 px-4 py-2 text-xs text-rose-200">
+            {pendingError}
+          </div>
+        )}
+        {pendingLoading ? (
+          <p className="px-4 py-6 text-center text-sm text-slate-500">
+            Loading pending registrations…
+          </p>
+        ) : pendingBidders.length === 0 ? (
+          <p className="px-4 py-6 text-center text-sm text-slate-500">
+            No pending registrations. New public sign-ups will show up here.
+          </p>
+        ) : (
+          <ul className="divide-y divide-amber-900/30">
+            {pendingBidders.map((b) => {
+              const busy = pendingBusyId === b.id;
+              return (
+                <li
+                  key={b.id}
+                  className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-slate-800 text-sm font-black text-slate-300">
+                      {b.name.charAt(0).toUpperCase() || '?'}
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-white">{b.name}</p>
+                      <p className="text-[11px] text-slate-400">
+                        <span className="font-mono">id {b.id}</span>
+                        <span className="mx-1.5 text-slate-600">•</span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-amber-300">
+                          Pending approval
+                        </span>
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 sm:justify-end">
+                    <button
+                      type="button"
+                      onClick={() => void handleApprovePending(b)}
+                      disabled={busy}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-black uppercase tracking-wide text-white shadow-md shadow-emerald-900/30 transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
+                      Approve
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleRejectPending(b)}
+                      disabled={busy}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-rose-700 bg-rose-950/60 px-3 py-1.5 text-xs font-black uppercase tracking-wide text-rose-200 transition-colors hover:border-rose-500 hover:bg-rose-900/50 hover:text-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <X className="h-3.5 w-3.5" aria-hidden />
+                      Reject
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="relative w-full sm:max-w-sm">

@@ -58,12 +58,16 @@ function swalSuccess(ign: string): Promise<void> {
   return Swal.fire({
     ...SWAL_DARK,
     icon: 'success',
-    title: 'Registration complete',
+    title: 'Registration submitted',
     width: 'min(28rem, calc(100vw - 2rem))',
-    html: `<p style="margin:0;line-height:1.55;font-size:14px;color:#bbf7d0;text-align:center">Welcome, <b>${escapeHtml(
-      ign
-    )}</b>! You can now join an auction queue.</p>`,
-    confirmButtonText: 'Go to auction',
+    html:
+      `<p style="margin:0 0 8px;line-height:1.55;font-size:14px;color:#e2e8f0;text-align:center">` +
+      `Thanks, <b>${escapeHtml(ign)}</b>! Your account is now <b style="color:#fcd34d">pending approval</b> by a guild officer.` +
+      `</p>` +
+      `<p style="margin:0;line-height:1.5;font-size:12px;color:#94a3b8;text-align:center">` +
+      `You'll be able to sign in and join auction queues once an officer or admin approves your registration.` +
+      `</p>`,
+    confirmButtonText: 'OK',
     confirmButtonColor: '#2563eb',
   }).then(() => undefined);
 }
@@ -167,8 +171,13 @@ export default function RegistrationPage() {
     try {
       await publicRegisterRequest(ignTrim, passwordTrim);
       await swalSuccess(ignTrim);
-      // Hard-navigate so the dashboard mounts cleanly with no stale state.
-      window.location.href = '/';
+      // Reset the form — the account is pending, so there's nothing useful for
+      // them on the dashboard yet. Stay on /registration so they can register
+      // a second account if needed, or close the tab.
+      setIgn('');
+      setPassword('');
+      setConfirmPassword('');
+      setAvailability({ kind: 'idle' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // If the server returned "already registered", reflect it in the

@@ -111,6 +111,12 @@ function coerceId(raw) {
   return null;
 }
 
+function sanitizeApprovalStatus(raw) {
+  if (raw === 'pending') return 'pending';
+  if (raw === 'rejected') return 'rejected';
+  return 'approved';
+}
+
 function rowToBidder(row) {
   let role = 'Member';
   if (row.role === 'Officer') role = 'Officer';
@@ -122,6 +128,7 @@ function rowToBidder(row) {
     role,
     password: String(row.password ?? ''),
     active: Number(row.active) === 1,
+    approvalStatus: sanitizeApprovalStatus(row.approval_status ?? row.approvalStatus),
   };
 }
 
@@ -200,7 +207,7 @@ export async function authBidder(pool, body, meta = {}) {
   if (!password) throw clientError(400, 'Password is required');
 
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active FROM members WHERE name = ? LIMIT 1`,
+    `SELECT id, name, role, password, active, approval_status FROM members WHERE name = ? LIMIT 1`,
     [name]
   );
   const recordFail = () => {
@@ -212,6 +219,14 @@ export async function authBidder(pool, body, meta = {}) {
     throw clientError(401, 'Invalid credentials');
   }
   const row = rows[0];
+  if (row.approval_status === 'pending') {
+    recordFail();
+    throw clientError(403, 'Your registration is still pending admin approval.');
+  }
+  if (row.approval_status === 'rejected') {
+    recordFail();
+    throw clientError(403, 'Your registration was rejected by an admin.');
+  }
   if (Number(row.active) !== 1) {
     recordFail();
     throw clientError(403, 'This account is inactive');
@@ -335,7 +350,7 @@ export async function verifyMemberCredentials(pool, body, meta = {}) {
   if (!password) throw clientError(400, 'Password is required');
 
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active FROM members WHERE name = ? LIMIT 1`,
+    `SELECT id, name, role, password, active, approval_status FROM members WHERE name = ? LIMIT 1`,
     [name]
   );
   const recordFail = () => {
@@ -347,6 +362,14 @@ export async function verifyMemberCredentials(pool, body, meta = {}) {
     throw clientError(401, 'Invalid IGN or password');
   }
   const row = rows[0];
+  if (row.approval_status === 'pending') {
+    recordFail();
+    throw clientError(403, 'Your registration is still pending admin approval.');
+  }
+  if (row.approval_status === 'rejected') {
+    recordFail();
+    throw clientError(403, 'Your registration was rejected by an admin.');
+  }
   if (Number(row.active) !== 1) {
     recordFail();
     throw clientError(403, 'This account is inactive');
@@ -430,14 +453,109 @@ function redactPasswordForActor(bidder, actor) {
 
 export async function listBidders(pool, actor) {
   requireActor(actor);
+  // Pending registrations are surfaced via the dedicated `listPendingBidders`
+  // call, so the main Bidders table only shows approved + rejected rows.
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active
+    `SELECT id, name, role, password, active, approval_status
      FROM members
+     WHERE approval_status <> 'pending'
      ORDER BY active DESC, name ASC`
   );
   return (Array.isArray(rows) ? rows : [])
     .map(rowToBidder)
     .map((b) => redactPasswordForActor(b, actor));
+}
+
+/**
+ * List every bidder whose public registration is awaiting approval. Returns
+ * the same shape as `listBidders` so the admin UI can reuse the row renderer.
+ */
+export async function listPendingBidders(pool, actor) {
+  requireEditPermission(actor);
+  const [rows] = await pool.query(
+    `SELECT id, name, role, password, active, approval_status
+     FROM members
+     WHERE approval_status = 'pending'
+     ORDER BY id ASC`
+  );
+  return (Array.isArray(rows) ? rows : [])
+    .map(rowToBidder)
+    .map((b) => redactPasswordForActor(b, actor));
+}
+
+/**
+ * Approve a pending registration: marks `approval_status='approved'` and
+ * reactivates the row (`active=1`) so it shows up in active-member queries
+ * and the user can sign in / be bid on their behalf.
+ */
+export async function approvePendingBidder(pool, idRaw, actor) {
+  requireEditPermission(actor);
+  const id = coerceId(idRaw);
+  if (id == null) throw clientError(400, 'Invalid bidder id');
+
+  const [existing] = await pool.query(
+    `SELECT id, role, approval_status FROM members WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  if (!Array.isArray(existing) || existing.length === 0) {
+    throw clientError(404, 'Bidder not found');
+  }
+  if (existing[0].approval_status !== 'pending') {
+    throw clientError(409, 'This registration is no longer pending');
+  }
+  // Only roles the actor could otherwise create count here. Public
+  // registrations are always `Member`, so this never trips for non-priv
+  // actors. Still belt-and-suspenders for forged ENUM values.
+  if (!canEditRow(actor.role, existing[0].role)) {
+    throw clientError(403, `You are not allowed to approve ${existing[0].role} bidders`);
+  }
+
+  await pool.query(
+    `UPDATE members SET approval_status = 'approved', active = 1 WHERE id = ?`,
+    [id]
+  );
+  const [rows] = await pool.query(
+    `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  return redactPasswordForActor(rowToBidder(rows[0]), actor);
+}
+
+/**
+ * Reject a pending registration: marks `approval_status='rejected'` and
+ * forces `active=0`. The row is kept (not hard-deleted) so the IGN stays
+ * reserved and the audit trail is preserved; an admin can still hard-delete
+ * via the existing Delete action if they want to free the IGN.
+ */
+export async function rejectPendingBidder(pool, idRaw, actor) {
+  requireEditPermission(actor);
+  const id = coerceId(idRaw);
+  if (id == null) throw clientError(400, 'Invalid bidder id');
+
+  const [existing] = await pool.query(
+    `SELECT id, role, approval_status FROM members WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  if (!Array.isArray(existing) || existing.length === 0) {
+    throw clientError(404, 'Bidder not found');
+  }
+  if (existing[0].approval_status !== 'pending') {
+    throw clientError(409, 'This registration is no longer pending');
+  }
+  if (!canEditRow(actor.role, existing[0].role)) {
+    throw clientError(403, `You are not allowed to reject ${existing[0].role} bidders`);
+  }
+
+  await pool.query(
+    `UPDATE members SET approval_status = 'rejected', active = 0 WHERE id = ?`,
+    [id]
+  );
+  invalidateSessionsForMember(id);
+  const [rows] = await pool.query(
+    `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  return redactPasswordForActor(rowToBidder(rows[0]), actor);
 }
 
 export async function createBidder(pool, body, actor) {
@@ -658,12 +776,20 @@ function recordRegisterHit(ipKey) {
 }
 
 /**
- * True if an IGN is already taken by an ACTIVE member (case-insensitive).
- * Inactive rows can be reactivated later by an admin without colliding.
+ * True if an IGN is already taken by an existing active or pending member
+ * (case-insensitive).
+ *
+ * A `rejected` row keeps the IGN reserved as far as the public form goes —
+ * an admin can hard-delete the rejected row first if they want to free it.
+ * `inactive + approved` rows (soft-deleted) also reserve the IGN so a later
+ * reactivation won't collide with a brand-new public signup.
  */
-async function isIgnTakenActive(pool, name) {
+async function isIgnTakenForRegistration(pool, name) {
   const [rows] = await pool.query(
-    `SELECT id FROM members WHERE LOWER(name) = LOWER(?) AND active = 1 LIMIT 1`,
+    `SELECT id FROM members
+     WHERE LOWER(name) = LOWER(?)
+       AND (active = 1 OR approval_status IN ('pending', 'rejected'))
+     LIMIT 1`,
     [name]
   );
   return Array.isArray(rows) && rows.length > 0;
@@ -679,16 +805,24 @@ export async function publicCheckIgnAvailability(pool, rawIgn) {
   if (name.length > 32) {
     return { ign: name, available: false, reason: 'IGN must be at most 32 characters' };
   }
-  const taken = await isIgnTakenActive(pool, name);
+  const taken = await isIgnTakenForRegistration(pool, name);
   return taken
     ? { ign: name, available: false, reason: 'IGN already registered' }
     : { ign: name, available: true };
 }
 
 /**
- * Create a new `Member` row from the public registration form. Returns the
- * created row (no token — the user can sign in via the Bidders tab if their
- * role gets elevated later).
+ * Create a new `Member` row from the public registration form.
+ *
+ * New public registrations are inserted as:
+ *     role             = 'Member'
+ *     active           = 0
+ *     approval_status  = 'pending'
+ *
+ * They will not appear in `getFullState`'s `members` list, can't sign in to
+ * the Bidders page, and the IGN cannot be reactivated by the anonymous queue
+ * flow until an Officer / Admin / Developer explicitly approves them from
+ * the Bidder Registration page.
  */
 export async function publicRegisterMember(pool, body, meta = {}) {
   const ipKey = meta.ip ? `ip:${meta.ip}` : null;
@@ -707,7 +841,7 @@ export async function publicRegisterMember(pool, body, meta = {}) {
     throw clientError(400, 'Password is too long');
   }
 
-  if (await isIgnTakenActive(pool, name)) {
+  if (await isIgnTakenForRegistration(pool, name)) {
     throw clientError(409, 'This IGN is already registered. Please pick another.');
   }
 
@@ -717,7 +851,10 @@ export async function publicRegisterMember(pool, body, meta = {}) {
     // Re-check uniqueness inside the transaction so two concurrent submits
     // can't both insert the same IGN.
     const [dupe] = await conn.query(
-      `SELECT id FROM members WHERE LOWER(name) = LOWER(?) AND active = 1 LIMIT 1`,
+      `SELECT id FROM members
+       WHERE LOWER(name) = LOWER(?)
+         AND (active = 1 OR approval_status IN ('pending', 'rejected'))
+       LIMIT 1`,
       [name]
     );
     if (Array.isArray(dupe) && dupe.length > 0) {
@@ -725,13 +862,14 @@ export async function publicRegisterMember(pool, body, meta = {}) {
       throw clientError(409, 'This IGN is already registered. Please pick another.');
     }
     const [ins] = await conn.query(
-      `INSERT INTO members (name, role, password, active) VALUES (?, 'Member', ?, 1)`,
+      `INSERT INTO members (name, role, password, active, approval_status)
+       VALUES (?, 'Member', ?, 0, 'pending')`,
       [name, password]
     );
     const id = Number(ins.insertId);
     await conn.commit();
     recordRegisterHit(ipKey);
-    return { id, name, role: 'Member' };
+    return { id, name, role: 'Member', approvalStatus: 'pending' };
   } catch (e) {
     await conn.rollback().catch(() => {});
     throw e;

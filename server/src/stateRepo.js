@@ -325,10 +325,38 @@ async function findOrCreateActiveMemberId(conn, rawName) {
     }
   }
 
+  // Block names that collide with a pending or rejected public registration.
+  // We never want the anonymous queue flow to silently bypass admin approval
+  // by auto-creating a parallel row, or to reactivate a rejected account.
+  const [reserved] = await conn.query(
+    `SELECT id, approval_status FROM members
+     WHERE LOWER(TRIM(name)) = ?
+       AND approval_status IN ('pending', 'rejected')
+     ORDER BY id ASC LIMIT 1`,
+    [name.toLowerCase()]
+  );
+  if (Array.isArray(reserved) && reserved.length > 0) {
+    const status = String(reserved[0].approval_status ?? '');
+    if (status === 'pending') {
+      throw clientError(
+        403,
+        'This IGN has a pending registration. An admin must approve it before bidding.',
+        { code: 'registration_pending' }
+      );
+    }
+    throw clientError(
+      403,
+      'This IGN was rejected by an admin and cannot be used for bidding.',
+      { code: 'registration_rejected' }
+    );
+  }
+
   const ignLower = name.toLowerCase();
   const [inactive] = await conn.query(
     `SELECT id FROM members
-     WHERE active = 0 AND LOWER(TRIM(name)) = ?
+     WHERE active = 0
+       AND approval_status = 'approved'
+       AND LOWER(TRIM(name)) = ?
      ORDER BY id ASC LIMIT 1`,
     [ignLower]
   );
@@ -342,7 +370,7 @@ async function findOrCreateActiveMemberId(conn, rawName) {
   }
 
   const [ins] = await conn.query(
-    'INSERT INTO members (name, role, active) VALUES (?, ?, 1)',
+    `INSERT INTO members (name, role, active, approval_status) VALUES (?, ?, 1, 'approved')`,
     [name, 'Member']
   );
   const newId = Number(ins.insertId);

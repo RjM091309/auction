@@ -3,12 +3,15 @@ import { apiUrl } from './apiState';
 export type BidderRole = 'Officer' | 'Member' | 'Developer' | 'Admin';
 export type PrivilegedRole = 'Officer' | 'Developer' | 'Admin';
 
+export type BidderApprovalStatus = 'pending' | 'approved' | 'rejected';
+
 export interface Bidder {
   id: number;
   name: string;
   role: BidderRole;
   password: string;
   active: boolean;
+  approvalStatus: BidderApprovalStatus;
 }
 
 export interface BidderInput {
@@ -111,6 +114,7 @@ function parseBidder(raw: unknown): Bidder | null {
         ? parseInt(idVal.trim(), 10)
         : NaN;
   if (!Number.isInteger(id) || id <= 0) return null;
+  const approval = r.approvalStatus ?? r.approval_status;
   return {
     id,
     name: typeof r.name === 'string' ? r.name : '',
@@ -124,6 +128,12 @@ function parseBidder(raw: unknown): Bidder | null {
             : 'Member',
     password: typeof r.password === 'string' ? r.password : '',
     active: r.active === true || r.active === 1,
+    approvalStatus:
+      approval === 'pending'
+        ? 'pending'
+        : approval === 'rejected'
+          ? 'rejected'
+          : 'approved',
   };
 }
 
@@ -396,4 +406,63 @@ export async function publicRegisterRequest(
     throw new Error('Invalid registration response');
   }
   return { ok: true, member: { id: member.id, name: member.name, role: 'Member' } };
+}
+
+/* --------------------------------------------------------------------------
+ * Pending bidder approval queue (admin Bidders tab).
+ * ----------------------------------------------------------------------- */
+
+/** Fetch every bidder whose public registration is awaiting Approve / Reject. */
+export async function fetchPendingBidders(): Promise<Bidder[]> {
+  const res = await fetch(apiUrl('/api/bidders/pending'), {
+    ...cred,
+    headers: { ...authHeaders() },
+  });
+  const json = await readJson(res);
+  if (!res.ok) {
+    throw new Error(errorMessage(json, `${res.status} ${res.statusText}`));
+  }
+  const arr =
+    json && typeof json === 'object' && Array.isArray((json as { bidders?: unknown }).bidders)
+      ? ((json as { bidders: unknown[] }).bidders)
+      : [];
+  return arr
+    .map(parseBidder)
+    .filter((b): b is Bidder => b != null);
+}
+
+export async function approveBidderRequest(id: number): Promise<Bidder> {
+  const res = await fetch(
+    apiUrl(`/api/bidders/${encodeURIComponent(String(id))}/approve`),
+    {
+      ...cred,
+      method: 'POST',
+      headers: { ...authHeaders() },
+    }
+  );
+  const json = await readJson(res);
+  if (!res.ok) {
+    throw new Error(errorMessage(json, `${res.status} ${res.statusText}`));
+  }
+  const b = parseBidder((json as { bidder?: unknown })?.bidder);
+  if (!b) throw new Error('Invalid bidder response');
+  return b;
+}
+
+export async function rejectBidderRequest(id: number): Promise<Bidder> {
+  const res = await fetch(
+    apiUrl(`/api/bidders/${encodeURIComponent(String(id))}/reject`),
+    {
+      ...cred,
+      method: 'POST',
+      headers: { ...authHeaders() },
+    }
+  );
+  const json = await readJson(res);
+  if (!res.ok) {
+    throw new Error(errorMessage(json, `${res.status} ${res.statusText}`));
+  }
+  const b = parseBidder((json as { bidder?: unknown })?.bidder);
+  if (!b) throw new Error('Invalid bidder response');
+  return b;
 }
