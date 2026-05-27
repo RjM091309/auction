@@ -20,7 +20,6 @@ import {
   Eye,
   EyeOff,
   Trophy,
-  Wrench,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -139,6 +138,7 @@ import {
   summarizeBidderStateLog,
 } from './lib/bidderStateLogUi';
 import { BidderRankingExpandableRows } from './components/BidderRankingExpandableRows';
+import BidderAuditLogSection from './components/BidderAuditLogSection';
 import BidderRegistration from './BidderRegistration';
 import BidderAuthModal from './BidderAuthModal';
 import { NameDropdown } from './BidderAuthGate';
@@ -153,6 +153,7 @@ import {
   verifyMemberRequest,
   verifyStoredActor,
 } from './lib/apiBidders';
+import { notifyBidderAuditChanged } from './lib/apiBidderAudit';
 import { DashboardTab, pathForTab, tabFromPath } from './lib/tabRoute';
 
 /** How often the admin dashboard pulls server state so public joins show up without manual refresh. */
@@ -804,6 +805,7 @@ export default function AuctionDashboard() {
       );
       queueBaselineRef.current = buildQueueBaselineFromState(finalState);
       setState(finalState);
+      notifyBidderAuditChanged();
       void swal2EventModeSaved(server.eventMode ?? mode);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1049,6 +1051,7 @@ export default function AuctionDashboard() {
           );
           queueBaselineRef.current = buildQueueBaselineFromState(finalState);
           setState(finalState);
+          notifyBidderAuditChanged();
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           if (/sign in|401|expired|officer/i.test(msg)) clearStoredActor();
@@ -1222,6 +1225,7 @@ export default function AuctionDashboard() {
             dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
           )
         );
+        notifyBidderAuditChanged();
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1428,6 +1432,7 @@ export default function AuctionDashboard() {
       );
       queueBaselineRef.current = buildQueueBaselineFromState(finalState);
       setState(finalState);
+      notifyBidderAuditChanged();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/sign in|401|expired|admin or developer/i.test(msg)) {
@@ -1527,6 +1532,7 @@ export default function AuctionDashboard() {
             dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
           )
         );
+      notifyBidderAuditChanged();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/sign in|401|expired/i.test(msg)) {
@@ -1707,6 +1713,7 @@ export default function AuctionDashboard() {
       queueBaselineRef.current = buildQueueBaselineFromState(merged);
       skipPersistOnceRef.current = true;
       setState(merged);
+      notifyBidderAuditChanged();
       void swal2WinnerLimitsUpdated({
         fragmentCards: activeFragmentAuctionItems(merged.items).map((it) => ({
           name: it.name,
@@ -2219,30 +2226,7 @@ export default function AuctionDashboard() {
               hidden={activeTab !== 'history'}
               className="space-y-10"
             >
-                <section className="space-y-4" aria-label="Bid outcomes">
-                  <div
-                    className="mx-auto flex w-full max-w-2xl flex-col items-center gap-4 rounded-3xl border border-dashed border-amber-500/40 bg-amber-500/5 px-6 py-12 text-center"
-                    role="status"
-                    aria-live="polite"
-                  >
-                    <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-500/40 bg-amber-500/10">
-                      <Wrench
-                        className="h-7 w-7 text-amber-300"
-                        aria-hidden
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-[10px] font-black uppercase tracking-[0.3em] text-amber-300/80">
-                        Under maintenance
-                      </p>
-                      <h3 className="text-xl font-black text-white sm:text-2xl">
-                        Ranking &amp; Weekly logs are temporarily offline
-                      </h3>
-                      <p className="text-sm font-medium text-slate-400">
-                        We&rsquo;re improving this page. Please check back later.
-                      </p>
-                    </div>
-                  </div>
+                <BidderAuditLogSection active={activeTab === 'history'} />
 
                   {false && bidderLogSubTab === 'ranking' &&
                     (bidderStatsByIgn.length > 0 ? (
@@ -2418,7 +2402,6 @@ export default function AuctionDashboard() {
                         )}
                       </div>
                     ))}
-                </section>
             </div>
           )}
 

@@ -12,6 +12,7 @@ import {
   migrateAuctionWinnerPoolCapColumn,
   migrateWinnerMarkLogTable,
   migrateBidderStateLogTable,
+  migrateBidderAuditLogTable,
   migrateMembersIntPk,
   migrateOverrunRewardsRunsTable,
   migrateDefaultAuctionItems,
@@ -31,6 +32,11 @@ import {
 import { requireAuth } from './auth.js';
 import { clientIp, describeAdminStatePut } from './auditLog.js';
 import {
+  buildWinnerLimitsDetails,
+  collectQueueRemoveAudits,
+  recordAdminAudit,
+} from './bidderAuditLog.js';
+import {
   listBidders,
   listPendingBidders,
   approvePendingBidder,
@@ -46,6 +52,7 @@ import {
   verifyMemberCredentials,
   publicRegisterMember,
   publicCheckIgnAvailability,
+  listBidderAuditLog,
 } from './bidders.js';
 import {
   defaultOverrunRewardsConfig,
@@ -214,7 +221,17 @@ app.post('/api/state/event-mode', requireAuth, async (req, res) => {
     if (rawMode !== 'Guild League' && rawMode !== 'Emperium Overrun') {
       return res.status(400).json({ error: 'Invalid event mode' });
     }
+    const prev = await getFullState(pool);
     const state = await setEventMode(pool, rawMode);
+    await recordAdminAudit(pool, {
+      action: 'event_mode_change',
+      actor,
+      targetName: rawMode,
+      details: {
+        from: prev.eventMode ?? 'Emperium Overrun',
+        to: rawMode,
+      },
+    });
     console.log(
       `[audit] event-mode set=${rawMode} by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
     );
@@ -244,7 +261,20 @@ app.post('/api/state/clear-queues', requireAuth, async (req, res) => {
         .status(403)
         .json({ error: 'Only Admin or Developer can clear all queues' });
     }
+    const before = await getFullState(pool);
+    let entriesCleared = 0;
+    for (const it of before.items ?? []) {
+      if (it.status === 'active') {
+        entriesCleared += (it.interestedMemberIds ?? []).length;
+      }
+    }
     const state = await clearAllActiveQueues(pool);
+    await recordAdminAudit(pool, {
+      action: 'clear_all_queues',
+      actor,
+      targetName: 'Clear all lists',
+      details: { entriesCleared },
+    });
     console.log(
       `[audit] clear-all-queues by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
     );
@@ -259,6 +289,9 @@ app.post('/api/state/clear-queues', requireAuth, async (req, res) => {
 app.put('/api/state', requireAuth, async (req, res) => {
   try {
     const prev = await getFullState(pool);
+    const token = bearerToken(req);
+    /** @type {Array<{ action: string; actor: { id: number; name: string; role: string }; targetName: string; details: Record<string, unknown> | null }>} */
+    const pendingAudits = [];
 
     // Shuffle transitions are privileged:
     //   • false → true  (Start Shuffle)  — Officer / Admin / Developer
@@ -270,17 +303,23 @@ app.put('/api/state', requireAuth, async (req, res) => {
     const willResetShuffle =
       prev.shuffleLocked === true && req.body?.shuffleLocked !== true;
     if (willLockShuffle) {
-      const actor = await getFreshActor(pool, bearerToken(req));
+      const actor = await getFreshActor(pool, token);
       if (!actor) {
         return res
           .status(401)
           .json({ error: 'You must sign in as Officer/Admin/Developer to start the shuffle' });
       }
+      pendingAudits.push({
+        action: 'shuffle_start',
+        actor,
+        targetName: 'Shuffle draw started',
+        details: { eventMode: prev.eventMode ?? 'Emperium Overrun' },
+      });
       console.log(
         `[audit] shuffle-start by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
       );
     } else if (willResetShuffle) {
-      const actor = await getFreshActor(pool, bearerToken(req));
+      const actor = await getFreshActor(pool, token);
       if (!actor) {
         return res
           .status(401)
@@ -291,6 +330,12 @@ app.put('/api/state', requireAuth, async (req, res) => {
           .status(403)
           .json({ error: 'Only Admin or Developer can reset the shuffle' });
       }
+      pendingAudits.push({
+        action: 'shuffle_reset',
+        actor,
+        targetName: 'Shuffle reset',
+        details: null,
+      });
       console.log(
         `[audit] shuffle-reset by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
       );
@@ -301,18 +346,43 @@ app.put('/api/state', requireAuth, async (req, res) => {
     // comparing the previous snapshot to the incoming body. Routine state
     // PUTs that don't touch these fields aren't affected.
     if (winnerLimitsChanged(prev, req.body)) {
-      const actor = await getFreshActor(pool, bearerToken(req));
+      const actor = await getFreshActor(pool, token);
       if (!actor) {
         return res
           .status(401)
           .json({ error: 'You must sign in as Officer/Admin/Developer to change winner set limits' });
       }
+      pendingAudits.push({
+        action: 'winner_limits_set',
+        actor,
+        targetName: 'Winner set limits',
+        details: buildWinnerLimitsDetails(prev, req.body),
+      });
       console.log(
         `[audit] winner-limits-set rank=${req.body?.rewardRank ?? '?'} by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
       );
     }
 
+    const queueRemovals = collectQueueRemoveAudits(prev, req.body);
+    if (queueRemovals.length > 0) {
+      const queueActor = await getFreshActor(pool, token);
+      if (queueActor) {
+        for (const r of queueRemovals) {
+          pendingAudits.push({
+            action: 'queue_remove',
+            actor: queueActor,
+            targetMemberId: r.targetMemberId,
+            targetName: r.targetName,
+            details: r.details,
+          });
+        }
+      }
+    }
+
     await replaceFullState(pool, req.body);
+    for (const entry of pendingAudits) {
+      await recordAdminAudit(pool, entry);
+    }
     const ip = clientIp(req);
     const auditLines = describeAdminStatePut(prev, req.body);
     if (auditLines.length === 0) {
@@ -341,13 +411,25 @@ app.delete('/api/items/:itemId/queue/:memberId', requireAuth, async (req, res) =
         .status(401)
         .json({ error: 'You must sign in as Officer/Admin/Developer to remove from the queue' });
     }
-    const state = await removeMemberFromItemQueue(
-      pool,
-      req.params.itemId,
-      req.params.memberId
-    );
+    const itemId = String(req.params.itemId ?? '').trim();
+    const memberId = parseInt(String(req.params.memberId ?? '').trim(), 10);
+    const before = await getFullState(pool);
+    const item = before.items.find((i) => i.id === itemId);
+    const member = before.members.find((m) => m.id === memberId);
+    const state = await removeMemberFromItemQueue(pool, itemId, memberId);
+    await recordAdminAudit(pool, {
+      action: 'queue_remove',
+      actor,
+      targetMemberId: Number.isInteger(memberId) ? memberId : null,
+      targetName: member?.name ? String(member.name) : `Member #${memberId}`,
+      details: {
+        itemId,
+        itemName: item?.name ? String(item.name) : itemId,
+        itemType: item?.type ? String(item.type) : '',
+      },
+    });
     console.log(
-      `[audit] queue remove item=${req.params.itemId} member=${req.params.memberId} by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
+      `[audit] queue remove item=${itemId} member=${memberId} ign="${member?.name ?? ''}" by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
     );
     res.json(state);
   } catch (e) {
@@ -478,6 +560,17 @@ app.get('/api/bidders/pending', requireAuth, async (req, res) => {
     const code = e.statusCode ?? 500;
     if (code >= 500) console.error(e);
     res.status(code).json({ error: String(e.message) });
+  }
+});
+
+/** Public read — admin audit log (bidders + auction actions). No sign-in required. */
+app.get('/api/bidders/audit', requireAuth, async (_req, res) => {
+  try {
+    const entries = await listBidderAuditLog(pool);
+    res.json({ entries });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message) });
   }
 });
 
@@ -675,6 +768,7 @@ async function main() {
   await migrateAuctionWinnerPoolCapColumn(pool);
   await migrateWinnerMarkLogTable(pool);
   await migrateBidderStateLogTable(pool);
+  await migrateBidderAuditLogTable(pool);
   await migrateMembersIntPk(pool);
   await migrateOverrunRewardsRunsTable(pool);
   await seedIfEmpty(pool);

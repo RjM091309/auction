@@ -79,6 +79,28 @@ CREATE TABLE IF NOT EXISTS bidder_state_log (
   INDEX idx_bs_state (state)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Bidder Registration admin audit (approve / reject / create / edit / delete).
+CREATE TABLE IF NOT EXISTS bidder_audit_log (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  at_ms BIGINT NOT NULL,
+  logged_at DATETIME(3) NOT NULL,
+  action ENUM(
+    'approve', 'reject', 'create', 'edit', 'delete',
+    'shuffle_start', 'shuffle_reset', 'event_mode_change',
+    'winner_limits_set', 'clear_all_queues', 'queue_remove'
+  ) NOT NULL,
+  target_member_id BIGINT UNSIGNED NULL,
+  target_name VARCHAR(255) NOT NULL,
+  target_role VARCHAR(64) NULL,
+  actor_id BIGINT UNSIGNED NOT NULL,
+  actor_name VARCHAR(255) NOT NULL,
+  actor_role VARCHAR(64) NOT NULL,
+  details_json TEXT NULL,
+  INDEX idx_bidder_audit_at (at_ms),
+  INDEX idx_bidder_audit_action (action),
+  INDEX idx_bidder_audit_target (target_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Emperium Overrun Auction rewards payout runs (one row per Sunday payout).
 CREATE TABLE IF NOT EXISTS overrun_rewards_runs (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

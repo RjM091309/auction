@@ -7,6 +7,11 @@
  */
 
 import crypto from 'node:crypto';
+import {
+  appendBidderAuditLog,
+  buildBidderEditDetails,
+  loadBidderAuditLog,
+} from './bidderAuditLog.js';
 
 /** Constant-time string comparison to avoid timing-based password leaks. */
 function timingSafeEqualStr(a, b) {
@@ -494,20 +499,21 @@ export async function approvePendingBidder(pool, idRaw, actor) {
   if (id == null) throw clientError(400, 'Invalid bidder id');
 
   const [existing] = await pool.query(
-    `SELECT id, role, approval_status FROM members WHERE id = ? LIMIT 1`,
+    `SELECT id, name, role, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
   if (!Array.isArray(existing) || existing.length === 0) {
     throw clientError(404, 'Bidder not found');
   }
-  if (existing[0].approval_status !== 'pending') {
+  const pending = existing[0];
+  if (pending.approval_status !== 'pending') {
     throw clientError(409, 'This registration is no longer pending');
   }
   // Only roles the actor could otherwise create count here. Public
   // registrations are always `Member`, so this never trips for non-priv
   // actors. Still belt-and-suspenders for forged ENUM values.
-  if (!canEditRow(actor.role, existing[0].role)) {
-    throw clientError(403, `You are not allowed to approve ${existing[0].role} bidders`);
+  if (!canEditRow(actor.role, pending.role)) {
+    throw clientError(403, `You are not allowed to approve ${pending.role} bidders`);
   }
 
   await pool.query(
@@ -518,7 +524,16 @@ export async function approvePendingBidder(pool, idRaw, actor) {
     `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
-  return redactPasswordForActor(rowToBidder(rows[0]), actor);
+  const bidder = redactPasswordForActor(rowToBidder(rows[0]), actor);
+  await appendBidderAuditLog(pool, {
+    action: 'approve',
+    actor,
+    targetMemberId: id,
+    targetName: String(pending.name ?? bidder.name),
+    targetRole: pending.role,
+    details: { approvalStatus: 'approved' },
+  });
+  return bidder;
 }
 
 /**
@@ -533,17 +548,18 @@ export async function rejectPendingBidder(pool, idRaw, actor) {
   if (id == null) throw clientError(400, 'Invalid bidder id');
 
   const [existing] = await pool.query(
-    `SELECT id, role, approval_status FROM members WHERE id = ? LIMIT 1`,
+    `SELECT id, name, role, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
   if (!Array.isArray(existing) || existing.length === 0) {
     throw clientError(404, 'Bidder not found');
   }
-  if (existing[0].approval_status !== 'pending') {
+  const pending = existing[0];
+  if (pending.approval_status !== 'pending') {
     throw clientError(409, 'This registration is no longer pending');
   }
-  if (!canEditRow(actor.role, existing[0].role)) {
-    throw clientError(403, `You are not allowed to reject ${existing[0].role} bidders`);
+  if (!canEditRow(actor.role, pending.role)) {
+    throw clientError(403, `You are not allowed to reject ${pending.role} bidders`);
   }
 
   await pool.query(
@@ -555,7 +571,16 @@ export async function rejectPendingBidder(pool, idRaw, actor) {
     `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
-  return redactPasswordForActor(rowToBidder(rows[0]), actor);
+  const bidder = redactPasswordForActor(rowToBidder(rows[0]), actor);
+  await appendBidderAuditLog(pool, {
+    action: 'reject',
+    actor,
+    targetMemberId: id,
+    targetName: String(pending.name ?? bidder.name),
+    targetRole: pending.role,
+    details: { approvalStatus: 'rejected' },
+  });
+  return bidder;
 }
 
 export async function createBidder(pool, body, actor) {
@@ -579,10 +604,19 @@ export async function createBidder(pool, body, actor) {
     const id = Number(ins.insertId);
     await conn.commit();
     const [rows] = await conn.query(
-      `SELECT id, name, role, password, active FROM members WHERE id = ? LIMIT 1`,
+      `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
       [id]
     );
-    return redactPasswordForActor(rowToBidder(rows[0]), actor);
+    const bidder = redactPasswordForActor(rowToBidder(rows[0]), actor);
+    await appendBidderAuditLog(conn, {
+      action: 'create',
+      actor,
+      targetMemberId: id,
+      targetName: bidder.name,
+      targetRole: bidder.role,
+      details: { role: bidder.role, approvalStatus: bidder.approvalStatus },
+    });
+    return bidder;
   } catch (e) {
     await conn.rollback().catch(() => {});
     throw e;
@@ -597,13 +631,14 @@ export async function updateBidder(pool, idRaw, body, actor) {
   if (id == null) throw clientError(400, 'Invalid bidder id');
 
   const [existing] = await pool.query(
-    `SELECT id, role FROM members WHERE id = ? LIMIT 1`,
+    `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
   if (!Array.isArray(existing) || existing.length === 0) {
     throw clientError(404, 'Bidder not found');
   }
-  const targetRole = existing[0].role;
+  const before = rowToBidder(existing[0]);
+  const targetRole = before.role;
   const isDeveloper = targetRole === 'Developer';
   if (!canEditRow(actor.role, targetRole)) {
     if (isDeveloper) {
@@ -655,20 +690,27 @@ export async function updateBidder(pool, idRaw, body, actor) {
     }
   }
   if (sets.length === 0) {
-    const [rows] = await pool.query(
-      `SELECT id, name, role, password, active FROM members WHERE id = ? LIMIT 1`,
-      [id]
-    );
-    return rowToBidder(rows[0]);
+    return redactPasswordForActor(before, actor);
   }
 
   args.push(id);
   await pool.query(`UPDATE members SET ${sets.join(', ')} WHERE id = ?`, args);
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active FROM members WHERE id = ? LIMIT 1`,
+    `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
   const updated = rowToBidder(rows[0]);
+  const editDetails = buildBidderEditDetails(before, updated, body ?? {});
+  if (editDetails) {
+    await appendBidderAuditLog(pool, {
+      action: 'edit',
+      actor,
+      targetMemberId: id,
+      targetName: updated.name,
+      targetRole: updated.role,
+      details: editDetails,
+    });
+  }
   // If we just demoted, deactivated, or stripped the target of access, kill
   // any active sessions they hold so the change takes effect immediately.
   if (!PRIVILEGED_ROLES.has(updated.role) || !updated.active) {
@@ -692,14 +734,16 @@ export async function deleteBidder(pool, idRaw, actor) {
   try {
     await conn.beginTransaction();
     const [found] = await conn.query(
-      `SELECT id, role FROM members WHERE id = ? LIMIT 1`,
+      `SELECT id, name, role FROM members WHERE id = ? LIMIT 1`,
       [id]
     );
     if (!Array.isArray(found) || found.length === 0) {
       await conn.rollback();
       throw clientError(404, 'Bidder not found');
     }
-    const targetRole = found[0].role;
+    const deletedName = String(found[0].name ?? '');
+    const deletedRole = found[0].role;
+    const targetRole = deletedRole;
     if (!canEditRow(actor.role, targetRole)) {
       await conn.rollback();
       if (targetRole === 'Developer') {
@@ -711,6 +755,13 @@ export async function deleteBidder(pool, idRaw, actor) {
       throw clientError(403, `You are not allowed to delete ${targetRole} bidders`);
     }
     await conn.query(`DELETE FROM members WHERE id = ?`, [id]);
+    await appendBidderAuditLog(conn, {
+      action: 'delete',
+      actor,
+      targetMemberId: id,
+      targetName: deletedName,
+      targetRole: deletedRole,
+    });
     await conn.commit();
     invalidateSessionsForMember(id);
   } catch (e) {
@@ -720,6 +771,11 @@ export async function deleteBidder(pool, idRaw, actor) {
     conn.release();
   }
   return { ok: true, id };
+}
+
+/** List persisted admin audit entries (newest first). Public read — no sign-in. */
+export async function listBidderAuditLog(pool) {
+  return loadBidderAuditLog(pool);
 }
 
 /* --------------------------------------------------------------------------

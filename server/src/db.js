@@ -437,6 +437,74 @@ export async function seedIfEmpty(pool) {
   }
 }
 
+/** Admin audit trail (bidders + auction dashboard). */
+export async function migrateBidderAuditLogTable(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bidder_audit_log (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      at_ms BIGINT NOT NULL,
+      logged_at DATETIME(3) NOT NULL,
+      action ENUM(
+        'approve', 'reject', 'create', 'edit', 'delete',
+        'shuffle_start', 'shuffle_reset', 'event_mode_change',
+        'winner_limits_set', 'clear_all_queues', 'queue_remove'
+      ) NOT NULL,
+      target_member_id BIGINT UNSIGNED NULL,
+      target_name VARCHAR(255) NOT NULL,
+      target_role VARCHAR(64) NULL,
+      actor_id BIGINT UNSIGNED NOT NULL,
+      actor_name VARCHAR(255) NOT NULL,
+      actor_role VARCHAR(64) NOT NULL,
+      details_json TEXT NULL,
+      INDEX idx_bidder_audit_at (at_ms),
+      INDEX idx_bidder_audit_action (action),
+      INDEX idx_bidder_audit_target (target_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await migrateBidderAuditLogAuctionActions(pool);
+  await migrateBidderAuditLogQueueRemoveAction(pool);
+}
+
+/** Extend audit ENUM on DBs created before auction actions were added. */
+export async function migrateBidderAuditLogAuctionActions(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'bidder_audit_log'
+       AND COLUMN_NAME = 'action'
+     LIMIT 1`
+  );
+  const colType = String(rows[0]?.COLUMN_TYPE ?? '').toLowerCase();
+  if (colType.includes('shuffle_start')) return;
+  await pool.query(`
+    ALTER TABLE bidder_audit_log MODIFY COLUMN action ENUM(
+      'approve', 'reject', 'create', 'edit', 'delete',
+      'shuffle_start', 'shuffle_reset', 'event_mode_change',
+      'winner_limits_set', 'clear_all_queues', 'queue_remove'
+    ) NOT NULL
+  `);
+}
+
+/** Add queue_remove to audit action ENUM. */
+export async function migrateBidderAuditLogQueueRemoveAction(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'bidder_audit_log'
+       AND COLUMN_NAME = 'action'
+     LIMIT 1`
+  );
+  const colType = String(rows[0]?.COLUMN_TYPE ?? '').toLowerCase();
+  if (colType.includes('queue_remove')) return;
+  await pool.query(`
+    ALTER TABLE bidder_audit_log MODIFY COLUMN action ENUM(
+      'approve', 'reject', 'create', 'edit', 'delete',
+      'shuffle_start', 'shuffle_reset', 'event_mode_change',
+      'winner_limits_set', 'clear_all_queues', 'queue_remove'
+    ) NOT NULL
+  `);
+}
+
 /** Sunday Emperium Overrun reward history (admin-controlled payouts). */
 export async function migrateOverrunRewardsRunsTable(pool) {
   await pool.query(`

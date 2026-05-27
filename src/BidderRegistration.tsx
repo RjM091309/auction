@@ -40,6 +40,7 @@ import {
   storeActor,
   updateBidderRequest,
 } from './lib/apiBidders';
+import { notifyBidderAuditChanged } from './lib/apiBidderAudit';
 import BidderAuthGate from './BidderAuthGate';
 
 /**
@@ -524,6 +525,7 @@ function BidderRegistrationAuthed({
         });
         // Tell the parent nav (AuctionDashboard) to refresh its pending badge.
         window.dispatchEvent(new Event('pendingBiddersChanged'));
+        notifyBidderAuditChanged();
         void swalSuccess(`"${approved.name}" has been approved.`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -554,6 +556,7 @@ function BidderRegistrationAuthed({
           return [rejected, ...without];
         });
         window.dispatchEvent(new Event('pendingBiddersChanged'));
+        notifyBidderAuditChanged();
         void swalSuccess(`"${rejected.name}" has been rejected.`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -659,6 +662,7 @@ function BidderRegistrationAuthed({
         setBidders((prev) => [created, ...prev]);
         setModalOpen(false);
         setDraft(EMPTY_DRAFT);
+        notifyBidderAuditChanged();
         void swalSuccess(`"${created.name}" has been added.`);
       } else {
         // Password and active are managed elsewhere (row toggle / create flow),
@@ -673,6 +677,7 @@ function BidderRegistrationAuthed({
         );
         setModalOpen(false);
         setDraft(EMPTY_DRAFT);
+        notifyBidderAuditChanged();
         void swalSuccess(`"${updated.name}" has been updated.`);
       }
     } catch (e) {
@@ -695,6 +700,7 @@ function BidderRegistrationAuthed({
       try {
         await deleteBidderRequest(b.id);
         setBidders((prev) => prev.filter((row) => row.id !== b.id));
+        notifyBidderAuditChanged();
         void swalSuccess(`"${b.name}" has been deleted.`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -712,6 +718,7 @@ function BidderRegistrationAuthed({
         setBidders((prev) =>
           prev.map((row) => (row.id === updated.id ? updated : row))
         );
+        notifyBidderAuditChanged();
         void swalSuccess(
           `"${updated.name}" is now ${updated.active ? 'Active' : 'Inactive'}.`
         );
