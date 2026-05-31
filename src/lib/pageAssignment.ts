@@ -1,4 +1,4 @@
-import type { GuildRank, ItemType } from '../types';
+import type { GuildRank, ItemType, RewardItemCounts } from '../types';
 
 /**
  * Current game reward presets by rank:
@@ -32,9 +32,21 @@ export function totalItemsForTypeByRank(type: ItemType, rank: GuildRank = 'Bronz
   return TOTAL_ITEMS_BY_RANK_AND_TYPE[rank]?.[type] ?? 1;
 }
 
-/** Feathers: items per winning bidder. Emperium overrun = 13; Bronze guild (Guild League event) = 8. */
-export function featherItemsPerWinnerUnit(rank: GuildRank): number {
+/** Feathers: default items per winning bidder by rank preset. */
+export function defaultFeathersItemsPerWinner(rank: GuildRank): number {
   return rank === 'Emperium overrun' ? 13 : 8;
+}
+
+/** Feathers: items per winning bidder (configurable via Winner set limit). */
+export function featherItemsPerWinnerUnit(
+  rank: GuildRank,
+  counts?: Pick<RewardItemCounts, 'feathersItemsPerWinner'> | null
+): number {
+  const override = counts?.feathersItemsPerWinner;
+  if (override != null && Number.isFinite(override) && override > 0) {
+    return Math.max(1, Math.floor(override));
+  }
+  return defaultFeathersItemsPerWinner(rank);
 }
 
 /** Fragment cards: items per winning bidder (Emperium = 1 card each). */
@@ -42,20 +54,28 @@ export function fragmentItemsPerWinner(rank: GuildRank): number {
   return rank === 'Emperium overrun' ? 1 : 1;
 }
 
-/** Game rule: feather types use 4 (Bronze) or 8 (Emperium overrun) items per winner slot. */
-export function totalPagesForTypeByRank(type: ItemType, rank: GuildRank = 'Bronze'): number {
+/** Game rule: Feathers winner slots = floor(totalItems / itemsPerWinner). */
+export function totalPagesForTypeByRank(
+  type: ItemType,
+  rank: GuildRank = 'Bronze',
+  counts?: Pick<RewardItemCounts, 'feathersItemsPerWinner'> | null
+): number {
   const items = totalItemsForTypeByRank(type, rank);
   if (type === 'Feathers') {
-    const u = featherItemsPerWinnerUnit(rank);
+    const u = featherItemsPerWinnerUnit(rank, counts);
     return Math.max(0, Math.floor(items / u));
   }
   return Math.max(1, Math.ceil(items / 4));
 }
 
-export function freeItemsForTypeByRank(type: ItemType, rank: GuildRank = 'Bronze'): number {
+export function freeItemsForTypeByRank(
+  type: ItemType,
+  rank: GuildRank = 'Bronze',
+  counts?: Pick<RewardItemCounts, 'feathersItemsPerWinner'> | null
+): number {
   if (type !== 'Feathers') return 0;
   const items = totalItemsForTypeByRank(type, rank);
-  const u = featherItemsPerWinnerUnit(rank);
+  const u = featherItemsPerWinnerUnit(rank, counts);
   return Math.max(0, items % u);
 }
 
@@ -75,11 +95,12 @@ export function freePageInfoForTypeByRank(
 export function winnerSlotsFromTotalItems(
   type: ItemType,
   totalItems: number,
-  rank: GuildRank = 'Bronze'
+  rank: GuildRank = 'Bronze',
+  counts?: Pick<RewardItemCounts, 'feathersItemsPerWinner'> | null
 ): number {
   const n = Math.max(0, Math.floor(totalItems));
   if (type === 'Feathers') {
-    const u = featherItemsPerWinnerUnit(rank);
+    const u = featherItemsPerWinnerUnit(rank, counts);
     return Math.max(0, Math.floor(n / u));
   }
   if (type === 'Fragment Card') return n;
@@ -96,11 +117,12 @@ export function fragmentGeneralPageSpan(totalItems: number): number {
 export function freeItemsFromTotalItems(
   type: ItemType,
   totalItems: number,
-  rank: GuildRank = 'Bronze'
+  rank: GuildRank = 'Bronze',
+  counts?: Pick<RewardItemCounts, 'feathersItemsPerWinner'> | null
 ): number {
   if (type !== 'Feathers') return 0;
   const n = Math.max(0, Math.floor(totalItems));
-  const u = featherItemsPerWinnerUnit(rank);
+  const u = featherItemsPerWinnerUnit(rank, counts);
   return n % u;
 }
 
@@ -111,12 +133,13 @@ export function freeItemsFromTotalItems(
 export function featherPageCountBeforePartialFree(
   type: ItemType,
   totalItems: number,
-  rank: GuildRank
+  rank: GuildRank,
+  counts?: Pick<RewardItemCounts, 'feathersItemsPerWinner'> | null
 ): number {
   if (type !== 'Feathers') return 0;
-  const slots = winnerSlotsFromTotalItems(type, totalItems, rank);
+  const slots = winnerSlotsFromTotalItems(type, totalItems, rank, counts);
   if (rank === 'Emperium overrun') {
-    return slots * Math.ceil(featherItemsPerWinnerUnit(rank) / 4);
+    return slots * Math.ceil(featherItemsPerWinnerUnit(rank, counts) / 4);
   }
   return slots;
 }
@@ -184,16 +207,17 @@ export function computeWinnerAssignmentLabelsFromItems(
   totalItems: number,
   bidderCount: number,
   pageStart = 1,
-  rank: GuildRank = 'Bronze'
+  rank: GuildRank = 'Bronze',
+  counts?: Pick<RewardItemCounts, 'feathersItemsPerWinner'> | null
 ): string[] {
   const bidders = Math.max(0, Math.floor(bidderCount));
   if (bidders <= 0) return [];
   if (type === 'Feathers') {
-    const totalSlots = winnerSlotsFromTotalItems(type, totalItems, rank);
+    const totalSlots = winnerSlotsFromTotalItems(type, totalItems, rank, counts);
     const winningBidders = Math.min(totalSlots, bidders);
     if (winningBidders <= 0) return [];
     if (rank === 'Emperium overrun') {
-      const itemsPerWinner = featherItemsPerWinnerUnit(rank);
+      const itemsPerWinner = featherItemsPerWinnerUnit(rank, counts);
       const pagesEach = Math.max(1, Math.ceil(itemsPerWinner / 4));
       return Array.from({ length: winningBidders }, (_, i) => {
         const pLo = pageStart + pagesEach * i;

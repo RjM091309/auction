@@ -41,9 +41,9 @@ function randomUintBelow(n: number): number {
 }
 
 /**
- * How many top queue rows get the winner shortlist (green check) for this type.
- * Full queue is never trimmed on shuffle — only this many can be marked winner from the top.
- * Values: `VITE_AUCTION_WINNER_POOL_*` in `.env` (see defaults in that file).
+ * How many top queue rows get the winner shortlist for this type.
+ * Feathers / Fragment Card: derived from Winner Set Limit (item counts ÷ items per winner).
+ * Other types: per-item `winnerPoolCap` or built-in default.
  */
 export function maxQueueSlotsAfterShuffle(
   type: ItemType,

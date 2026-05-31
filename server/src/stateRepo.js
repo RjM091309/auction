@@ -11,10 +11,19 @@ import {
   shuffleLockClosesPublicSignup,
   stripEmperiumCardQueuesAfterFragmentWeeklyWin,
 } from './queueEligibility.js';
-import { maxRecordedWinnersForItem } from './winnerPoolCaps.js';
 import {
+  findEmperiumWinCooldown,
+  isEmperiumCooldownItem,
+  isEmperiumWinCooldownEnabled,
+  pruneExpiredEmperiumWins,
+} from './emperiumWinCooldown.js';
+import { maxWinnersForItemInState } from './winnerPoolCaps.js';
+import {
+  backfillWeeklyWinsFromRecordedWinners,
+  loadWeeklyTypeWins,
   rolloverWeeklyWinsIfNewWeek,
   saveWeeklyTypeWins,
+  dedupeWeeklyWinsList,
 } from './weeklyTypeWins.js';
 import { getAuctionWeekMondayKey } from './auctionWeek.js';
 import { loadWinnerMarkLog, appendWinnerMarkLog } from './winnerMarkLog.js';
@@ -28,6 +37,25 @@ const EVENT_MODE_META_KEY = 'event_mode';
 const REWARD_RANK_META_KEY = 'reward_rank';
 const REWARD_ITEM_COUNTS_META_KEY = 'reward_item_counts_json';
 const FREE_DRAW_CHOSEN_META_KEY = 'free_draw_chosen_by_item';
+const SHUFFLE_WINNER_SLOTS_META_KEY = 'shuffle_winner_slots_by_item';
+
+function parseShuffleWinnerSlotsByItemJson(raw) {
+  if (raw == null || raw === '') return {};
+  try {
+    const s = typeof raw === 'string' ? raw : String(raw);
+    const j = JSON.parse(s);
+    if (!j || typeof j !== 'object' || Array.isArray(j)) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(j)) {
+      if (typeof k !== 'string' || !k) continue;
+      const n = Number(v);
+      if (Number.isFinite(n) && n >= 0) out[k] = Math.floor(n);
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
 
 function defaultEventMode() {
   return 'Emperium Overrun';
@@ -53,8 +81,8 @@ function parseRewardRank(raw) {
   if (raw == null || raw === '') return defaultRewardRank();
   return sanitizeRewardRank(typeof raw === 'string' ? raw : String(raw));
 }
-function parseRewardItemCounts(raw) {
-  const fallback = { fragment: 2, feathers: 80 };
+function parseRewardItemCounts(raw, rankHint) {
+  const fallback = { fragment: 2, feathers: 80, feathersItemsPerWinner: 8 };
   if (raw == null || raw === '') return fallback;
   try {
     const s = typeof raw === 'string' ? raw : String(raw);
@@ -63,6 +91,20 @@ function parseRewardItemCounts(raw) {
     const toInt = (v, d) =>
       Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d;
     const fragment = toInt(j.fragment, fallback.fragment);
+    const feathersTotal =
+      j.feathers != null && j.feathers !== ''
+        ? toInt(j.feathers, fallback.feathers)
+        : toInt(j.lnd, 30) + toInt(j.tns, 50);
+    const inferredRank =
+      rankHint === 'Emperium overrun' || rankHint === 'Bronze'
+        ? rankHint
+        : feathersTotal >= 200
+          ? 'Emperium overrun'
+          : 'Bronze';
+    const feathersItemsPerWinner = toInt(
+      j.feathersItemsPerWinner,
+      inferredRank === 'Emperium overrun' ? 13 : 8
+    );
     let fragmentByItemId;
     if (j.fragmentByItemId && typeof j.fragmentByItemId === 'object' && !Array.isArray(j.fragmentByItemId)) {
       fragmentByItemId = {};
@@ -72,7 +114,9 @@ function parseRewardItemCounts(raw) {
       }
       if (Object.keys(fragmentByItemId).length === 0) fragmentByItemId = undefined;
     }
-    const base = fragmentByItemId ? { fragment, fragmentByItemId } : { fragment };
+    const base = fragmentByItemId
+      ? { fragment, fragmentByItemId, feathersItemsPerWinner }
+      : { fragment, feathersItemsPerWinner };
     if (j.feathers != null && j.feathers !== '') {
       return { ...base, feathers: toInt(j.feathers, fallback.feathers) };
     }
@@ -201,7 +245,7 @@ export async function getFullState(pool) {
   );
 
   const [itemRows] = await pool.query(
-    `SELECT id, name, type, winner_pool_cap AS winnerPoolCap, winner_name AS winnerName, winner_names_json AS winnerNamesJson, status, created_at AS createdAt
+    `SELECT id, name, type, winner_pool_cap AS winnerPoolCap, winner_name AS winnerName, winner_names_json AS winnerNamesJson, revoked_winner_names_json AS revokedWinnerNamesJson, status, created_at AS createdAt
      FROM auction_items
      ORDER BY created_at ASC`
   );
@@ -223,6 +267,7 @@ export async function getFullState(pool) {
 
   const items = itemRows.map((r) => {
     const recorded = parseWinnerNamesJson(r.winnerNamesJson);
+    const revoked = parseWinnerNamesJson(r.revokedWinnerNamesJson);
     return {
       id: r.id,
       name: r.name,
@@ -233,6 +278,7 @@ export async function getFullState(pool) {
           : null,
       winnerName: r.winnerName,
       ...(recorded.length > 0 ? { recordedWinnerNames: recorded } : {}),
+      ...(revoked.length > 0 ? { revokedWinnerNames: revoked } : {}),
       status: r.status,
       createdAt: Number(r.createdAt),
       interestedMemberIds: queueByItem.get(r.id) ?? [],
@@ -261,14 +307,25 @@ export async function getFullState(pool) {
   );
   if (shuffleLockRows[0]?.value === '1') shuffleLocked = true;
 
-  const weeklyTypeWins = [];
-  const winnerMarkLog = await loadWinnerMarkLog(pool);
-  const bidderStateLog = await loadBidderStateLog(pool);
   const [eventRows] = await pool.query(
     'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
     [EVENT_MODE_META_KEY]
   );
   const eventMode = parseEventMode(eventRows[0]?.value);
+
+  let weeklyTypeWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
+  if (isEmperiumWinCooldownEnabled(eventMode)) {
+    weeklyTypeWins = await backfillWeeklyWinsFromRecordedWinners(
+      pool,
+      items,
+      weeklyTypeWins
+    );
+    weeklyTypeWins = pruneExpiredEmperiumWins(weeklyTypeWins);
+  } else {
+    weeklyTypeWins = [];
+  }
+  const winnerMarkLog = await loadWinnerMarkLog(pool);
+  const bidderStateLog = await loadBidderStateLog(pool);
   const [rankRows] = await pool.query(
     'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
     [REWARD_RANK_META_KEY]
@@ -278,13 +335,39 @@ export async function getFullState(pool) {
     'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
     [REWARD_ITEM_COUNTS_META_KEY]
   );
-  const rewardItemCounts = parseRewardItemCounts(countRows[0]?.value);
+  const rewardItemCounts = parseRewardItemCounts(countRows[0]?.value, rewardRank);
 
   const [freeDrawMeta] = await pool.query(
     'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
     [FREE_DRAW_CHOSEN_META_KEY]
   );
   const freeDrawChosenByItemId = parseFreeDrawChosenByItemJson(freeDrawMeta[0]?.value);
+
+  const [shuffleSlotsMeta] = await pool.query(
+    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
+    [SHUFFLE_WINNER_SLOTS_META_KEY]
+  );
+  let shuffleWinnerSlotsByItemId = parseShuffleWinnerSlotsByItemJson(
+    shuffleSlotsMeta[0]?.value
+  );
+  if (
+    shuffleLocked &&
+    Object.keys(shuffleWinnerSlotsByItemId).length === 0 &&
+    Array.isArray(bidderStateLog) &&
+    bidderStateLog.length > 0
+  ) {
+    for (const row of bidderStateLog) {
+      if (!row || row.state !== 1 || !row.itemId) continue;
+      const cap =
+        row.poolCap != null && Number.isFinite(Number(row.poolCap))
+          ? Math.max(0, Math.floor(Number(row.poolCap)))
+          : 0;
+      if (cap <= 0) continue;
+      if (shuffleWinnerSlotsByItemId[row.itemId] == null) {
+        shuffleWinnerSlotsByItemId[row.itemId] = cap;
+      }
+    }
+  }
 
   return stripEmperiumCardQueuesAfterFragmentWeeklyWin({
     items,
@@ -303,6 +386,9 @@ export async function getFullState(pool) {
     rewardRank,
     rewardItemCounts,
     freeDrawChosenByItemId,
+    ...(Object.keys(shuffleWinnerSlotsByItemId).length > 0
+      ? { shuffleWinnerSlotsByItemId }
+      : {}),
   });
 }
 
@@ -430,7 +516,7 @@ export async function publicAddBidToQueue(pool, body) {
     throw clientError(400, 'This auction is not active');
   }
 
-  if (isAuctionItemHiddenForPublic(card)) {
+  if (isAuctionItemHiddenForPublic(card, eventMode)) {
     throw clientError(404, 'Item not found', { code: 'item_hidden' });
   }
 
@@ -443,6 +529,23 @@ export async function publicAddBidToQueue(pool, body) {
   }
 
   const eventMode = state.eventMode ?? defaultEventMode();
+
+  const cooldown = findEmperiumWinCooldown(
+    eventMode,
+    card,
+    state.weeklyTypeWins,
+    raw
+  );
+  if (cooldown) {
+    throw clientError(400, 'Winner cooldown active (skip next Emperium Sunday)', {
+      code: 'emperium_win_cooldown',
+      extra: {
+        itemName: card.name,
+        expiresAt: cooldown.expiresAt,
+      },
+    });
+  }
+
   const otherBlock = findOtherActiveQueueBlockingWithMatch(
     eventMode,
     state.items,
@@ -615,22 +718,86 @@ export async function replaceFullState(pool, body) {
     shuffleMetaPrev[0].value === '1';
 
   const [oldItemRows] = await pool.query(
-    `SELECT id, name, type, status, winner_name AS winnerName, winner_names_json AS winnerNamesJson FROM auction_items`
+    `SELECT id, name, type, status, winner_name AS winnerName, winner_names_json AS winnerNamesJson, revoked_winner_names_json AS revokedWinnerNamesJson FROM auction_items`
   );
-  /** No weekly type lock — winners may bid again on the next auction (Fragment Card + Feathers). */
-  const nextWeeklyWins = [];
+
+  const [oldQueueRows] = await pool.query(
+    'SELECT item_id AS itemId, member_id AS memberId FROM item_queue'
+  );
+  const oldQueueByItem = new Map();
+  for (const q of oldQueueRows) {
+    const itemId = q.itemId;
+    if (!oldQueueByItem.has(itemId)) oldQueueByItem.set(itemId, new Set());
+    oldQueueByItem.get(itemId).add(Number(q.memberId));
+  }
+
+  const [eventMetaRows] = await pool.query(
+    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
+    [EVENT_MODE_META_KEY]
+  );
+  const saveEventMode = Object.prototype.hasOwnProperty.call(body, 'eventMode')
+    ? sanitizeEventName(body.eventMode)
+    : parseEventMode(eventMetaRows[0]?.value);
+
+  const [shuffleSlotsMetaRows] = await pool.query(
+    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
+    [SHUFFLE_WINNER_SLOTS_META_KEY]
+  );
+  const shuffleWinnerSlotsByItemId = parseShuffleWinnerSlotsByItemJson(
+    shuffleSlotsMetaRows[0]?.value
+  );
+
+  const membersByIdForValidation = new Map();
+  for (const m of body.members) {
+    const mid = coerceMemberId(m?.id);
+    if (mid != null && mid > 0) membersByIdForValidation.set(mid, m);
+  }
 
   for (const it of body.items) {
-    const rec = it.recordedWinnerNames;
-    if (Array.isArray(rec) && rec.length > 0) {
-      const cap = maxRecordedWinnersForItem(it.type, it.winnerPoolCap);
-      if (rec.length > cap) {
-        const err = new Error(
-          `Too many marked winners on "${it.name}" (${it.type}): max ${cap} (winner limit for this item)`
-        );
-        err.statusCode = 400;
-        throw err;
+    const cap = maxWinnersForItemInState(it, body);
+    const drawSlots =
+      shuffleWinnerSlotsByItemId[it.id] != null
+        ? shuffleWinnerSlotsByItemId[it.id]
+        : prevShuffleLocked && body.shuffleLocked !== false
+          ? cap
+          : 0;
+    const ids = Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : [];
+    const revokedLower = new Set(
+      (Array.isArray(it.revokedWinnerNames) ? it.revokedWinnerNames : [])
+        .filter((x) => typeof x === 'string')
+        .map((x) => x.trim().toLowerCase())
+        .filter(Boolean)
+    );
+    let activeShuffle = 0;
+    for (let i = 0; i < drawSlots && i < ids.length; i += 1) {
+      const mid = coerceMemberId(ids[i]);
+      const member = mid != null ? membersByIdForValidation.get(mid) : null;
+      const nl = member?.name ? String(member.name).trim().toLowerCase() : '';
+      if (nl && !revokedLower.has(nl)) activeShuffle += 1;
+    }
+    const rec = Array.isArray(it.recordedWinnerNames) ? it.recordedWinnerNames : [];
+    let extraCount = 0;
+    for (const name of rec) {
+      if (typeof name !== 'string') continue;
+      const nl = name.trim().toLowerCase();
+      if (!nl) continue;
+      let qIdx = -1;
+      for (let i = 0; i < ids.length; i++) {
+        const mid = coerceMemberId(ids[i]);
+        const member = mid != null ? membersByIdForValidation.get(mid) : null;
+        if (member?.name && String(member.name).trim().toLowerCase() === nl) {
+          qIdx = i;
+          break;
+        }
       }
+      if (qIdx < 0 || qIdx >= drawSlots) extraCount += 1;
+    }
+    if (activeShuffle + extraCount > cap) {
+      const err = new Error(
+        `Too many winners on "${it.name}" (${it.type}): max ${cap} total (${activeShuffle} shuffle + ${extraCount} added)`
+      );
+      err.statusCode = 400;
+      throw err;
     }
   }
 
@@ -661,6 +828,149 @@ export async function replaceFullState(pool, body) {
         itemName: typeof it.name === 'string' ? it.name : '',
         itemType: typeof it.type === 'string' ? it.type : '',
       });
+    }
+  }
+
+  /** Emperium Overrun only: 1-week (skip next Sunday) Puppet CD. Feathers = no CD. Guild League = no CD entries. */
+  let nextWeeklyWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
+  if (isEmperiumWinCooldownEnabled(saveEventMode)) {
+    nextWeeklyWins = await backfillWeeklyWinsFromRecordedWinners(
+      pool,
+      body.items,
+      nextWeeklyWins
+    );
+    for (const entry of newWinnerMarkEntries) {
+      const card = body.items.find((i) => i.id === entry.itemId);
+      if (!card || !isEmperiumCooldownItem(card)) continue;
+      const ign = String(entry.ign ?? '').trim().toLowerCase();
+      if (!ign) continue;
+      const k = `${ign}\0${entry.itemType}\0${entry.itemId ?? ''}`;
+      const exists = nextWeeklyWins.some(
+        (w) =>
+          `${w.ign}\0${w.t}\0${w.itemId ?? ''}` === k &&
+          typeof w.at === 'number' &&
+          w.at > 0
+      );
+      if (exists) continue;
+      nextWeeklyWins.push({
+        ign,
+        t: entry.itemType,
+        itemId: entry.itemId,
+        at: entry.at ?? markNow,
+      });
+    }
+
+    for (const it of body.items) {
+      const row = prevByItemId.get(it.id) ?? prevByItemId.get(String(it.id));
+      const prevNames = parseWinnerNamesJson(row?.winnerNamesJson);
+      const nextArr = Array.isArray(it.recordedWinnerNames)
+        ? it.recordedWinnerNames
+        : [];
+      const nextLower = new Set(
+        nextArr
+          .filter((x) => typeof x === 'string')
+          .map((x) => x.trim().toLowerCase())
+          .filter(Boolean)
+      );
+      for (const prevName of prevNames) {
+        const nl = String(prevName).trim().toLowerCase();
+        if (!nl || nextLower.has(nl)) continue;
+        if (!isEmperiumCooldownItem(it)) continue;
+        nextWeeklyWins = nextWeeklyWins.filter(
+          (w) =>
+            !(
+              w.ign === nl &&
+              w.t === it.type &&
+              (w.itemId == null || w.itemId === it.id)
+            )
+        );
+      }
+    }
+
+    for (const it of body.items) {
+      const row = prevByItemId.get(it.id) ?? prevByItemId.get(String(it.id));
+      const prevRevoked = parseWinnerNamesJson(row?.revokedWinnerNamesJson);
+      const prevRevokedLower = new Set(
+        prevRevoked.map((p) => String(p).trim().toLowerCase()).filter(Boolean)
+      );
+      const nextRevoked = Array.isArray(it.revokedWinnerNames)
+        ? it.revokedWinnerNames
+        : [];
+      for (const name of nextRevoked) {
+        if (typeof name !== 'string') continue;
+        const nl = name.trim().toLowerCase();
+        if (!nl || prevRevokedLower.has(nl)) continue;
+        if (!isEmperiumCooldownItem(it)) continue;
+        nextWeeklyWins = nextWeeklyWins.filter(
+          (w) =>
+            !(
+              w.ign === nl &&
+              w.t === it.type &&
+              (w.itemId == null || w.itemId === it.id)
+            )
+        );
+      }
+      const nextRevokedLower = new Set(
+        nextRevoked
+          .filter((x) => typeof x === 'string')
+          .map((x) => x.trim().toLowerCase())
+          .filter(Boolean)
+      );
+      for (const prevName of prevRevoked) {
+        const nl = String(prevName).trim().toLowerCase();
+        if (!nl || nextRevokedLower.has(nl)) continue;
+        if (!isEmperiumCooldownItem(it)) continue;
+        const k = `${nl}\0${it.type}\0${it.id ?? ''}`;
+        const exists = nextWeeklyWins.some(
+          (w) =>
+            `${w.ign}\0${w.t}\0${w.itemId ?? ''}` === k &&
+            typeof w.at === 'number' &&
+            w.at > 0
+        );
+        if (exists) continue;
+        nextWeeklyWins.push({
+          ign: nl,
+          t: it.type,
+          itemId: it.id,
+          at: markNow,
+        });
+      }
+    }
+  }
+  nextWeeklyWins = pruneExpiredEmperiumWins(dedupeWeeklyWinsList(nextWeeklyWins));
+
+  const membersById = new Map();
+  for (const m of body.members) {
+    const mid = coerceMemberId(m?.id);
+    if (mid != null && mid > 0 && typeof m?.name === 'string') {
+      membersById.set(mid, m);
+    }
+  }
+  for (const it of body.items) {
+    if (it.status !== 'active') continue;
+    const oldSet = oldQueueByItem.get(it.id) ?? new Set();
+    const newIds = Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : [];
+    for (const rawMid of newIds) {
+      const mid = coerceMemberId(rawMid);
+      if (mid == null || mid <= 0 || oldSet.has(mid)) continue;
+      const member = membersById.get(mid);
+      const ign = member?.name;
+      if (!ign) continue;
+      const cooldown = findEmperiumWinCooldown(
+        saveEventMode,
+        it,
+        nextWeeklyWins,
+        ign
+      );
+      if (cooldown) {
+        throw clientError(400, 'Winner cooldown active (skip next Emperium Sunday)', {
+          code: 'emperium_win_cooldown',
+          extra: {
+            itemName: typeof it.name === 'string' ? it.name : '',
+            expiresAt: cooldown.expiresAt,
+          },
+        });
+      }
     }
   }
 
@@ -751,8 +1061,8 @@ export async function replaceFullState(pool, body) {
 
     for (const it of body.items) {
       await conn.query(
-        `INSERT INTO auction_items (id, name, type, winner_pool_cap, winner_name, winner_names_json, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO auction_items (id, name, type, winner_pool_cap, winner_name, winner_names_json, revoked_winner_names_json, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           it.id,
           it.name,
@@ -762,6 +1072,7 @@ export async function replaceFullState(pool, body) {
             : null,
           it.winnerName ?? null,
           serializeWinnerNamesJson(it.recordedWinnerNames),
+          serializeWinnerNamesJson(it.revokedWinnerNames),
           it.status,
           Number(it.createdAt) || Date.now(),
         ]
@@ -817,11 +1128,62 @@ export async function replaceFullState(pool, body) {
       );
     }
     if (Object.prototype.hasOwnProperty.call(body, 'rewardItemCounts')) {
-      const counts = parseRewardItemCounts(JSON.stringify(body.rewardItemCounts));
+      const counts = parseRewardItemCounts(
+        JSON.stringify(body.rewardItemCounts),
+        body.rewardRank
+      );
       await conn.query(
         'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
         [REWARD_ITEM_COUNTS_META_KEY, JSON.stringify(counts)]
       );
+    }
+
+    const shuffleLockNow = !prevShuffleLocked && body.shuffleLocked === true;
+    const shuffleEventMode = Object.prototype.hasOwnProperty.call(body, 'eventMode')
+      ? sanitizeEventName(body.eventMode)
+      : saveEventMode;
+
+    /** Puppet shortlist at shuffle lock → weekly_type_wins (1-week CD). Feathers excluded. */
+    if (shuffleLockNow && isEmperiumWinCooldownEnabled(saveEventMode)) {
+      const batchAt = Date.now();
+      for (const it of body.items) {
+        if (it.status !== 'active') continue;
+        if (isAuctionItemHiddenForPublic(it, shuffleEventMode)) continue;
+        if (!isEmperiumCooldownItem(it)) continue;
+        const poolCap = maxWinnersForItemInState(it, body);
+        const ids = Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : [];
+        let idx = 0;
+        for (const rawMid of ids) {
+          const resolved = resolveQueueMemberId(rawMid, idRemap, existingMemberIds);
+          if (resolved == null || resolved <= 0) {
+            idx += 1;
+            continue;
+          }
+          if (idx < poolCap) {
+            const ignRaw = ignForRemappedMember(body, idRemap, resolved);
+            const ign = ignRaw ? String(ignRaw).trim().toLowerCase() : '';
+            if (ign) {
+              const k = `${ign}\0${it.type}\0${it.id ?? ''}`;
+              const exists = nextWeeklyWins.some(
+                (w) =>
+                  `${w.ign}\0${w.t}\0${w.itemId ?? ''}` === k &&
+                  typeof w.at === 'number' &&
+                  w.at > 0
+              );
+              if (!exists) {
+                nextWeeklyWins.push({
+                  ign,
+                  t: it.type,
+                  itemId: it.id,
+                  at: batchAt,
+                });
+              }
+            }
+          }
+          idx += 1;
+        }
+      }
+      nextWeeklyWins = pruneExpiredEmperiumWins(dedupeWeeklyWinsList(nextWeeklyWins));
     }
 
     await saveWeeklyTypeWins(conn, nextWeeklyWins);
@@ -829,12 +1191,12 @@ export async function replaceFullState(pool, body) {
     await appendWinnerMarkLog(conn, newWinnerMarkEntries);
 
     const bidderStateRows = [];
-    const shuffleLockNow = !prevShuffleLocked && body.shuffleLocked === true;
     if (shuffleLockNow) {
       const batchAt = Date.now();
       for (const it of body.items) {
         if (it.status !== 'active') continue;
-        const poolCap = maxRecordedWinnersForItem(it.type, it.winnerPoolCap);
+        if (isAuctionItemHiddenForPublic(it, shuffleEventMode)) continue;
+        const poolCap = maxWinnersForItemInState(it, body);
         const ids = Array.isArray(it.interestedMemberIds)
           ? it.interestedMemberIds
           : [];
@@ -879,6 +1241,38 @@ export async function replaceFullState(pool, body) {
       await conn.query(
         'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
         [FREE_DRAW_CHOSEN_META_KEY, JSON.stringify(cleaned)]
+      );
+    }
+
+    if (shuffleLockNow) {
+      const slots = {};
+      for (const it of body.items) {
+        if (it.status !== 'active') continue;
+        if (isAuctionItemHiddenForPublic(it, shuffleEventMode)) continue;
+        slots[it.id] = maxWinnersForItemInState(it, body);
+      }
+      await conn.query(
+        'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+        [SHUFFLE_WINNER_SLOTS_META_KEY, JSON.stringify(slots)]
+      );
+    } else if (body.shuffleLocked === false) {
+      await conn.query(
+        'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+        [SHUFFLE_WINNER_SLOTS_META_KEY, '{}']
+      );
+    } else if (Object.prototype.hasOwnProperty.call(body, 'shuffleWinnerSlotsByItemId')) {
+      const raw = body.shuffleWinnerSlotsByItemId;
+      const cleaned = {};
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        for (const [k, v] of Object.entries(raw)) {
+          if (typeof k !== 'string' || !k) continue;
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 0) cleaned[k] = Math.floor(n);
+        }
+      }
+      await conn.query(
+        'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+        [SHUFFLE_WINNER_SLOTS_META_KEY, JSON.stringify(cleaned)]
       );
     }
 

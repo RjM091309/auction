@@ -17,6 +17,8 @@ export interface AuctionItem {
    * Hanggang `maxQueueSlotsAfterShuffle(type, winnerPoolCap)`.
    */
   recordedWinnerNames?: string[];
+  /** Shuffle-draw (or other) winners explicitly unmarked by Admin/Developer. */
+  revokedWinnerNames?: string[];
   status: 'active' | 'completed' | 'cancelled';
   interestedMemberIds: number[];
   createdAt: number;
@@ -28,10 +30,14 @@ export interface GuildMember {
   role: 'Officer' | 'Member' | 'Developer' | 'Admin';
 }
 
-/** Lingguhang type lock: normalized IGN + item type (mula sa server `GET /api/state`). */
+/** Emperium Overrun win cooldown: normalized IGN + item type (+ optional item id + win time). */
 export interface WeeklyTypeWin {
   ign: string;
   t: string;
+  /** Auction item id (e.g. m1 Puppet); used to scope Fragment Card cooldowns. */
+  itemId?: string;
+  /** Admin green-check timestamp (ms); Puppet-only 1-week Sunday-event cooldown. */
+  at?: number;
 }
 
 /** One admin green-check (recorded winner) on an active card; shown on Logs. */
@@ -70,6 +76,8 @@ export interface RewardItemCounts {
   /** Default item count for fragment cards without a per-id override. */
   fragment: number;
   feathers: number;
+  /** Feathers items allocated per winning bidder (Emperium default 13, Bronze 8). */
+  feathersItemsPerWinner?: number;
   /** Per fragment auction item (e.g. m1 Puppet, m4 Illusion). */
   fragmentByItemId?: Record<string, number>;
 }
@@ -107,4 +115,9 @@ export interface AuctionState {
    * view can highlight the same row as the admin dashboard.
    */
   freeDrawChosenByItemId?: Record<string, number>;
+  /**
+   * Winner slots frozen at shuffle lock per item (shuffle draw count).
+   * Used so raising winner set limit later does not re-label losers as shuffle winners.
+   */
+  shuffleWinnerSlotsByItemId?: Record<string, number>;
 }

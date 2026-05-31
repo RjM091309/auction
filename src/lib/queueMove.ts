@@ -4,6 +4,7 @@ import { ignMatchesForQueueIdentity } from './ignQueueIdentity';
 import {
   findOtherActiveQueueBlocking,
 } from './queueEligibility';
+import { findEmperiumWinCooldown } from './emperiumWinCooldown';
 
 export const QUEUE_DRAG_MIME = 'application/x-rooc-queue';
 
@@ -19,7 +20,14 @@ export type QueueMoveError =
   | 'not_found'
   | 'name_conflict'
   | 'no_change'
-  | 'weekly_type_win';
+  | 'weekly_type_win'
+  | 'emperium_win_cooldown';
+
+export type QueueMoveFailure = {
+  error: QueueMoveError;
+  toItemName?: string;
+  expiresAt?: number;
+};
 
 /** Remove one member from a single item queue (other queues unchanged). */
 export function applyRemoveMemberFromQueue(
@@ -52,7 +60,7 @@ export function applyRemoveMemberFromQueue(
 export function applyQueueMemberMove(
   s: AuctionState,
   p: QueueMovePayload
-): AuctionState | { error: QueueMoveError; toItemName?: string } {
+): AuctionState | QueueMoveFailure {
   const { fromItemId, toItemId, memberId, insertBeforeMemberId } = p;
 
   const member = s.members.find((m) => m.id === memberId);
@@ -86,6 +94,20 @@ export function applyQueueMemberMove(
   }
 
   if (fromItemId !== toItemId) {
+    const cooldown = findEmperiumWinCooldown(
+      s.eventMode,
+      toItem,
+      s.weeklyTypeWins,
+      member.name
+    );
+    if (cooldown) {
+      return {
+        error: 'emperium_win_cooldown',
+        toItemName: toItem.name,
+        expiresAt: cooldown.expiresAt,
+      };
+    }
+
     const itemsSim = s.items.map((it) => {
       if (it.id === fromItemId) {
         return {

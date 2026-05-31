@@ -82,21 +82,27 @@ export function PublicQueueCard({
       totalItems,
       item.interestedMemberIds.length,
       pageStart,
-      rewardRank
+      rewardRank,
+      counts
     );
   })();
   const freeItems =
     item.type === 'Feathers'
-      ? freeItemsFromTotalItems(item.type, counts.feathers, rewardRank)
+      ? freeItemsFromTotalItems(item.type, counts.feathers, rewardRank, counts)
       : 0;
   const freePageInfo = (() => {
     if (item.type !== 'Feathers') return null;
     const pageStart = featherPageStart ?? 1;
     const totalItems = counts.feathers;
-    const offset = featherPageCountBeforePartialFree(item.type, totalItems, rewardRank);
+    const offset = featherPageCountBeforePartialFree(
+      item.type,
+      totalItems,
+      rewardRank,
+      counts
+    );
     return freeItems > 0 ? { pageLabel: `P${pageStart + offset}`, freeItems } : null;
   })();
-  const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank);
+  const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank, counts);
 
   return (
     <motion.article

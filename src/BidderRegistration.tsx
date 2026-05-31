@@ -41,6 +41,13 @@ import {
   updateBidderRequest,
 } from './lib/apiBidders';
 import { notifyBidderAuditChanged } from './lib/apiBidderAudit';
+import { fetchAuctionState } from './lib/apiState';
+import {
+  puppetCardCdBadgeClass,
+  puppetCardCdDisplayForIgn,
+  type PuppetCardCdDisplay,
+} from './lib/puppetCardCdDisplay';
+import type { WeeklyEventType, WeeklyTypeWin } from './types';
 import BidderAuthGate from './BidderAuthGate';
 
 /**
@@ -95,6 +102,7 @@ function roleBadgeClass(role: BidderRole): string {
 
 interface BidderRowProps {
   bidder: Bidder;
+  cardCd: PuppetCardCdDisplay;
   canEdit: boolean;
   canDelete: boolean;
   onEdit: (b: Bidder) => void;
@@ -104,6 +112,7 @@ interface BidderRowProps {
 
 const BidderRow = React.memo(function BidderRow({
   bidder,
+  cardCd,
   canEdit,
   canDelete,
   onEdit,
@@ -157,6 +166,19 @@ const BidderRow = React.memo(function BidderRow({
             {bidder.active ? 'Active' : 'Inactive'}
           </span>
         )}
+      </td>
+      <td className="px-4 py-3">
+        <span
+          title={cardCd.title}
+          className={`inline-flex max-w-[9.5rem] items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${puppetCardCdBadgeClass(
+            cardCd.tone
+          )}`}
+        >
+          {cardCd.tone === 'cd' ? (
+            <Clock className="h-3 w-3 shrink-0 opacity-80" aria-hidden />
+          ) : null}
+          <span className="truncate normal-case">{cardCd.label}</span>
+        </span>
       </td>
       <td className="px-4 py-3">
         <div className="flex items-center justify-end gap-2">
@@ -423,6 +445,9 @@ function BidderRegistrationAuthed({
   onExpired,
 }: BidderRegistrationAuthedProps) {
   const [bidders, setBidders] = useState<Bidder[]>([]);
+  const [weeklyTypeWins, setWeeklyTypeWins] = useState<WeeklyTypeWin[]>([]);
+  const [auctionEventMode, setAuctionEventMode] =
+    useState<WeeklyEventType>('Emperium Overrun');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -463,8 +488,15 @@ function BidderRegistrationAuthed({
       setLoading(true);
       setError(null);
       try {
-        const list = await fetchBidders();
-        if (!cancelled) setBidders(list);
+        const [list, auction] = await Promise.all([
+          fetchBidders(),
+          fetchAuctionState(),
+        ]);
+        if (!cancelled) {
+          setBidders(list);
+          setWeeklyTypeWins(auction?.weeklyTypeWins ?? []);
+          setAuctionEventMode(auction?.eventMode ?? 'Emperium Overrun');
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (/sign in|401|expired/i.test(msg)) {
@@ -480,6 +512,17 @@ function BidderRegistrationAuthed({
       cancelled = true;
     };
   }, [onExpired]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void fetchAuctionState().then((auction) => {
+        if (!auction) return;
+        setWeeklyTypeWins(auction.weeklyTypeWins ?? []);
+        setAuctionEventMode(auction.eventMode ?? 'Emperium Overrun');
+      });
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Pending approvals: load on mount and refresh periodically so new public
   // registrations show up without the admin having to refresh the page.
@@ -571,6 +614,25 @@ function BidderRegistrationAuthed({
     },
     [onExpired]
   );
+
+  const cardCdByIgn = useMemo(() => {
+    const now = Date.now();
+    const map = new Map<string, PuppetCardCdDisplay>();
+    for (const b of bidders) {
+      const key = b.name.trim().toLowerCase();
+      if (!key || map.has(key)) continue;
+      map.set(
+        key,
+        puppetCardCdDisplayForIgn(
+          b.name,
+          weeklyTypeWins,
+          auctionEventMode,
+          now
+        )
+      );
+    }
+    return map;
+  }, [bidders, weeklyTypeWins, auctionEventMode]);
 
   const filtered = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
@@ -938,7 +1000,7 @@ function BidderRegistrationAuthed({
 
       <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
         <div className="overflow-x-auto custom-scrollbar">
-          <table className="w-full min-w-[640px] text-sm">
+          <table className="w-full min-w-[760px] text-sm">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-950/50 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">
                 <th className="px-4 py-3">ID</th>
@@ -946,6 +1008,7 @@ function BidderRegistrationAuthed({
                 <th className="px-4 py-3">Role</th>
                 <th className="px-4 py-3">Password</th>
                 <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Card CD</th>
                 <th className="px-4 py-3 text-right">Actions</th>
               </tr>
             </thead>
@@ -953,7 +1016,7 @@ function BidderRegistrationAuthed({
               {loading ? (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={7}
                     className="px-4 py-10 text-center text-sm text-slate-500"
                   >
                     Loading bidders…
@@ -962,7 +1025,7 @@ function BidderRegistrationAuthed({
               ) : filtered.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={7}
                     className="px-4 py-10 text-center text-sm text-slate-500"
                   >
                     {bidders.length === 0
@@ -980,6 +1043,14 @@ function BidderRegistrationAuthed({
                     <BidderRow
                       key={b.id}
                       bidder={b}
+                      cardCd={
+                        cardCdByIgn.get(b.name.trim().toLowerCase()) ??
+                        puppetCardCdDisplayForIgn(
+                          b.name,
+                          weeklyTypeWins,
+                          auctionEventMode
+                        )
+                      }
                       canEdit={canEditThis}
                       canDelete={canDeleteThis}
                       onEdit={openEdit}

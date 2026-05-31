@@ -14,6 +14,7 @@ import { dedupeRosterMembersByIgn } from './dedupeRosterMembersByIgn';
 import { normalizeQueuesForEventMode } from './dedupeIgnAcrossQueues';
 import { parseGuildRank } from './pageAssignment';
 import { stripEmperiumCardQueuesAfterFragmentWeeklyWin } from './queueEligibility';
+import { pruneExpiredEmperiumWins } from './emperiumWinCooldown';
 import {
   migrateFeatherItems,
   parseRewardItemCounts,
@@ -73,6 +74,14 @@ export function parseAuctionState(json: unknown): AuctionState | null {
         .filter(Boolean);
       if (r.length > 0) recordedWinnerNames = r;
     }
+    let revokedWinnerNames: string[] | undefined;
+    if (Array.isArray(it.revokedWinnerNames)) {
+      const r = it.revokedWinnerNames
+        .filter((x): x is string => typeof x === 'string')
+        .map((x) => x.trim())
+        .filter(Boolean);
+      if (r.length > 0) revokedWinnerNames = r;
+    }
     const winnerPoolCapRaw = (it as unknown as Record<string, unknown>).winnerPoolCap;
     const winnerPoolCap =
       winnerPoolCapRaw == null || winnerPoolCapRaw === ''
@@ -83,6 +92,7 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     return {
       ...it,
       ...(recordedWinnerNames ? { recordedWinnerNames } : {}),
+      ...(revokedWinnerNames ? { revokedWinnerNames } : {}),
       winnerPoolCap,
       interestedMemberIds: Array.isArray(it.interestedMemberIds)
         ? (it.interestedMemberIds as unknown[])
@@ -112,6 +122,25 @@ export function parseAuctionState(json: unknown): AuctionState | null {
   const shuffleLocked = o.shuffleLocked === true;
 
   let weeklyTypeWins: WeeklyTypeWin[] = [];
+  const rawWins = o.weeklyTypeWins;
+  if (Array.isArray(rawWins)) {
+    for (const row of rawWins) {
+      if (!row || typeof row !== 'object') continue;
+      const r = row as Record<string, unknown>;
+      const ign = typeof r.ign === 'string' ? r.ign.trim().toLowerCase() : '';
+      const t = typeof r.t === 'string' ? r.t.trim() : '';
+      if (!ign || !t) continue;
+      const entry: WeeklyTypeWin = { ign, t };
+      if (typeof r.itemId === 'string' && r.itemId.trim()) {
+        entry.itemId = r.itemId.trim();
+      }
+      const at =
+        typeof r.at === 'number' ? r.at : r.at != null ? Number(r.at) : NaN;
+      if (Number.isFinite(at) && at > 0) entry.at = at;
+      weeklyTypeWins.push(entry);
+    }
+    weeklyTypeWins = pruneExpiredEmperiumWins(weeklyTypeWins);
+  }
 
   let winnerMarkLog: WinnerMarkLogEntry[] | undefined;
   const rawLog = o.winnerMarkLog;
@@ -252,6 +281,18 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     freeDrawChosenByItemId = fd;
   }
 
+  let shuffleWinnerSlotsByItemId: Record<string, number> | undefined;
+  const rawSw = o.shuffleWinnerSlotsByItemId;
+  if (rawSw && typeof rawSw === 'object' && !Array.isArray(rawSw)) {
+    const sw: Record<string, number> = {};
+    for (const [k, v] of Object.entries(rawSw as Record<string, unknown>)) {
+      if (typeof k !== 'string' || !k) continue;
+      const n = Number(v);
+      if (Number.isFinite(n) && n >= 0) sw[k] = Math.floor(n);
+    }
+    shuffleWinnerSlotsByItemId = sw;
+  }
+
   return normalizeQueuesForEventMode(
     stripEmperiumCardQueuesAfterFragmentWeeklyWin(
       dedupeRosterMembersByIgn({
@@ -268,6 +309,9 @@ export function parseAuctionState(json: unknown): AuctionState | null {
         ...(bidderStateLog ? { bidderStateLog } : {}),
         ...(freeDrawChosenByItemId !== undefined
           ? { freeDrawChosenByItemId }
+          : {}),
+        ...(shuffleWinnerSlotsByItemId !== undefined
+          ? { shuffleWinnerSlotsByItemId }
           : {}),
       })
     )
@@ -294,7 +338,7 @@ export class PublicAddBidError extends Error {
     public readonly extra?: {
       itemName?: string;
       otherItemName?: string;
-      matchedIgn?: string;
+      expiresAt?: number;
     }
   ) {
     super(message);
@@ -360,6 +404,7 @@ export async function persistAuctionState(
     rewardRank: state.rewardRank ?? 'Bronze',
     rewardItemCounts: state.rewardItemCounts ?? { fragment: 2, feathers: 80 },
     freeDrawChosenByItemId: state.freeDrawChosenByItemId ?? {},
+    shuffleWinnerSlotsByItemId: state.shuffleWinnerSlotsByItemId ?? {},
   };
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts.bearerToken) headers.Authorization = `Bearer ${opts.bearerToken}`;

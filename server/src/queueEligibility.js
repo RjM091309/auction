@@ -5,6 +5,7 @@
 import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
 import { findMatchingIgnName, canonicalIgnKey } from './ignQueueIdentity.js';
 import { isItemExemptFromBidLimit } from './bidLimitExempt.js';
+import { emperiumWinCooldownBlocksQueueJoin, isEmperiumWinCooldownEnabled } from './emperiumWinCooldown.js';
 
 /** @param {string | undefined} m */
 export function defaultEventModeForQueues(m) {
@@ -17,9 +18,10 @@ export function shuffleLockClosesPublicSignup(shuffleLocked, eventMode) {
   return defaultEventModeForQueues(eventMode) !== 'Emperium Overrun';
 }
 
-/** Weekly win / log lock disabled — winners can bid again next auction. */
-export function weeklyTypeWinBlocksQueueJoin(_eventMode, _itemType, _wins, _ignRaw) {
-  return false;
+/** Emperium Overrun only — Guild League never blocks queue join for winner CD. */
+export function weeklyTypeWinBlocksQueueJoin(eventMode, item, wins, ignRaw) {
+  if (!isEmperiumWinCooldownEnabled(eventMode)) return false;
+  return emperiumWinCooldownBlocksQueueJoin(eventMode, item, wins, ignRaw);
 }
 
 /** @param {string} t */
@@ -96,7 +98,7 @@ export function findOtherActiveQueueBlockingWithMatch(
 
   for (const it of items) {
     if (it.status !== 'active' || it.id === targetItemId) continue;
-    if (skipHidden && isAuctionItemHiddenForPublic(it)) continue;
+    if (skipHidden && isAuctionItemHiddenForPublic(it, eventMode)) continue;
     // Existing bids on exempt items don't count against the bid limit
     // either, so they cannot become a blocker for a different target.
     if (isItemExemptFromBidLimit(it.id)) continue;

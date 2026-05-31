@@ -15,6 +15,7 @@ import {
   ignMatchesForQueueIdentity,
 } from './ignQueueIdentity';
 import { isItemExemptFromBidLimit } from './bidLimitExempt';
+import { emperiumWinCooldownBlocksQueueJoin, isEmperiumWinCooldownEnabled } from './emperiumWinCooldown';
 
 export function defaultEventModeForQueues(m?: WeeklyEventType): WeeklyEventType {
   return m ?? 'Emperium Overrun';
@@ -29,14 +30,15 @@ export function shuffleLockClosesPublicSignup(
   return defaultEventModeForQueues(eventMode) !== 'Emperium Overrun';
 }
 
-/** Weekly type win lock disabled — winners can bid again next auction (Fragment Card + Feathers). */
+/** Emperium Overrun only — Guild League never blocks queue join for winner CD. */
 export function weeklyTypeWinBlocksQueueJoin(
-  _eventMode: WeeklyEventType | undefined,
-  _itemType: ItemType,
-  _wins: WeeklyTypeWin[] | undefined,
-  _ignRaw: string
+  eventMode: WeeklyEventType | undefined,
+  item: Pick<AuctionItem, 'id' | 'name' | 'type'>,
+  wins: WeeklyTypeWin[] | undefined,
+  ignRaw: string
 ): boolean {
-  return false;
+  if (!isEmperiumWinCooldownEnabled(eventMode)) return false;
+  return emperiumWinCooldownBlocksQueueJoin(eventMode, item, wins, ignRaw);
 }
 
 export function isEmperiumCenterType(t: ItemType | string): boolean {
@@ -205,7 +207,7 @@ export function findOtherActiveQueueBlockingWithMatch(
 
   for (const it of items) {
     if (it.status !== 'active' || it.id === targetItemId) continue;
-    if (skipHidden && isAuctionItemHidden(it)) continue;
+    if (skipHidden && isAuctionItemHidden(it, eventMode)) continue;
     // Existing bids on exempt items don't count against the bid limit
     // either, so they cannot become a blocker for a different target.
     if (isItemExemptFromBidLimit(it.id)) continue;

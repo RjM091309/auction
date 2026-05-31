@@ -16,6 +16,7 @@ import {
   ListX,
   GripVertical,
   UserPlus,
+  X,
   XCircle,
   Eye,
   EyeOff,
@@ -48,7 +49,9 @@ import {
   defaultEventModeForQueues,
   findOtherActiveQueueBlockingWithMatch,
   shuffleLockClosesPublicSignup,
+  weeklyTypeWinBlocksQueueJoin,
 } from './lib/queueEligibility';
+import { findEmperiumWinCooldown } from './lib/emperiumWinCooldown';
 import {
   deactivateMemberOnServer,
   removeMemberFromItemQueueOnServer,
@@ -72,7 +75,12 @@ import {
   swal2ConfirmShuffleAllQueues,
   swal2ConfirmShuffleDrawFree,
   swal2ConfirmResetShuffleUnmark,
+  swal2ConfirmUnmarkWinner,
+  swal2ConfirmUnmarkAddedWinner,
+  swal2WinnerMarked,
+  swal2WinnerUnmarked,
   swal2WinnerPoolFull,
+  swal2EmperiumWinCooldown,
   swal2WinnerLimitsUpdated,
   swal2ConfirmSaveEventMode,
   swal2EventModeSaved,
@@ -107,10 +115,12 @@ import {
   sortAuctionItemsForDisplay,
 } from './lib/auctionItemDisplayOrder';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
+import { resolveEffectiveRewardContext, displayWinnerPoolCapForItem } from './lib/rewardContext';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
 import { filterToCurrentAuctionWeek, getAuctionWeekMondayKey } from './lib/auctionWeek';
 import {
   featherItemsPerWinnerUnit,
+  defaultFeathersItemsPerWinner,
   featherPageCountBeforePartialFree,
   featherRewardSpanFourItemPages,
   fragmentGeneralPageSpan,
@@ -169,6 +179,7 @@ function auctionPollSnapshot(s: AuctionState): string {
       type: it.type,
       interestedMemberIds: it.interestedMemberIds,
       recordedWinnerNames: it.recordedWinnerNames,
+      revokedWinnerNames: it.revokedWinnerNames,
       winnerName: it.winnerName,
       status: it.status,
       createdAt: it.createdAt,
@@ -183,6 +194,7 @@ function auctionPollSnapshot(s: AuctionState): string {
     rewardItemCounts: s.rewardItemCounts,
     dataVersion: s.dataVersion,
     freeDrawChosenByItemId: s.freeDrawChosenByItemId ?? {},
+    shuffleWinnerSlotsByItemId: s.shuffleWinnerSlotsByItemId ?? {},
   });
 }
 
@@ -367,14 +379,18 @@ export default function AuctionDashboard() {
   const [winnerSetLimitForm, setWinnerSetLimitForm] = useState<{
     rank: GuildRank;
     feathers: number;
+    feathersItemsPerWinner: number;
     fragmentByItemId: Record<string, number>;
   }>({
     rank: 'Bronze',
     feathers: defaultWinnerPoolCapForType('Feathers'),
+    feathersItemsPerWinner: defaultFeathersItemsPerWinner('Bronze'),
     fragmentByItemId: {},
   });
   const winnerSlotsFromItems = (type: ItemType, items: number): number => {
-    return winnerSlotsFromTotalItems(type, items, winnerSetLimitForm.rank);
+    return winnerSlotsFromTotalItems(type, items, winnerSetLimitForm.rank, {
+      feathersItemsPerWinner: winnerSetLimitForm.feathersItemsPerWinner,
+    });
   };
 
   const [newItemName, setNewItemName] = useState('');
@@ -507,6 +523,8 @@ export default function AuctionDashboard() {
               weeklyTypeWins: server.weeklyTypeWins ?? prev.weeklyTypeWins,
               freeDrawChosenByItemId:
                 server.freeDrawChosenByItemId ?? prev.freeDrawChosenByItemId,
+              shuffleWinnerSlotsByItemId:
+                server.shuffleWinnerSlotsByItemId ?? prev.shuffleWinnerSlotsByItemId,
               shuffleLocked: server.shuffleLocked ?? prev.shuffleLocked,
               winnerShortlistUiEnabled:
                 server.winnerShortlistUiEnabled ?? prev.winnerShortlistUiEnabled,
@@ -621,6 +639,11 @@ export default function AuctionDashboard() {
     };
   }, []);
 
+  const effectiveReward = useMemo(
+    () => (state ? resolveEffectiveRewardContext(state) : null),
+    [state]
+  );
+
   const activeAuctions = useMemo(
     () =>
       sortAuctionItemsForDisplay(
@@ -630,19 +653,25 @@ export default function AuctionDashboard() {
   );
 
   const visibleActiveAuctions = useMemo(
-    () => activeAuctions.filter((item) => !isAuctionItemHidden(item)),
-    [activeAuctions]
+    () =>
+      activeAuctions.filter(
+        (item) => !isAuctionItemHidden(item, state?.eventMode)
+      ),
+    [activeAuctions, state?.eventMode]
   );
 
   /** Fewer visible cards than xl columns — center the row instead of hugging the left. */
   const centerFewQueueCards =
     visibleActiveAuctions.length > 0 && visibleActiveAuctions.length < 3;
   const featherPageStartByItemId = useMemo(() => {
-    const counts = state?.rewardItemCounts ?? rankPresetLimits(parseGuildRank(state?.rewardRank));
+    const counts =
+      effectiveReward?.counts ??
+      rankPresetLimits(parseGuildRank(state?.rewardRank));
     const featherItems = (state?.items ?? [])
       .filter(
         (it) =>
           it.status === 'active' &&
+          !isAuctionItemHidden(it, state?.eventMode) &&
           (it.type === 'Fragment Card' || it.type === 'Feathers')
       )
       .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
@@ -661,7 +690,7 @@ export default function AuctionDashboard() {
           : featherRewardSpanFourItemPages(it.type, totalItems);
     }
     return out;
-  }, [state?.items, state?.rewardRank, state?.rewardItemCounts]);
+  }, [state?.items, state?.eventMode, effectiveReward]);
 
   const bidderStateLogEntries = state?.bidderStateLog ?? [];
 
@@ -680,9 +709,9 @@ export default function AuctionDashboard() {
       countQueuedIgnByNormalized(
         state?.items ?? [],
         state?.members ?? [],
-        isAuctionItemHidden
+        (it) => isAuctionItemHidden(it, state?.eventMode)
       ),
-    [state?.items, state?.members]
+    [state?.items, state?.members, state?.eventMode]
   );
 
   const publicSignupClosedByShuffle = useMemo(
@@ -878,8 +907,13 @@ export default function AuctionDashboard() {
     if (!latestState.current || shuffleRunningRef.current) return;
     if (latestState.current.shuffleLocked === true) return;
     const snapshot = latestState.current;
+    const shuffleReward = resolveEffectiveRewardContext(snapshot);
     const activeItemsForShuffle = sortAuctionItemsForDisplay<AuctionItem>(
-      snapshot.items.filter((it) => it.status === 'active')
+      snapshot.items.filter(
+        (it) =>
+          it.status === 'active' &&
+          !isAuctionItemHidden(it, snapshot.eventMode)
+      )
     );
     const totalParticipants = activeItemsForShuffle.reduce(
       (sum, it) => sum + it.interestedMemberIds.length,
@@ -890,7 +924,11 @@ export default function AuctionDashboard() {
       cards: activeItemsForShuffle.map((it) => ({
         name: displayAuctionItemName(it.name),
         bidders: it.interestedMemberIds.length,
-        winnerLimit: maxQueueSlotsAfterShuffle(it.type, it.winnerPoolCap),
+        winnerLimit: displayWinnerPoolCapForItem(
+          it,
+          shuffleReward.rank,
+          shuffleReward.counts
+        ),
       })),
     });
     if (!ok) return;
@@ -945,7 +983,13 @@ export default function AuctionDashboard() {
           if (len <= 0) continue;
           const winnerSlots = Math.max(
             0,
-            item ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap) : 0
+            item
+              ? displayWinnerPoolCapForItem(
+                  item,
+                  shuffleReward.rank,
+                  shuffleReward.counts
+                )
+              : 0
           );
           const window = item
             ? shuffleRevealWindowForItem(item, activeItemsForShuffle)
@@ -1003,18 +1047,29 @@ export default function AuctionDashboard() {
         });
         return;
       }
+      const shuffleWinnerSlotsByItemId: Record<string, number> = {};
+      for (const it of activeItemsForShuffle) {
+        shuffleWinnerSlotsByItemId[it.id] = displayWinnerPoolCapForItem(
+          it,
+          shuffleReward.rank,
+          shuffleReward.counts
+        );
+      }
       const nextOptimistic: AuctionState = {
         ...prevState,
         shuffleLocked: true,
         winnerShortlistUiEnabled: true,
         freeDrawChosenByItemId: {},
+        shuffleWinnerSlotsByItemId,
         items: prevState.items.map((item) => {
           if (item.status !== 'active') return item;
+          if (isAuctionItemHidden(item, prevState.eventMode)) return item;
+          const preview = previewQueueByItemId[item.id];
           return {
             ...item,
             /** Green checks tinatanggal lang sa Reset shuffle; queue pinapanatili ang lahat ng member. */
             interestedMemberIds:
-              previewQueueByItemId[item.id] ??
+              preview ??
               applySureWinPin(
                 shuffleQueueIdsForType(item.interestedMemberIds, item.type),
                 item.name
@@ -1126,7 +1181,7 @@ export default function AuctionDashboard() {
     const rank = parseGuildRank(state.rewardRank);
     const counts = state.rewardItemCounts ?? rankPresetLimits(rank);
     const totalItems = counts.feathers;
-    if (freeItemsFromTotalItems(item.type, totalItems, rank) <= 0) return;
+    if (freeItemsFromTotalItems(item.type, totalItems, rank, counts) <= 0) return;
     const pool = maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap);
     const ids = item.interestedMemberIds;
     if (ids.length <= pool) return;
@@ -1185,6 +1240,7 @@ export default function AuctionDashboard() {
       winnerShortlistUiEnabled: false,
       weeklyTypeWins: [],
       freeDrawChosenByItemId: {},
+      shuffleWinnerSlotsByItemId: {},
       items: state.items.map((item) => {
         // Cancelled items stay cancelled — they include duplicate Feathers
         // rows that `migrateFeatherItems` merged into a single survivor.
@@ -1196,6 +1252,7 @@ export default function AuctionDashboard() {
           status: item.status === 'cancelled' ? 'cancelled' : 'active',
           winnerName: null,
           recordedWinnerNames: [] as string[],
+          revokedWinnerNames: [] as string[],
         };
         const ids = [...reopened.interestedMemberIds].sort((a, b) => {
           const ka = ignKey(a);
@@ -1264,6 +1321,320 @@ export default function AuctionDashboard() {
     setResetShuffleAuthPromptOpen(false);
   };
 
+  /** Admin/Developer only — adjust winner marks after shuffle is locked. */
+  type WinnerMarkAction =
+    | { kind: 'mark'; itemId: string; winnerName: string }
+    | { kind: 'unmark'; itemId: string; winnerName: string };
+
+  const pendingWinnerMarkRef = useRef<WinnerMarkAction | null>(null);
+  const [markWinnerAuthPromptOpen, setMarkWinnerAuthPromptOpen] =
+    useState(false);
+  const [markWinnerActor, setMarkWinnerActor] = useState<BidderActor | null>(
+    () => loadStoredActor()
+  );
+
+  useEffect(() => {
+    setMarkWinnerActor(loadStoredActor());
+  }, [activeTab]);
+
+  const performWinnerMarkChange = async (
+    action: WinnerMarkAction,
+    bearerToken: string
+  ) => {
+    if (!state) return;
+
+    const trimmed = action.winnerName.trim();
+    if (!trimmed) return;
+
+    const item = state.items.find((i) => i.id === action.itemId);
+    if (!item || item.status !== 'active') return;
+
+    const rewardCtx = resolveEffectiveRewardContext(state);
+    const pool = displayWinnerPoolCapForItem(
+      item,
+      rewardCtx.rank,
+      rewardCtx.counts
+    );
+    const existing = item.recordedWinnerNames ?? [];
+    const ignLower = trimmed.toLowerCase();
+    const shuffleDrawSlots =
+      state.shuffleWinnerSlotsByItemId?.[action.itemId] ?? pool;
+    const queueIndexForName = (name: string, queueIds: number[], roster: GuildMember[]) => {
+      const lower = name.trim().toLowerCase();
+      return queueIds.findIndex((mid) => {
+        const member = roster.find((m) => m.id === mid);
+        return member?.name.trim().toLowerCase() === lower;
+      });
+    };
+    const countExtraMarked = (
+      names: string[],
+      queueIds: number[],
+      roster: GuildMember[],
+      drawSlots: number
+    ) =>
+      names.filter((name) => {
+        const qIdx = queueIndexForName(name, queueIds, roster);
+        return qIdx < 0 || qIdx >= drawSlots;
+      }).length;
+
+    const countActiveShuffleWinners = (
+      queueIds: number[],
+      roster: GuildMember[],
+      drawSlots: number,
+      revokedNames: string[]
+    ) => {
+      const revokedLower = new Set(
+        revokedNames.map((n) => n.trim().toLowerCase()).filter(Boolean)
+      );
+      let n = 0;
+      for (let i = 0; i < drawSlots && i < queueIds.length; i += 1) {
+        const member = roster.find((mem) => mem.id === queueIds[i]);
+        const nl = member?.name?.trim().toLowerCase() ?? '';
+        if (nl && !revokedLower.has(nl)) n += 1;
+      }
+      return n;
+    };
+
+    if (action.kind === 'mark') {
+      if (existing.some((n) => n.trim().toLowerCase() === ignLower)) return;
+      const qIdx = queueIndexForName(trimmed, item.interestedMemberIds, state.members);
+      const isRevokedShuffleSlot =
+        qIdx >= 0 &&
+        qIdx < shuffleDrawSlots &&
+        (item.revokedWinnerNames ?? []).some(
+          (n) => n.trim().toLowerCase() === ignLower
+        );
+      if (qIdx >= 0 && qIdx < shuffleDrawSlots && !isRevokedShuffleSlot) return;
+      if (!isRevokedShuffleSlot) {
+        const extraCount = countExtraMarked(
+          existing,
+          item.interestedMemberIds,
+          state.members,
+          shuffleDrawSlots
+        );
+        const activeShuffle = countActiveShuffleWinners(
+          item.interestedMemberIds,
+          state.members,
+          shuffleDrawSlots,
+          item.revokedWinnerNames ?? []
+        );
+        if (activeShuffle + extraCount >= pool) {
+          void swal2WinnerPoolFull({
+            itemType: item.type,
+            pool,
+            shuffleDrawSlots: activeShuffle,
+          });
+          return;
+        }
+      }
+    } else {
+      const qIdx = queueIndexForName(trimmed, item.interestedMemberIds, state.members);
+      const inRecorded = existing.some((n) => n.trim().toLowerCase() === ignLower);
+      const isShuffleSlotWinner = qIdx >= 0 && qIdx < shuffleDrawSlots;
+      const alreadyRevoked = (item.revokedWinnerNames ?? []).some(
+        (n) => n.trim().toLowerCase() === ignLower
+      );
+      if (!inRecorded && !(isShuffleSlotWinner && !alreadyRevoked)) return;
+    }
+
+    cancelPendingPersist();
+    persistInFlightRef.current = true;
+    skipPersistAfterPollRef.current = false;
+
+    try {
+      let base: AuctionState = normalizeWinnerPoolCapsForLimits(
+        dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(state))
+      );
+      try {
+        const remote = await fetchAuctionState();
+        if (remote) {
+          base = normalizeWinnerPoolCapsForLimits(
+            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote))
+          );
+        }
+      } catch {
+        /* keep base from local */
+      }
+
+      const target = base.items.find((i) => i.id === action.itemId);
+      if (!target || target.status !== 'active') return;
+      const ex = target.recordedWinnerNames ?? [];
+      const baseRewardCtx = resolveEffectiveRewardContext(base);
+      const poolFromLimits = displayWinnerPoolCapForItem(
+        target,
+        baseRewardCtx.rank,
+        baseRewardCtx.counts
+      );
+      const drawSlots =
+        base.shuffleWinnerSlotsByItemId?.[action.itemId] ?? poolFromLimits;
+
+      let nextNames: string[];
+      let nextRevoked: string[];
+      if (action.kind === 'mark') {
+        if (ex.some((n) => n.trim().toLowerCase() === ignLower)) return;
+        const qIdx = queueIndexForName(
+          trimmed,
+          target.interestedMemberIds,
+          base.members
+        );
+        const exRevoked = target.revokedWinnerNames ?? [];
+        const isRevokedShuffleSlot =
+          qIdx >= 0 &&
+          qIdx < drawSlots &&
+          exRevoked.some((n) => n.trim().toLowerCase() === ignLower);
+        if (qIdx >= 0 && qIdx < drawSlots && !isRevokedShuffleSlot) return;
+        if (isRevokedShuffleSlot) {
+          nextNames = [...ex];
+          nextRevoked = exRevoked.filter(
+            (n) => n.trim().toLowerCase() !== ignLower
+          );
+        } else {
+          const extraCount = countExtraMarked(
+            ex,
+            target.interestedMemberIds,
+            base.members,
+            drawSlots
+          );
+          const activeShuffle = countActiveShuffleWinners(
+            target.interestedMemberIds,
+            base.members,
+            drawSlots,
+            exRevoked
+          );
+          if (activeShuffle + extraCount >= poolFromLimits) return;
+          nextNames = [...ex, trimmed];
+          nextRevoked = [...exRevoked];
+        }
+      } else {
+        nextNames = ex.filter((n) => n.trim().toLowerCase() !== ignLower);
+        nextRevoked = [...(target.revokedWinnerNames ?? [])];
+        const qIdx = queueIndexForName(
+          trimmed,
+          target.interestedMemberIds,
+          base.members
+        );
+        const isShuffleSlotWinner = qIdx >= 0 && qIdx < drawSlots;
+        if (
+          isShuffleSlotWinner &&
+          !nextRevoked.some((n) => n.trim().toLowerCase() === ignLower)
+        ) {
+          nextRevoked.push(trimmed);
+        }
+      }
+
+      const next: AuctionState = {
+        ...base,
+        items: base.items.map((it) => {
+          if (it.id !== action.itemId) return it;
+          return {
+            ...it,
+            recordedWinnerNames: nextNames.length > 0 ? nextNames : undefined,
+            revokedWinnerNames: nextRevoked.length > 0 ? nextRevoked : undefined,
+            interestedMemberIds: it.interestedMemberIds,
+          };
+        }),
+      };
+
+      skipPersistOnceRef.current = true;
+      setState(next);
+
+      const server = await persistAuctionState(next, { bearerToken });
+      if (server) {
+        queueBaselineRef.current = buildQueueBaselineFromState(server);
+        skipPersistOnceRef.current = true;
+        setState(
+          normalizeWinnerPoolCapsForLimits(
+            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
+          )
+        );
+        notifyBidderAuditChanged();
+      }
+      void (action.kind === 'mark'
+        ? swal2WinnerMarked({
+            ign: trimmed,
+            itemName: displayAuctionItemName(target.name),
+          })
+        : swal2WinnerUnmarked({
+            ign: trimmed,
+            itemName: displayAuctionItemName(target.name),
+          }));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/sign in|401|403|expired|admin or developer/i.test(msg)) {
+        clearStoredActor();
+        setMarkWinnerActor(null);
+        pendingWinnerMarkRef.current = action;
+        setMarkWinnerAuthPromptOpen(true);
+        return;
+      }
+      void swal2SaveError(msg || 'Could not save winner mark');
+      try {
+        const recovered = await fetchAuctionState();
+        if (recovered) {
+          queueBaselineRef.current = buildQueueBaselineFromState(recovered);
+          setState(
+            normalizeWinnerPoolCapsForLimits(
+              dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(recovered))
+            )
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      persistInFlightRef.current = false;
+    }
+  };
+
+  const requestMarkWinner = (itemId: string, winnerName: string | null) => {
+    const trimmed = winnerName?.trim();
+    if (!trimmed || !state) return;
+    const action: WinnerMarkAction = { kind: 'mark', itemId, winnerName: trimmed };
+    const stored = loadStoredActor();
+    if (stored && (stored.role === 'Admin' || stored.role === 'Developer')) {
+      void performWinnerMarkChange(action, stored.token);
+      return;
+    }
+    pendingWinnerMarkRef.current = action;
+    setMarkWinnerAuthPromptOpen(true);
+  };
+
+  const requestUnmarkWinner = async (itemId: string, winnerName: string) => {
+    const trimmed = winnerName?.trim();
+    if (!trimmed || !state) return;
+    const item = state.items.find((i) => i.id === itemId);
+    const ok = await swal2ConfirmUnmarkWinner({
+      ign: trimmed,
+      itemName: item
+        ? displayAuctionItemName(item.name)
+        : 'this item',
+    });
+    if (!ok) return;
+    const action: WinnerMarkAction = { kind: 'unmark', itemId, winnerName: trimmed };
+    const stored = loadStoredActor();
+    if (stored && (stored.role === 'Admin' || stored.role === 'Developer')) {
+      void performWinnerMarkChange(action, stored.token);
+      return;
+    }
+    pendingWinnerMarkRef.current = action;
+    setMarkWinnerAuthPromptOpen(true);
+  };
+
+  const handleMarkWinnerAuthSuccess = (actor: BidderActor) => {
+    storeActor(actor);
+    setMarkWinnerActor(actor);
+    setMarkWinnerAuthPromptOpen(false);
+    if (actor.role !== 'Admin' && actor.role !== 'Developer') return;
+    const pending = pendingWinnerMarkRef.current;
+    pendingWinnerMarkRef.current = null;
+    if (pending) void performWinnerMarkChange(pending, actor.token);
+  };
+
+  const handleMarkWinnerAuthCancel = () => {
+    pendingWinnerMarkRef.current = null;
+    setMarkWinnerAuthPromptOpen(false);
+  };
+
   /**
    * Drag-and-drop queue move. Saves the move IMMEDIATELY via PUT /api/state
    * instead of relying on the debounced auto-persist. This eliminates the
@@ -1305,6 +1676,16 @@ export default function AuctionDashboard() {
       const next = applyQueueMemberMove(base, payload);
       if ('error' in next) {
         setState(base);
+        if (next.error === 'emperium_win_cooldown' && next.toItemName) {
+          const ign =
+            base.members.find((m) => m.id === payload.memberId)?.name ?? '';
+          void swal2EmperiumWinCooldown({
+            ign,
+            itemName: displayAuctionItemName(next.toItemName),
+            expiresAt: next.expiresAt ?? Date.now(),
+          });
+          return;
+        }
         if (next.error === 'name_conflict' && next.toItemName) {
           const ign =
             base.members.find((m) => m.id === payload.memberId)?.name ?? '';
@@ -1341,6 +1722,27 @@ export default function AuctionDashboard() {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      try {
+        const parsed = JSON.parse(msg) as {
+          code?: string;
+          error?: string;
+          extra?: { itemName?: string; expiresAt?: number };
+        };
+        if (parsed.code === 'emperium_win_cooldown') {
+          const ign =
+            state.members.find((m) => m.id === payload.memberId)?.name ?? '';
+          void swal2EmperiumWinCooldown({
+            ign,
+            itemName: displayAuctionItemName(
+              parsed.extra?.itemName ?? 'this item'
+            ),
+            expiresAt: parsed.extra?.expiresAt ?? Date.now(),
+          });
+          return;
+        }
+      } catch {
+        /* not JSON */
+      }
       void swal2SaveError(msg || 'Could not move bid');
       // Roll back to whatever the server actually has.
       try {
@@ -1361,43 +1763,7 @@ export default function AuctionDashboard() {
     }
   };
 
-  const handleCompleteAuction = (itemId: string, winnerName: string | null) => {
-    const trimmed = winnerName?.trim();
-    if (!trimmed || !state) return;
-
-    const item = state.items.find((i) => i.id === itemId);
-    if (!item || item.status !== 'active') return;
-
-    const pool = maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap);
-    const existing = item.recordedWinnerNames ?? [];
-    if (existing.some((n) => n.trim().toLowerCase() === trimmed.toLowerCase())) {
-      return;
-    }
-    if (existing.length >= pool) {
-      void swal2WinnerPoolFull({ itemType: item.type, pool });
-      return;
-    }
-
-    setState((prev) => {
-      if (!prev) return prev;
-      const target = prev.items.find((i) => i.id === itemId);
-      if (!target || target.status !== 'active') return prev;
-      const ex = target.recordedWinnerNames ?? [];
-      if (ex.length >= pool) return prev;
-
-      return {
-        ...prev,
-        items: prev.items.map((it) => {
-          if (it.id !== itemId) return it;
-          return {
-            ...it,
-            recordedWinnerNames: [...ex, trimmed],
-            interestedMemberIds: it.interestedMemberIds,
-          };
-        }),
-      };
-    });
-  };
+  const handleCompleteAuction = requestMarkWinner;
 
   // Clear-all-lists is destructive (wipes every active queue) — restricted
   // to Admin / Developer with the same session-token flow as event-mode and
@@ -1518,6 +1884,8 @@ export default function AuctionDashboard() {
     itemDisplayName: string,
     token: string
   ) => {
+    const snap = latestState.current;
+    if (!snap || snap.shuffleLocked === true || shuffleRunningRef.current) return;
     const ok = await swal2ConfirmRemoveFromQueue(memberName, itemDisplayName);
     if (!ok) return;
     try {
@@ -1553,6 +1921,7 @@ export default function AuctionDashboard() {
 
   const handleRemoveFromQueue = async (itemId: string, memberId: number) => {
     if (!state) return;
+    if (state.shuffleLocked === true || shuffleUi.active) return;
     const item = state.items.find((i) => i.id === itemId);
     const m = state.members.find((x) => x.id === memberId);
     if (!item || !m) return;
@@ -1648,6 +2017,11 @@ export default function AuctionDashboard() {
     setWinnerSetLimitForm({
       rank,
       feathers: preset.feathers,
+      feathersItemsPerWinner:
+        rank === persistedRank
+          ? (state.rewardItemCounts?.feathersItemsPerWinner ??
+            defaultFeathersItemsPerWinner(rank))
+          : defaultFeathersItemsPerWinner(rank),
       fragmentByItemId: buildFragmentLimitsByItemId(state.items, preset),
     });
     setWinnerSetLimitModalOpen(true);
@@ -1676,6 +2050,7 @@ export default function AuctionDashboard() {
           Object.values(formSnap.fragmentByItemId)[0] ??
           totalItemsForTypeByRank('Fragment Card', formSnap.rank),
         feathers: formSnap.feathers,
+        feathersItemsPerWinner: Math.max(1, formSnap.feathersItemsPerWinner),
         fragmentByItemId: { ...formSnap.fragmentByItemId },
       },
       items: state.items.map((it) => {
@@ -1723,6 +2098,7 @@ export default function AuctionDashboard() {
           ),
         })),
         feathersWinners: winnerSlotsFromItems('Feathers', formSnap.feathers),
+        feathersItemsPerWinner: formSnap.feathersItemsPerWinner,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1732,7 +2108,7 @@ export default function AuctionDashboard() {
         setWinnerSetLimitAuthPromptOpen(true);
         return;
       }
-      void swal2SaveError(msg || 'Could not save winner set limit');
+      void swal2SaveError(msg || 'Could not save Winner Settings');
     } finally {
       persistInFlightRef.current = false;
     }
@@ -1837,7 +2213,7 @@ export default function AuctionDashboard() {
     const password = queueJoinPassword.trim();
     if (!password) {
       void swal2SaveError(
-        'Password / ingame ID number is required to join the queue.'
+        'Password is required to join the queue.'
       );
       return;
     }
@@ -1890,6 +2266,23 @@ export default function AuctionDashboard() {
           ign: raw,
           itemName: displayAuctionItemName(card.name),
           matchedIgn: matchedOnCard,
+        });
+        closeJoinQueueModal();
+        return;
+      }
+
+      const cooldown = findEmperiumWinCooldown(
+        base.eventMode,
+        card,
+        base.weeklyTypeWins,
+        raw
+      );
+      if (cooldown) {
+        setState(base);
+        void swal2EmperiumWinCooldown({
+          ign: raw,
+          itemName: displayAuctionItemName(card.name),
+          expiresAt: cooldown.expiresAt,
         });
         closeJoinQueueModal();
         return;
@@ -2135,7 +2528,7 @@ export default function AuctionDashboard() {
                           disabled={shuffleUi.active}
                           className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-blue-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:px-4"
                         >
-                          Winner set limit
+                          Winner Settings
                         </button>
                         <button
                           type="button"
@@ -2180,9 +2573,14 @@ export default function AuctionDashboard() {
                         <QueueCard
                           item={item}
                           members={state.members}
-                          rewardRank={parseGuildRank(state.rewardRank)}
+                          rewardRank={
+                            effectiveReward?.rank ??
+                            parseGuildRank(state.rewardRank)
+                          }
                           rewardItemCounts={
-                            state.rewardItemCounts ?? rankPresetLimits(parseGuildRank(state.rewardRank))
+                            effectiveReward?.counts ??
+                            state.rewardItemCounts ??
+                            rankPresetLimits(parseGuildRank(state.rewardRank))
                           }
                           featherPageStart={featherPageStartByItemId[item.id]}
                           isShuffling={shuffleUi.active}
@@ -2195,14 +2593,29 @@ export default function AuctionDashboard() {
                           }
                           onMoveQueueMember={handleQueueMove}
                           onComplete={handleCompleteAuction}
+                          showAddedWinnerUi={
+                            state.shuffleLocked === true &&
+                            state.winnerShortlistUiEnabled === true
+                          }
+                          onUnmarkWinner={requestUnmarkWinner}
                           shuffleSpinOffset={shuffleUi.spinOffsetByItemId[item.id]}
                           shuffleRevealCount={shuffleUi.revealCountByItemId[item.id]}
                           shufflePreviewIds={shuffleUi.previewQueueByItemId[item.id]}
                           shuffleDone={
                             (shuffleUi.revealCountByItemId[item.id] ?? 0) >=
-                            maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
+                            displayWinnerPoolCapForItem(
+                              item,
+                              effectiveReward?.rank ??
+                                parseGuildRank(state.rewardRank),
+                              effectiveReward?.counts ??
+                                state.rewardItemCounts ??
+                                rankPresetLimits(parseGuildRank(state.rewardRank))
+                            )
                           }
                           shuffleLocked={state.shuffleLocked === true}
+                          shuffleWinnerSlots={
+                            state.shuffleWinnerSlotsByItemId?.[item.id]
+                          }
                           onShuffleDrawFree={handleShuffleDrawFree}
                           freeDrawChosenMemberId={
                             (state.freeDrawChosenByItemId ?? {})[item.id] ?? null
@@ -2454,6 +2867,16 @@ export default function AuctionDashboard() {
                       ) {
                         return false;
                       }
+                      if (
+                        weeklyTypeWinBlocksQueueJoin(
+                          state.eventMode,
+                          queueModalItem,
+                          state.weeklyTypeWins,
+                          ignRaw
+                        )
+                      ) {
+                        return false;
+                      }
                       const blocker = findOtherActiveQueueBlockingWithMatch(
                         state.eventMode,
                         state.items,
@@ -2488,37 +2911,20 @@ export default function AuctionDashboard() {
                           {activeMembersError}
                         </p>
                       )}
-                      {!activeMembersLoading &&
-                        !activeMembersError &&
-                        filteredMembers.length > 0 && (
-                          <p className="text-[11px] font-medium text-slate-500 ml-1">
-                            Don&apos;t see your name?{' '}
-                            {hiddenCount > 0 ? (
-                              <>
-                                {hiddenCount} IGN
-                                {hiddenCount === 1 ? ' is' : 's are'} hidden
-                                because they already joined a queue. Otherwise
-                                you need to register on the Bidders page.
-                              </>
-                            ) : (
-                              <>You need to register first on the Bidders page.</>
-                            )}
-                          </p>
-                        )}
                     </>
                   );
                 })()}
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] font-mono ml-1">
-                  Password / ingame ID number
+                  Password
                 </label>
                 <div className="relative">
                   <input
                     type={queueJoinShowPassword ? 'text' : 'password'}
                     required
                     autoComplete="current-password"
-                    placeholder="Enter your password or ingame ID number"
+                    placeholder="Enter your password"
                     className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 pr-14 font-mono text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
                     value={queueJoinPassword}
                     onChange={(e) => setQueueJoinPassword(e.target.value)}
@@ -2645,11 +3051,21 @@ export default function AuctionDashboard() {
 
         <BidderAuthModal
           open={winnerSetLimitAuthPromptOpen}
-          title="Sign in to save winner set limit"
-          description="Officer, Admin, or Developer access required to change winner set limits."
+          title="Sign in to save Winner Settings"
+          description="Officer, Admin, or Developer access required to change Winner Settings."
           submitLabel="Sign in & save"
           onAuth={handleWinnerSetLimitAuthSuccess}
           onCancel={handleWinnerSetLimitAuthCancel}
+        />
+
+        <BidderAuthModal
+          open={markWinnerAuthPromptOpen}
+          title="Sign in to adjust winner marks"
+          description="Admin or Developer access required to mark or unmark winners after shuffle results are locked."
+          submitLabel="Sign in & continue"
+          allowedRoles={['Admin', 'Developer']}
+          onAuth={handleMarkWinnerAuthSuccess}
+          onCancel={handleMarkWinnerAuthCancel}
         />
 
         <BidderAuthModal
@@ -2722,7 +3138,7 @@ export default function AuctionDashboard() {
 
         {winnerSetLimitModalOpen && (
           <Modal
-            title="Winner set limit"
+            title="Winner Settings"
             onClose={() => setWinnerSetLimitModalOpen(false)}
           >
             <form onSubmit={handleSaveWinnerSetLimit} className="space-y-6">
@@ -2753,6 +3169,8 @@ export default function AuctionDashboard() {
                               ...prev,
                               rank,
                               feathers: preset.feathers,
+                              feathersItemsPerWinner:
+                                defaultFeathersItemsPerWinner(rank),
                               fragmentByItemId: Object.fromEntries(
                                 activeFragmentAuctionItems(state?.items ?? []).map(
                                   (it) => [it.id, preset.fragment]
@@ -2830,11 +3248,64 @@ export default function AuctionDashboard() {
                   }
                 />
               </div>
+              <div className="space-y-2">
+                <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
+                  Feathers per winner
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
+                  value={winnerSetLimitForm.feathersItemsPerWinner}
+                  onChange={(e) =>
+                    setWinnerSetLimitForm((prev) => ({
+                      ...prev,
+                      feathersItemsPerWinner: Math.max(
+                        1,
+                        Math.floor(
+                          Number((e.target.value || '1').replace(/[^\d]/g, '')) || 1
+                        )
+                      ),
+                    }))
+                  }
+                />
+                <p className="text-xs text-slate-500 ml-1">
+                  {winnerSetLimitForm.feathers} total items ÷{' '}
+                  {winnerSetLimitForm.feathersItemsPerWinner} per winner ={' '}
+                  <span className="font-semibold text-slate-300">
+                    {winnerSlotsFromItems('Feathers', winnerSetLimitForm.feathers)}
+                  </span>{' '}
+                  winner slot
+                  {winnerSlotsFromItems('Feathers', winnerSetLimitForm.feathers) === 1
+                    ? ''
+                    : 's'}
+                  {freeItemsFromTotalItems(
+                    'Feathers',
+                    winnerSetLimitForm.feathers,
+                    winnerSetLimitForm.rank,
+                    {
+                      feathersItemsPerWinner: winnerSetLimitForm.feathersItemsPerWinner,
+                    }
+                  ) > 0
+                    ? ` (+${freeItemsFromTotalItems(
+                        'Feathers',
+                        winnerSetLimitForm.feathers,
+                        winnerSetLimitForm.rank,
+                        {
+                          feathersItemsPerWinner:
+                            winnerSetLimitForm.feathersItemsPerWinner,
+                        }
+                      )} free items)`
+                    : ''}
+                </p>
+              </div>
               <button
                 type="submit"
                 className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-5 rounded-[1.25rem] shadow-xl shadow-blue-600/20 active:scale-[0.98] uppercase tracking-widest"
               >
-                Save winner limits
+                Save Winner Settings
               </button>
             </form>
           </Modal>
@@ -2857,11 +3328,14 @@ function QueueCard({
   onRemoveFromQueue,
   onMoveQueueMember,
   onComplete,
+  showAddedWinnerUi,
+  onUnmarkWinner,
   shuffleSpinOffset,
   shuffleRevealCount,
   shufflePreviewIds,
   shuffleDone,
   shuffleLocked,
+  shuffleWinnerSlots,
   onShuffleDrawFree,
   freeDrawChosenMemberId,
 }: {
@@ -2882,6 +3356,8 @@ function QueueCard({
   showWinnerShortlist: boolean;
   /** After main shuffle; enables free-draw shuffle for losers below shortlist. */
   shuffleLocked?: boolean;
+  /** Winner slots frozen at shuffle lock (shuffle draw count for this item). */
+  shuffleWinnerSlots?: number;
   /** Re-randomize only non-recorded queue rows below the shortlist (Feathers with free partial). */
   onShuffleDrawFree?: (itemId: string) => void | Promise<void>;
   /** Member highlighted as the free-draw pick (set only after “Shuffle draw free”). */
@@ -2890,6 +3366,9 @@ function QueueCard({
   onRemoveFromQueue: (memberId: number) => void | Promise<void>;
   onMoveQueueMember: (p: QueueMovePayload) => void;
   onComplete: (id: string, winner: string | null) => void;
+  /** Show mark/unmark controls on loser rows after shuffle (login on click). */
+  showAddedWinnerUi?: boolean;
+  onUnmarkWinner?: (itemId: string, winnerName: string) => void;
   /** While shuffling, rotation offset for unrevealed queue names. */
   shuffleSpinOffset?: number;
   /** While shuffling, how many winners are already revealed from top. */
@@ -2900,33 +3379,92 @@ function QueueCard({
   shuffleDone?: boolean;
 }) {
   const [dropHighlight, setDropHighlight] = useState(false);
+  /** Right-click revealed mark/unmark control on one queue row. */
+  const [contextReveal, setContextReveal] = useState<{
+    mid: number;
+    action: 'mark' | 'unmark';
+  } | null>(null);
+
+  useEffect(() => {
+    if (contextReveal == null) return;
+    const dismiss = () => setContextReveal(null);
+    window.addEventListener('click', dismiss);
+    window.addEventListener('contextmenu', dismiss);
+    window.addEventListener('scroll', dismiss, true);
+    return () => {
+      window.removeEventListener('click', dismiss);
+      window.removeEventListener('contextmenu', dismiss);
+      window.removeEventListener('scroll', dismiss, true);
+    };
+  }, [contextReveal]);
+
   const displayIds =
     isShuffling && Array.isArray(shufflePreviewIds)
       ? shufflePreviewIds
       : item.interestedMemberIds;
 
-  /** Rows in the post-shuffle winner draw pool — Frag 2 / Feathers 19; else top 1; 0 when shortlist UI is off after reset. */
-  const shortlistSlots = showWinnerShortlist
-    ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
-    : 0;
-  const poolCap = maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap);
+  /** Rows in the post-shuffle winner draw pool (from rank limits: Emperium Feathers = 13 items/winner). */
+  const poolCap = displayWinnerPoolCapForItem(item, rewardRank, rewardItemCounts);
+  const shortlistSlots = showWinnerShortlist ? poolCap : 0;
+  /** Shuffle draw winners (frozen at lock); extras may be added below this index. */
+  const shuffleDrawSlots =
+    shuffleLocked === true && typeof shuffleWinnerSlots === 'number'
+      ? Math.max(0, shuffleWinnerSlots)
+      : shortlistSlots;
   const recorded = item.recordedWinnerNames ?? [];
-  const canMarkMoreWinners = recorded.length < poolCap;
+  const revoked = item.revokedWinnerNames ?? [];
+  const isRevokedWinner = (name: string) =>
+    revoked.some((n) => n.trim().toLowerCase() === name.trim().toLowerCase());
+  const isRecordedWinner = (name: string) =>
+    recorded.some((n) => n.trim().toLowerCase() === name.trim().toLowerCase());
+  const queueIndexForName = (name: string) => {
+    const lower = name.trim().toLowerCase();
+    return displayIds.findIndex((mid) => {
+      const member = members.find((m) => m.id === mid);
+      return member?.name.trim().toLowerCase() === lower;
+    });
+  };
+  const isExtraRecordedWinner = (name: string) => {
+    if (!isRecordedWinner(name) || isRevokedWinner(name)) return false;
+    const qIdx = queueIndexForName(name);
+    return qIdx < 0 || qIdx >= shuffleDrawSlots;
+  };
+  const countActiveShuffleWinners = () => {
+    let n = 0;
+    for (let i = 0; i < shuffleDrawSlots && i < displayIds.length; i += 1) {
+      const member = members.find((mem) => mem.id === displayIds[i]);
+      if (member && !isRevokedWinner(member.name)) n += 1;
+    }
+    return n;
+  };
+  const extraMarkedCount = recorded.filter((name) => isExtraRecordedWinner(name)).length;
+  const totalWinnersNow = countActiveShuffleWinners() + extraMarkedCount;
+  const canMarkMoreExtras = totalWinnersNow < poolCap;
 
   const freeItems =
     item.type === 'Feathers'
-      ? freeItemsFromTotalItems(item.type, rewardItemCounts.feathers, rewardRank)
+      ? freeItemsFromTotalItems(
+          item.type,
+          rewardItemCounts.feathers,
+          rewardRank,
+          rewardItemCounts
+        )
       : 0;
   const freePageInfo = (() => {
     if (item.type !== 'Feathers') return null;
     const pageStart = featherPageStart ?? 1;
     const totalItems = rewardItemCounts.feathers;
-    const offset = featherPageCountBeforePartialFree(item.type, totalItems, rewardRank);
+    const offset = featherPageCountBeforePartialFree(
+      item.type,
+      totalItems,
+      rewardRank,
+      rewardItemCounts
+    );
     return freeItems > 0
       ? { pageLabel: `P${pageStart + offset}`, freeItems }
       : null;
   })();
-  const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank);
+  const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank, rewardItemCounts);
   const resolvedRevealCount =
     typeof shuffleRevealCount === 'number' && Number.isInteger(shuffleRevealCount)
       ? Math.max(0, Math.min(shuffleRevealCount, displayIds.length))
@@ -3013,8 +3551,13 @@ function QueueCard({
               <Trophy className="h-3.5 w-3.5 shrink-0" aria-hidden />
               <span className="font-mono text-amber-200">{winnerCount}</span>
               <span className="uppercase tracking-wide">{winnerLabel}</span>
-              {totalItems != null &&
-              (item.type === 'Feathers' || item.type === 'Fragment Card') ? (
+              {item.type === 'Feathers' ? (
+                <span className="text-amber-400/60">
+                  ·{' '}
+                  <span className="font-mono">{featherSlotUnit}</span> items/winner
+                  · <span className="font-mono">{totalItems}</span> total
+                </span>
+              ) : totalItems != null && item.type === 'Fragment Card' ? (
                 <span className="text-amber-400/60">
                   · <span className="font-mono">{totalItems}</span> {itemNoun}
                 </span>
@@ -3022,12 +3565,6 @@ function QueueCard({
             </p>
           );
         })()}
-        {recorded.length > 0 ? (
-          <p className="mt-3 text-xs font-bold leading-snug text-green-400/95">
-            Marked winners ({recorded.length}/{poolCap}):{' '}
-            <span className="text-green-300">{recorded.join(', ')}</span>
-          </p>
-        ) : null}
       </div>
 
       <div
@@ -3088,8 +3625,29 @@ function QueueCard({
                   : slotMid;
                 const m = members.find((member) => member.id === mid);
                 if (!m) return null;
-                const isRevealedWinner =
-                  isShuffling ? idx < resolvedRevealCount : idx < shortlistSlots;
+                const isShuffleDrawWinner =
+                  !isShuffling &&
+                  showWinnerShortlist &&
+                  idx < shuffleDrawSlots &&
+                  !isRevokedWinner(m.name);
+                const isExtraMarkedWinner =
+                  !isShuffling && isExtraRecordedWinner(m.name);
+                const canUnmarkWinner =
+                  showAddedWinnerUi &&
+                  !isShuffling &&
+                  (isExtraMarkedWinner || isShuffleDrawWinner);
+                const canRemarkShuffleWinner =
+                  idx < shuffleDrawSlots && isRevokedWinner(m.name);
+                const canMarkLoser =
+                  showAddedWinnerUi &&
+                  !isShuffling &&
+                  shuffleLocked === true &&
+                  !isRecordedWinner(m.name) &&
+                  !isExtraMarkedWinner &&
+                  (idx >= shuffleDrawSlots || canRemarkShuffleWinner);
+                const isWinnerHighlight = isShuffling
+                  ? idx < resolvedRevealCount
+                  : isShuffleDrawWinner || isExtraMarkedWinner;
                 const isFreeDrawPickRow =
                   !isShuffling &&
                   shuffleLocked === true &&
@@ -3129,8 +3687,37 @@ function QueueCard({
                         insertBeforeMemberId: mid,
                       });
                     }}
-                    className={`flex min-h-10 items-center justify-between gap-2 rounded-2xl border px-3 py-2.5 sm:gap-3 sm:px-3 sm:py-3 ${
-                      isRevealedWinner
+                    onContextMenu={(e) => {
+                      if (!showAddedWinnerUi || isShuffling) return;
+                      if (canUnmarkWinner && onUnmarkWinner) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setContextReveal((prev) =>
+                          prev?.mid === mid && prev.action === 'unmark'
+                            ? null
+                            : { mid, action: 'unmark' }
+                        );
+                        return;
+                      }
+                      if (canMarkLoser) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setContextReveal((prev) =>
+                          prev?.mid === mid && prev.action === 'mark'
+                            ? null
+                            : { mid, action: 'mark' }
+                        );
+                      }
+                    }}
+                    title={
+                      canUnmarkWinner
+                        ? 'Right-click to unmark'
+                        : canMarkLoser
+                          ? 'Right-click to mark as winner'
+                          : undefined
+                    }
+                    className={`flex min-h-10 flex-wrap items-center justify-between gap-2 rounded-2xl border px-3 py-2.5 sm:gap-3 sm:px-3 sm:py-3 ${
+                      isWinnerHighlight
                         ? 'bg-blue-600/20 border-blue-500/50'
                         : isShuffling
                           ? 'bg-blue-500/15 border-blue-400/60'
@@ -3209,20 +3796,21 @@ function QueueCard({
                       ) : null}
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
-                      <button
-                        type="button"
-                        disabled={isShuffling}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void onRemoveFromQueue(mid);
-                        }}
-                        title="Remove from this queue only (Officer/Admin/Developer)"
-                        aria-label={`Remove ${m.name} from ${displayAuctionItemName(item.name)}`}
-                        className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-red-950/50 hover:text-red-400"
-                      >
-                        <Trash2 className="h-4 w-4" aria-hidden />
-                      </button>
-                      {isShuffling && isRevealedWinner ? (
+                      {!isShuffling && shuffleLocked !== true ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void onRemoveFromQueue(mid);
+                          }}
+                          title="Remove from this queue only (Officer/Admin/Developer)"
+                          aria-label={`Remove ${m.name} from ${displayAuctionItemName(item.name)}`}
+                          className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-red-950/50 hover:text-red-400"
+                        >
+                          <Trash2 className="h-4 w-4" aria-hidden />
+                        </button>
+                      ) : null}
+                      {isShuffling && isWinnerHighlight ? (
                         <div
                           className="pointer-events-none flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-lg bg-green-500 text-white shadow-sm shadow-green-950/30"
                           title="Winner revealed during shuffle draw"
@@ -3231,26 +3819,60 @@ function QueueCard({
                           <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
                         </div>
                       ) : null}
-                      {idx < shortlistSlots &&
-                        !isShuffling &&
-                        canMarkMoreWinners &&
-                        !recorded.some(
-                          (n) =>
-                            n.trim().toLowerCase() === m.name.trim().toLowerCase()
-                        ) && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onComplete(item.id, m.name);
-                            }}
-                            title="Click to mark winner (weekly type lock). Saves immediately with your other changes."
-                            aria-label={`Mark ${m.name} as winner`}
-                            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg bg-green-500 text-white shadow-sm shadow-green-950/30 transition-colors hover:bg-green-400 active:scale-95"
-                          >
-                            <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
-                          </button>
-                        )}
+                      {!isShuffling && isWinnerHighlight ? (
+                        <div
+                          className="pointer-events-none flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-lg bg-green-500 text-white shadow-sm shadow-green-950/30"
+                          title={
+                            isShuffleDrawWinner
+                              ? 'Shuffle draw winner'
+                              : 'Added winner'
+                          }
+                          aria-hidden
+                        >
+                          <Check className="h-4 w-4 stroke-[2.5]" aria-hidden />
+                        </div>
+                      ) : null}
+                      {showAddedWinnerUi &&
+                      canMarkLoser &&
+                      contextReveal?.mid === mid &&
+                      contextReveal.action === 'mark' ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setContextReveal(null);
+                            onComplete(item.id, m.name);
+                          }}
+                          title={
+                            canMarkMoreExtras
+                              ? 'Add as winner from losers (Admin/Developer — sign in on click)'
+                              : `Winner limit reached (${poolCap}). Raise Winner Settings first.`
+                          }
+                          aria-label={`Mark ${m.name} as added winner`}
+                          className="inline-flex h-8 shrink-0 cursor-pointer items-center rounded-lg border border-slate-700 bg-slate-800 px-2.5 text-[9px] font-black uppercase tracking-wide text-slate-300 shadow-sm shadow-black/25 transition-colors hover:border-slate-600 hover:bg-slate-700 hover:text-white active:scale-95 sm:text-[10px]"
+                        >
+                          Mark winner
+                        </button>
+                      ) : null}
+                      {showAddedWinnerUi &&
+                      canUnmarkWinner &&
+                      onUnmarkWinner &&
+                      contextReveal?.mid === mid &&
+                      contextReveal.action === 'unmark' ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setContextReveal(null);
+                            void onUnmarkWinner(item.id, m.name);
+                          }}
+                          title={`Unmark ${m.name} as winner`}
+                          aria-label={`Unmark ${m.name} as winner`}
+                          className="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-red-500/40 bg-red-500/15 text-red-300 shadow-sm shadow-red-950/20 transition-colors hover:border-red-400/50 hover:bg-red-500/25 hover:text-red-200 active:scale-95"
+                        >
+                          <X className="h-4 w-4 stroke-[2.5]" aria-hidden />
+                        </button>
+                      ) : null}
                     </div>
                   </motion.div>
                 );
@@ -3286,7 +3908,7 @@ function QueueCard({
                   )}
                   {shuffleLocked &&
                     onShuffleDrawFree &&
-                    displayIds.length > shortlistSlots && (
+                    displayIds.length > shuffleDrawSlots && (
                       <button
                         type="button"
                         onClick={(e) => {

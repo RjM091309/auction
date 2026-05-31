@@ -1,6 +1,9 @@
 import type { AuctionState } from '../types';
 import { isAuctionItemHidden } from './hiddenAuctionItems';
-import { parseGuildRank, winnerSlotsFromTotalItems } from './pageAssignment';
+import {
+  resolveEffectiveRewardContext,
+  effectiveWinnerPoolCapForItem,
+} from './rewardContext';
 import {
   computeKeptQueueMemberKeys,
   defaultEventModeForQueues,
@@ -29,29 +32,46 @@ export function dedupeIgnAcrossActiveQueues(s: AuctionState): AuctionState {
 
   const keepEmperiumVisible =
     mode === 'Emperium Overrun'
-      ? computeKeptQueueMemberKeys(s0, s0.eventMode, (it) => !isAuctionItemHidden(it))
+      ? computeKeptQueueMemberKeys(
+          s0,
+          s0.eventMode,
+          (it) => !isAuctionItemHidden(it, s0.eventMode)
+        )
       : null;
   const keepEmperiumHidden =
     mode === 'Emperium Overrun'
-      ? computeKeptQueueMemberKeys(s0, s0.eventMode, (it) => isAuctionItemHidden(it))
+      ? computeKeptQueueMemberKeys(
+          s0,
+          s0.eventMode,
+          (it) => isAuctionItemHidden(it, s0.eventMode)
+        )
       : null;
   const keepGuildVisible =
     mode !== 'Emperium Overrun'
-      ? computeKeptQueueMemberKeys(s0, s0.eventMode, (it) => !isAuctionItemHidden(it))
+      ? computeKeptQueueMemberKeys(
+          s0,
+          s0.eventMode,
+          (it) => !isAuctionItemHidden(it, s0.eventMode)
+        )
       : null;
   const keepGuildHidden =
     mode !== 'Emperium Overrun'
-      ? computeKeptQueueMemberKeys(s0, s0.eventMode, (it) => isAuctionItemHidden(it))
+      ? computeKeptQueueMemberKeys(
+          s0,
+          s0.eventMode,
+          (it) => isAuctionItemHidden(it, s0.eventMode)
+        )
       : null;
 
   const items = s0.items.map((it) => {
     if (it.status !== 'active') return it;
+    const hidden = isAuctionItemHidden(it, s0.eventMode);
     const keep =
       mode === 'Emperium Overrun'
-        ? isAuctionItemHidden(it)
+        ? hidden
           ? keepEmperiumHidden!
           : keepEmperiumVisible!
-        : isAuctionItemHidden(it)
+        : hidden
           ? keepGuildHidden!
           : keepGuildVisible!;
     const newIds = it.interestedMemberIds.filter((mid) =>
@@ -75,35 +95,21 @@ export function normalizeQueuesForEventMode(s: AuctionState): AuctionState {
 }
 
 /**
- * Recompute `winnerPoolCap` for Fragment Card and Feathers items based on the
- * currently-saved `rewardItemCounts` + `rewardRank`. Other types (Ancient Item,
- * Other) are untouched.
- *
- * Why: the "Winner Set Limit" modal is the source of truth for how many winners
- * each card should have, but legacy/migrated items can carry a stale
- * `winnerPoolCap` (e.g. the default 19 for Feathers from when the merger
- * deduped multiple Feathers rows but didn't re-apply the current limit).
- * Recomputing on load keeps the displayed winner count consistent with what
- * the admin saved without forcing them to re-open and re-save the modal.
+ * Recompute caps + reward counts from the active event mode's winner-set preset
+ * (or saved limits when rank matches that mode). Keeps trophy badges in sync.
  */
 export function normalizeWinnerPoolCapsForLimits(s: AuctionState): AuctionState {
-  const counts = s.rewardItemCounts;
-  if (!counts) return s;
-  const rank = parseGuildRank(s.rewardRank);
+  const ctx = resolveEffectiveRewardContext(s);
   const items = s.items.map((it) => {
-    if (it.type === 'Fragment Card') {
-      const totalItems =
-        counts.fragmentByItemId?.[it.id] ?? counts.fragment ?? 0;
-      const next = winnerSlotsFromTotalItems('Fragment Card', totalItems, rank);
-      if (it.winnerPoolCap === next) return it;
-      return { ...it, winnerPoolCap: next };
-    }
-    if (it.type === 'Feathers') {
-      const next = winnerSlotsFromTotalItems('Feathers', counts.feathers ?? 0, rank);
-      if (it.winnerPoolCap === next) return it;
-      return { ...it, winnerPoolCap: next };
-    }
-    return it;
+    if (it.type !== 'Fragment Card' && it.type !== 'Feathers') return it;
+    const next = effectiveWinnerPoolCapForItem(it, ctx);
+    if (it.winnerPoolCap === next) return it;
+    return { ...it, winnerPoolCap: next };
   });
-  return { ...s, items };
+  return {
+    ...s,
+    items,
+    rewardRank: ctx.rank,
+    rewardItemCounts: ctx.counts,
+  };
 }

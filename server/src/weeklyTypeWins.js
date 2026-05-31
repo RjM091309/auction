@@ -1,9 +1,10 @@
 import { getAuctionWeekMondayKey, getAuctionWeekTimezone } from './auctionWeek.js';
+import { isEmperiumCooldownItem, pruneExpiredEmperiumWins } from './emperiumWinCooldown.js';
 
 export const META_AUCTION_WEEK_MONDAY = 'auction_week_monday';
 export const META_WEEKLY_TYPE_WINS = 'weekly_type_wins';
 
-/** @typedef {{ ign: string, t: string }} WeeklyTypeWin — ign is trim + lowercase */
+/** @typedef {{ ign: string, t: string, itemId?: string, at?: number }} WeeklyTypeWin — ign is trim + lowercase */
 
 /** @param {unknown} name */
 export function normalizeIgn(name) {
@@ -28,6 +29,19 @@ export function parseWeeklyTypeWins(raw) {
       const t = row.t;
       if (typeof t !== 'string' || !t) continue;
 
+      let itemId;
+      if (typeof row.itemId === 'string' && row.itemId.trim()) {
+        itemId = row.itemId.trim();
+      }
+
+      let at;
+      if (typeof row.at === 'number' && Number.isFinite(row.at)) {
+        at = row.at;
+      } else if (row.at != null && row.at !== '') {
+        const n = Number(row.at);
+        if (Number.isFinite(n) && n > 0) at = n;
+      }
+
       let ignRaw = row.ign ?? row.n;
       if (ignRaw == null && row.m != null && typeof row.m === 'string') {
         if (UUID_LIKE.test(row.m.trim())) continue;
@@ -35,7 +49,10 @@ export function parseWeeklyTypeWins(raw) {
       }
       const ign = normalizeIgn(ignRaw);
       if (!ign) continue;
-      out.push({ ign, t });
+      const entry = { ign, t };
+      if (itemId) entry.itemId = itemId;
+      if (at != null) entry.at = at;
+      out.push(entry);
     }
     return out;
   } catch {
@@ -58,7 +75,7 @@ export function memberHasTypeWinThisWeek(wins, ignNormalized, itemType) {
 }
 
 /**
- * If the stored Monday key differs from today’s auction week, clear wins and update the key.
+ * Monday rollover: prune Emperium win cooldowns whose unlock Sunday has passed.
  * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} q
  */
 export async function rolloverWeeklyWinsIfNewWeek(q) {
@@ -71,6 +88,9 @@ export async function rolloverWeeklyWinsIfNewWeek(q) {
   const stored = rows[0]?.value != null ? String(rows[0].value) : '';
   if (stored === mondayKey) return;
 
+  const currentWins = await loadWeeklyTypeWins(q);
+  const pruned = pruneExpiredEmperiumWins(currentWins);
+
   const [[{ winnerMarkLogRows }]] = await q.query(
     'SELECT COUNT(*) AS winnerMarkLogRows FROM winner_mark_log'
   );
@@ -79,12 +99,9 @@ export async function rolloverWeeklyWinsIfNewWeek(q) {
     `INSERT INTO app_meta (\`key\`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)`,
     [META_AUCTION_WEEK_MONDAY, mondayKey]
   );
-  await q.query(
-    `INSERT INTO app_meta (\`key\`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)`,
-    [META_WEEKLY_TYPE_WINS, '[]']
-  );
+  await saveWeeklyTypeWins(q, pruned);
   console.info(
-    `[audit] weekly rollover week=${stored || '(none)'} -> ${mondayKey} tz=${timeZone} reset weekly_type_wins + bidder_state_log_rows_kept=all winner_mark_log_rows_kept=${Number(
+    `[audit] weekly rollover week=${stored || '(none)'} -> ${mondayKey} tz=${timeZone} emperium_cooldowns_kept=${pruned.length} winner_mark_log_rows_kept=${Number(
       winnerMarkLogRows
     )}`
   );
@@ -110,17 +127,20 @@ export async function loadWeeklyTypeWins(q) {
   return parseWeeklyTypeWins(metaText(rows[0]?.value));
 }
 
-/** Dedupe by normalized ign + type. */
+/** Dedupe by normalized ign + type + itemId. */
 export function dedupeWeeklyWinsList(wins) {
-  const winKey = (ign, t) => `${ign}\0${t}`;
+  const winKey = (ign, t, itemId) => `${ign}\0${t}\0${itemId ?? ''}`;
   const seen = new Set();
   const out = [];
   for (const w of wins) {
     if (!w || typeof w.ign !== 'string' || typeof w.t !== 'string') continue;
-    const k = winKey(w.ign, w.t);
+    const k = winKey(w.ign, w.t, w.itemId);
     if (seen.has(k)) continue;
     seen.add(k);
-    out.push({ ign: w.ign, t: w.t });
+    const row = { ign: w.ign, t: w.t };
+    if (w.itemId) row.itemId = w.itemId;
+    if (typeof w.at === 'number' && Number.isFinite(w.at) && w.at > 0) row.at = w.at;
+    out.push(row);
   }
   return out;
 }
@@ -131,42 +151,82 @@ export function dedupeWeeklyWinsList(wins) {
  * @param {WeeklyTypeWin[]} wins
  */
 /**
- * Active items: bawat pangalan sa `recordedWinnerNames` → lingguhang type lock.
- * @param {Array<{ type: string, recordedWinnerNames?: string[] }>} items
+ * Fill missing cooldown rows from `winner_mark_log` (stable `at_ms`, not `Date.now()` on poll).
+ * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} q
+ * @param {Array<{ id: string, type: string, name?: string, recordedWinnerNames?: string[] }>} items
  * @param {WeeklyTypeWin[]} wins
  */
-export function mergeRecordedWinnerNamesInto(items, wins) {
+export async function backfillWeeklyWinsFromRecordedWinners(q, items, wins) {
   const out = dedupeWeeklyWinsList(wins);
-  const winKey = (ign, t) => `${ign}\0${t}`;
-  const seen = new Set(out.map((w) => winKey(w.ign, w.t)));
+  const winKey = (ign, t, itemId) => `${ign}\0${t}\0${itemId ?? ''}`;
+  const seen = new Set(out.map((w) => winKey(w.ign, w.t, w.itemId)));
+
   for (const it of items) {
+    if (!isEmperiumCooldownItem(it)) continue;
     const arr = it.recordedWinnerNames;
     if (!Array.isArray(arr)) continue;
     for (const raw of arr) {
       if (raw == null || typeof raw !== 'string') continue;
       const ign = normalizeIgn(raw);
       if (!ign) continue;
-      const k = winKey(ign, it.type);
+      const k = winKey(ign, it.type, it.id);
       if (seen.has(k)) continue;
+
+      const [rows] = await q.query(
+        `SELECT at_ms FROM winner_mark_log
+         WHERE item_id = ? AND LOWER(TRIM(ign)) = ?
+         ORDER BY at_ms DESC LIMIT 1`,
+        [it.id, ign]
+      );
+      const atRaw = rows[0]?.at_ms;
+      const at = atRaw != null ? Number(atRaw) : NaN;
+      if (!Number.isFinite(at) || at <= 0) continue;
       seen.add(k);
-      out.push({ ign, t: it.type });
+      out.push({ ign, t: it.type, itemId: it.id, at });
     }
   }
   return out;
 }
 
-export function mergeCompletedItemWinsInto(items, wins) {
+/**
+ * Active items: bawat bagong pangalan sa `recordedWinnerNames` → cooldown entry (save path).
+ * @param {Array<{ id: string, type: string, name?: string, recordedWinnerNames?: string[] }>} items
+ * @param {WeeklyTypeWin[]} wins
+ * @param {number} [atMs]
+ */
+export function mergeRecordedWinnerNamesInto(items, wins, atMs = Date.now()) {
   const out = dedupeWeeklyWinsList(wins);
-  const winKey = (ign, t) => `${ign}\0${t}`;
-  const seen = new Set(out.map((w) => winKey(w.ign, w.t)));
+  const winKey = (ign, t, itemId) => `${ign}\0${t}\0${itemId ?? ''}`;
+  const seen = new Set(out.map((w) => winKey(w.ign, w.t, w.itemId)));
+  for (const it of items) {
+    if (!isEmperiumCooldownItem(it)) continue;
+    const arr = it.recordedWinnerNames;
+    if (!Array.isArray(arr)) continue;
+    for (const raw of arr) {
+      if (raw == null || typeof raw !== 'string') continue;
+      const ign = normalizeIgn(raw);
+      if (!ign) continue;
+      const k = winKey(ign, it.type, it.id);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ ign, t: it.type, itemId: it.id, at: atMs });
+    }
+  }
+  return out;
+}
+
+export function mergeCompletedItemWinsInto(items, wins, atMs = Date.now()) {
+  const out = dedupeWeeklyWinsList(wins);
+  const winKey = (ign, t, itemId) => `${ign}\0${t}\0${itemId ?? ''}`;
+  const seen = new Set(out.map((w) => winKey(w.ign, w.t, w.itemId)));
   for (const it of items) {
     if (it.status !== 'completed' || it.winnerName == null) continue;
     const ign = normalizeIgn(it.winnerName);
     if (!ign) continue;
-    const k = winKey(ign, it.type);
+    const k = winKey(ign, it.type, it.id);
     if (seen.has(k)) continue;
     seen.add(k);
-    out.push({ ign, t: it.type });
+    out.push({ ign, t: it.type, itemId: it.id, at: atMs });
   }
   return out;
 }
@@ -189,7 +249,7 @@ export async function saveWeeklyTypeWins(q, wins) {
  * @param {WeeklyTypeWin[]} currentWins
  * @returns {WeeklyTypeWin[]}
  */
-export function applyWeeklyWinnerDiff(oldItems, newItems, currentWins) {
+export function applyWeeklyWinnerDiff(oldItems, newItems, currentWins, atMs = Date.now()) {
   const oldMap = new Map(
     oldItems.map((r) => [
       r.id,
@@ -201,30 +261,33 @@ export function applyWeeklyWinnerDiff(oldItems, newItems, currentWins) {
     ])
   );
 
-  const winKey = (ign, t) => `${ign}\0${t}`;
+  const winKey = (ign, t, itemId) => `${ign}\0${t}\0${itemId ?? ''}`;
   const deduped = [];
   const seen = new Set();
   for (const w of currentWins) {
-    const k = winKey(w.ign, w.t);
+    const k = winKey(w.ign, w.t, w.itemId);
     if (seen.has(k)) continue;
     seen.add(k);
-    deduped.push({ ign: w.ign, t: w.t });
+    const row = { ign: w.ign, t: w.t };
+    if (w.itemId) row.itemId = w.itemId;
+    if (typeof w.at === 'number' && Number.isFinite(w.at) && w.at > 0) row.at = w.at;
+    deduped.push(row);
   }
 
-  const setWin = (ign, t) => {
+  const setWin = (ign, t, itemId) => {
     const ignN = normalizeIgn(ign);
     if (!ignN || !t) return;
-    const k = winKey(ignN, t);
+    const k = winKey(ignN, t, itemId);
     if (seen.has(k)) return;
     seen.add(k);
-    deduped.push({ ign: ignN, t });
+    deduped.push({ ign: ignN, t, itemId, at: atMs });
   };
 
-  const removeWin = (ign, t) => {
+  const removeWin = (ign, t, itemId) => {
     const ignN = normalizeIgn(ign);
     if (!ignN || !t) return;
-    const k = winKey(ignN, t);
-    const idx = deduped.findIndex((w) => winKey(w.ign, w.t) === k);
+    const k = winKey(ignN, t, itemId);
+    const idx = deduped.findIndex((w) => winKey(w.ign, w.t, w.itemId) === k);
     if (idx < 0) return;
     deduped.splice(idx, 1);
     seen.delete(k);
@@ -242,13 +305,13 @@ export function applyWeeklyWinnerDiff(oldItems, newItems, currentWins) {
         : '';
 
     if (nowName && !oldName) {
-      setWin(it.winnerName, it.type);
+      setWin(it.winnerName, it.type, it.id);
       continue;
     }
 
     if (nowName && oldName && oldName.toLowerCase() !== nowName.toLowerCase()) {
-      removeWin(o.winnerName, it.type);
-      setWin(it.winnerName, it.type);
+      removeWin(o.winnerName, it.type, it.id);
+      setWin(it.winnerName, it.type, it.id);
     }
   }
 

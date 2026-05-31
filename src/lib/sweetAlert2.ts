@@ -94,51 +94,95 @@ ${similar}
   }).then(() => undefined);
 }
 
-/** Naabot na ang max na maaaring i-green-check (VITE_AUCTION_WINNER_POOL_*). */
+/** Winner cap reached for this item type (from Winner Settings). */
 export function swal2WinnerPoolFull(args: {
   itemType: string;
   pool: number;
+  /** Shuffle draw winners already counted toward the cap. */
+  shuffleDrawSlots?: number;
 }): Promise<void> {
   const t = escapeHtml(args.itemType);
   const p = String(args.pool);
+  const shuffleNote =
+    args.shuffleDrawSlots != null && args.shuffleDrawSlots > 0
+      ? ` This round already has <strong>${args.shuffleDrawSlots}</strong> shuffle winner${
+          args.shuffleDrawSlots === 1 ? '' : 's'
+        }.`
+      : '';
   return Swal.fire({
     ...darkShell,
     icon: 'warning',
-    title: 'Puno na ang winner slots',
+    title: 'Winner limit reached',
     width: 'min(28rem, calc(100vw - 2rem))',
-    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Para sa <strong>${t}</strong>, hanggang <strong>${p}</strong> lang ang puwedeng i-check na panalo ngayong round (ayon sa <code style="font-size:12px">.env</code> <code style="font-size:12px">VITE_AUCTION_WINNER_POOL_*</code>). Mag-reset ng shuffle kung bagong round.</p>`,
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Maximum <strong>${p}</strong> winner${
+      args.pool === 1 ? '' : 's'
+    } for <strong>${t}</strong> this round (from <strong>Winner Settings</strong>).${shuffleNote} Raise the limit in <strong>Winner Settings</strong>, or reset shuffle to start a new round.</p>`,
     confirmButtonText: 'OK',
   }).then(() => undefined);
 }
 
-/** Weekly type lock: IGN already recorded as winner for this type (admin green check). */
-export function swal2AlreadyWonTypeThisWeek(args: {
+/** Emperium Overrun: 1-week (skip next Sunday) cooldown after winning Puppet Frag Card only. */
+export function swal2EmperiumWinCooldown(args: {
   ign: string;
   itemName: string;
-  /** Emperium Overrun: nanalo na sa Fragment Card — Feathers lang hanggang Monday. */
-  emperiumFragmentCardWinner?: boolean;
+  expiresAt: number;
 }): Promise<void> {
-  const { ign, itemName, emperiumFragmentCardWinner } = args;
+  const { ign, itemName, expiresAt } = args;
   const i = escapeHtml(ign);
   const n = escapeHtml(itemName);
-  const emperiumNote = emperiumFragmentCardWinner
-    ? `<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Under <strong>Emperium Overrun</strong>, puwede ka pa ring mag-queue sa <strong>Feathers</strong> hanggang mag-Monday reset — hindi na sa Fragment Card.</p>`
-    : '';
+  const until = new Date(expiresAt).toLocaleString(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
   return Swal.fire({
     ...darkShell,
     icon: 'info',
-    title: 'Already a winner for this type',
+    title: 'Winner cooldown (1 week)',
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
     html: `<div style="text-align:center;margin:0;padding:0">
-${emperiumNote}
-<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Only <strong>winners</strong> are blocked from bidding again on the same item type (Feathers, …) this week — after the admin clicks the <strong>green check</strong>. Anyone <strong>not</strong> checked can still bid.</p>
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Under <strong>Emperium Overrun</strong>, you already won <strong>Puppet Frag Card</strong> (shuffle shortlist or admin green check). You cannot bid on it during the <strong>next</strong> Emperium Overrun (Sunday). You may bid again on the <strong>following</strong> Sunday. (Feathers has no winner cooldown.)</p>
+<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> — eligible again from:</p>
+<div style="margin-top:1rem;display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
+<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word;margin-bottom:0.5rem">${n}</div>
+<div style="font-size:13px;color:#94a3b8">${until}</div>
+</div>
+</div>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** @deprecated Use swal2EmperiumWinCooldown — kept for older call sites. */
+export function swal2AlreadyWonTypeThisWeek(args: {
+  ign: string;
+  itemName: string;
+  emperiumFragmentCardWinner?: boolean;
+  expiresAt?: number;
+}): Promise<void> {
+  if (args.expiresAt != null && Number.isFinite(args.expiresAt)) {
+    return swal2EmperiumWinCooldown({
+      ign: args.ign,
+      itemName: args.itemName,
+      expiresAt: args.expiresAt,
+    });
+  }
+  const { ign, itemName } = args;
+  const i = escapeHtml(ign);
+  const n = escapeHtml(itemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'info',
+    title: 'Already a winner for this item',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Only <strong>Puppet Frag Card</strong> winners (admin green check) are blocked from bidding again for <strong>1 week</strong> (skip the next Emperium Sunday). Feathers winners may bid again next Sunday.</p>
 <p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is recorded as a winner for:</p>
 <div style="margin-top:1rem;display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
 <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
 <div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${n}</div>
 </div>
-<p style="margin:1rem 0 0;line-height:1.5;font-size:13px;color:#94a3b8">This limit resets every Monday.</p>
 </div>`,
     confirmButtonText: 'OK',
   }).then(() => undefined);
@@ -345,6 +389,83 @@ export function swal2ConfirmResetShuffleUnmark(): Promise<boolean> {
   }).then((r) => Boolean(r.isConfirmed));
 }
 
+/** Confirm removing a winner mark (shuffle draw or added). */
+export function swal2ConfirmUnmarkWinner(args: {
+  ign: string;
+  itemName: string;
+}): Promise<boolean> {
+  const i = escapeHtml(args.ign);
+  const n = escapeHtml(args.itemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'warning',
+    title: 'Unmark winner?',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0;text-align:center">Remove <strong>${i}</strong> as a winner on <strong>${n}</strong>? They will lose winner highlight on this card.</p>`,
+    showCancelButton: true,
+    confirmButtonText: 'Unmark winner',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#dc2626',
+  }).then((r) => Boolean(r.isConfirmed));
+}
+
+/** @deprecated Use swal2ConfirmUnmarkWinner */
+export function swal2ConfirmUnmarkAddedWinner(args: {
+  ign: string;
+  itemName: string;
+}): Promise<boolean> {
+  return swal2ConfirmUnmarkWinner(args);
+}
+
+/** After marking a bidder as winner (added or re-marked shuffle slot). */
+export function swal2WinnerMarked(args: {
+  ign: string;
+  itemName: string;
+}): Promise<void> {
+  const i = escapeHtml(args.ign);
+  const n = escapeHtml(args.itemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'success',
+    title: 'Marked as winner',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is now marked as a winner.</p>
+<div style="display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
+<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${n}</div>
+</div>
+</div>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
+/** After unmarking a winner (shuffle draw or added). */
+export function swal2WinnerUnmarked(args: {
+  ign: string;
+  itemName: string;
+}): Promise<void> {
+  const i = escapeHtml(args.ign);
+  const n = escapeHtml(args.itemName);
+  return Swal.fire({
+    ...darkShell,
+    icon: 'success',
+    title: 'Winner unmarked',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is no longer marked as a winner.</p>
+<div style="display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
+<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${n}</div>
+</div>
+</div>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
 /** Confirm free-draw shuffle for one Feathers card (below shortlist, one random pick). */
 export function swal2ConfirmShuffleDrawFree(args: {
   itemName: string;
@@ -426,6 +547,7 @@ export function swal2SaveError(message: string): Promise<void> {
 export function swal2WinnerLimitsUpdated(args: {
   fragmentCards: { name: string; winners: number }[];
   feathersWinners: number;
+  feathersItemsPerWinner?: number;
 }): Promise<void> {
   const fragmentRows = args.fragmentCards
     .map(
@@ -434,16 +556,21 @@ export function swal2WinnerLimitsUpdated(args: {
     )
     .join('');
   const feathers = String(args.feathersWinners);
+  const perWinner =
+    args.feathersItemsPerWinner != null && args.feathersItemsPerWinner > 0
+      ? `<div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc;margin-bottom:0.35rem"><span>Feathers per winner</span><strong>${args.feathersItemsPerWinner}</strong></div>`
+      : '';
   return Swal.fire({
     ...darkShell,
     icon: 'success',
-    title: 'Winner limits saved',
+    title: 'Winner Settings saved',
     width: 'min(28rem, calc(100vw - 2rem))',
     customClass: { htmlContainer: 'swal-queue-html' },
     html: `<div style="text-align:center;margin:0;padding:0">
 <p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Updated winning bidder slots for this round.</p>
 <div style="display:inline-block;text-align:left;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155;width:100%;box-sizing:border-box">
 ${fragmentRows}
+${perWinner}
 <div style="display:flex;justify-content:space-between;gap:1rem;font-size:14px;color:#f8fafc"><span>Feathers winners</span><strong>${feathers}</strong></div>
 </div>
 </div>`,

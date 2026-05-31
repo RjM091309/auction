@@ -11,7 +11,9 @@
  *   VITE_SURE_WIN_ENABLED=true        # master toggle ("true" = on, anything else = off)
  *   VITE_SURE_WIN_MEMBER_ID=4         # member.id that should always win
  *   VITE_SURE_WIN_ITEM_NAME=Puppet    # substring match (case-insensitive) against item name
- *   VITE_SURE_WIN_SLOT_INDEX=1        # 0=1st, 1=2nd, 2=3rd, ... (clamps to queue length)
+ *   VITE_SURE_WIN_ITEM_NAME=Puppet,Feathers       # comma-separated, same slot for all
+ *   VITE_SURE_WIN_ITEM_NAME=Puppet:0,Feathers:8   # per-item slot (0=1st, 8=9th, ...)
+ *   VITE_SURE_WIN_SLOT_INDEX=0        # default slot when an item has no `:N` suffix
  *
  * Para alisin: i-set `VITE_SURE_WIN_ENABLED=false` (o tanggalin lahat ng
  * linya) at i-restart ang `npm run dev:all` kung hindi auto-reload si Vite.
@@ -23,11 +25,46 @@
 
 import { displayAuctionItemName } from './formatAuctionItemName';
 
+interface SureWinItemRule {
+  needle: string;
+  slotIndex: number;
+}
+
 interface SureWinConfig {
   enabled: boolean;
   memberId: number | null;
-  itemNeedle: string;
-  slotIndex: number;
+  itemRules: SureWinItemRule[];
+  defaultSlotIndex: number;
+}
+
+function parseNonNegativeInt(raw: string | undefined, fallback: number): number {
+  const num = Number(raw ?? fallback);
+  return Number.isFinite(num) && Number.isInteger(num) && num >= 0 ? num : fallback;
+}
+
+function parseItemRule(part: string, defaultSlotIndex: number): SureWinItemRule | null {
+  const trimmed = part.replace(/\s+/g, ' ').trim();
+  if (!trimmed) return null;
+
+  const colonIdx = trimmed.lastIndexOf(':');
+  if (colonIdx > 0) {
+    const slotRaw = trimmed.slice(colonIdx + 1).trim();
+    const slotIndex = parseNonNegativeInt(slotRaw, -1);
+    if (slotIndex >= 0 && slotRaw === String(slotIndex)) {
+      const needle = trimmed.slice(0, colonIdx).replace(/\s+/g, ' ').trim().toLowerCase();
+      if (needle.length > 0) return { needle, slotIndex };
+    }
+  }
+
+  const needle = trimmed.toLowerCase();
+  return needle.length > 0 ? { needle, slotIndex: defaultSlotIndex } : null;
+}
+
+function parseItemRules(raw: string | undefined, defaultSlotIndex: number): SureWinItemRule[] {
+  return String(raw ?? '')
+    .split(',')
+    .map((part) => parseItemRule(part, defaultSlotIndex))
+    .filter((rule): rule is SureWinItemRule => rule != null);
 }
 
 function readConfig(): SureWinConfig {
@@ -41,24 +78,14 @@ function readConfig(): SureWinConfig {
   const memberId =
     Number.isFinite(idNum) && Number.isInteger(idNum) && idNum > 0 ? idNum : null;
 
-  const itemNeedle = String(import.meta.env.VITE_SURE_WIN_ITEM_NAME ?? '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-
-  // Default = 0 (1st place). User can pin to any slot — even outside the
-  // winner pool — but we clamp into [0, queueLength-1] at apply time.
-  const slotRaw = Number(import.meta.env.VITE_SURE_WIN_SLOT_INDEX ?? 0);
-  const slotIndex =
-    Number.isFinite(slotRaw) && Number.isInteger(slotRaw) && slotRaw >= 0
-      ? slotRaw
-      : 0;
+  const defaultSlotIndex = parseNonNegativeInt(import.meta.env.VITE_SURE_WIN_SLOT_INDEX, 0);
+  const itemRules = parseItemRules(import.meta.env.VITE_SURE_WIN_ITEM_NAME, defaultSlotIndex);
 
   return {
-    enabled: enabled && memberId != null && itemNeedle.length > 0,
+    enabled: enabled && memberId != null && itemRules.length > 0,
     memberId,
-    itemNeedle,
-    slotIndex,
+    itemRules,
+    defaultSlotIndex,
   };
 }
 
@@ -75,11 +102,15 @@ function normalizeItemName(raw: string): string {
     .toLowerCase();
 }
 
+function findMatchingRule(haystack: string): SureWinItemRule | null {
+  return CONFIG.itemRules.find((rule) => haystack.includes(rule.needle)) ?? null;
+}
+
 /**
- * If the sure-win flag is on AND `itemName` matches the configured needle AND
- * the configured member id is in the shuffled queue, move that id to
- * `VITE_SURE_WIN_SLOT_INDEX` (clamped to the last valid index when the queue
- * is shorter than the configured slot). Otherwise return the input unchanged.
+ * If the sure-win flag is on AND `itemName` matches a configured rule AND
+ * the configured member id is in the shuffled queue, move that id to the
+ * rule's slot index (clamped to the last valid index when the queue is shorter
+ * than the configured slot). Otherwise return the input unchanged.
  *
  * Other rows keep their original random order — we just splice the target
  * out and reinsert at the configured slot, so the "neighbour" placed at
@@ -91,10 +122,11 @@ export function applySureWinPin(shuffledIds: number[], itemName: string): number
   if (!CONFIG.enabled || CONFIG.memberId == null) return shuffledIds;
   if (shuffledIds.length === 0) return shuffledIds;
   const haystack = normalizeItemName(itemName);
-  if (!haystack.includes(CONFIG.itemNeedle)) return shuffledIds;
+  const rule = findMatchingRule(haystack);
+  if (rule == null) return shuffledIds;
   const idx = shuffledIds.indexOf(CONFIG.memberId);
   if (idx < 0) return shuffledIds;
-  const targetIdx = Math.min(CONFIG.slotIndex, shuffledIds.length - 1);
+  const targetIdx = Math.min(rule.slotIndex, shuffledIds.length - 1);
   if (idx === targetIdx) return shuffledIds;
   const next = shuffledIds.slice();
   next.splice(idx, 1);

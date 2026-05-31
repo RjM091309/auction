@@ -8,7 +8,7 @@ export const MAX_BIDDER_AUDIT_LOG_ROWS = 1000;
  * @typedef {
  *   | 'approve'|'reject'|'create'|'edit'|'delete'
  *   | 'shuffle_start'|'shuffle_reset'|'event_mode_change'|'winner_limits_set'|'clear_all_queues'
- *   | 'queue_remove'
+ *   | 'queue_remove'|'winner_mark_adjust'
  * } AdminAuditAction
  */
 
@@ -228,6 +228,13 @@ export function buildWinnerLimitsDetails(prev, body) {
       field: 'feathers',
       from: String(num(a.feathers)),
       to: String(num(b.feathers)),
+    });
+  }
+  if (num(a.feathersItemsPerWinner) !== num(b.feathersItemsPerWinner)) {
+    changes.push({
+      field: 'feathersItemsPerWinner',
+      from: String(num(a.feathersItemsPerWinner)),
+      to: String(num(b.feathersItemsPerWinner)),
     });
   }
   const aMap =

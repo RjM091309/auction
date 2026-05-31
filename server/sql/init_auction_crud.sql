@@ -3,7 +3,7 @@
 -- Manual: mysql -u USER -p DATABASE < server/sql/init_auction_crud.sql
 
 -- app_meta: data_version; winner_shortlist_ui; shuffle_locked; free_draw_chosen_by_item (JSON itemId→memberId);
--- auction_week_monday (YYYY-MM-DD); weekly_type_wins (JSON [{ign, t}])
+-- auction_week_monday (YYYY-MM-DD); weekly_type_wins (JSON [{ign, t, itemId?, at?}])
 -- winner_mark_log TABLE: one row per admin green-check (see server migrateWinnerMarkLogTable)
 -- = completed auction + winner_name lang (green check); natalo pwede ulit mag-bid
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS bidder_audit_log (
   action ENUM(
     'approve', 'reject', 'create', 'edit', 'delete',
     'shuffle_start', 'shuffle_reset', 'event_mode_change',
-    'winner_limits_set', 'clear_all_queues', 'queue_remove'
+    'winner_limits_set', 'clear_all_queues', 'queue_remove', 'winner_mark_adjust'
   ) NOT NULL,
   target_member_id BIGINT UNSIGNED NULL,
   target_name VARCHAR(255) NOT NULL,

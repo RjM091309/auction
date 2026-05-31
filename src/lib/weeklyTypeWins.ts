@@ -1,17 +1,22 @@
-import type { WeeklyTypeWin } from '../types';
+import type { AuctionItem, WeeklyTypeWin } from '../types';
+import {
+  findEmperiumWinCooldown,
+  pruneExpiredEmperiumWins,
+} from './emperiumWinCooldown';
 
 export function normalizeIgn(name: string): string {
   return name.trim().toLowerCase();
 }
 
-/** May recorded win na sa type na ito ngayong linggo (green check / completed winner). */
+export { pruneExpiredEmperiumWins };
+
+/** Active Emperium Overrun cooldown only (Guild League = never). */
 export function ignHasWeeklyTypeWin(
   wins: WeeklyTypeWin[] | undefined,
   ignRaw: string,
-  itemType: string
+  item: Pick<AuctionItem, 'id' | 'name' | 'type'>,
+  eventMode?: import('../types').WeeklyEventType
 ): boolean {
-  if (!wins?.length) return false;
-  const ign = normalizeIgn(ignRaw);
-  if (!ign) return false;
-  return wins.some((w) => w.ign === ign && w.t === itemType);
+  if (!eventMode || eventMode === 'Guild League') return false;
+  return findEmperiumWinCooldown(eventMode, item, wins, ignRaw) != null;
 }

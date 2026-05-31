@@ -175,6 +175,18 @@ export async function migrateAuctionWinnerNamesJson(pool) {
   );
 }
 
+/** Admin/Developer unmarked shuffle-draw winners (persisted per item). */
+export async function migrateAuctionRevokedWinnerNamesJson(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'auction_items' AND COLUMN_NAME = 'revoked_winner_names_json'`
+  );
+  if (Array.isArray(rows) && rows.length > 0) return;
+  await pool.query(
+    `ALTER TABLE auction_items ADD COLUMN revoked_winner_names_json TEXT NULL AFTER winner_names_json`
+  );
+}
+
 /** Add per-item winner pool cap for dynamic limits (no .env edits needed). */
 export async function migrateAuctionWinnerPoolCapColumn(pool) {
   const [rows] = await pool.query(
@@ -447,7 +459,7 @@ export async function migrateBidderAuditLogTable(pool) {
       action ENUM(
         'approve', 'reject', 'create', 'edit', 'delete',
         'shuffle_start', 'shuffle_reset', 'event_mode_change',
-        'winner_limits_set', 'clear_all_queues', 'queue_remove'
+        'winner_limits_set', 'clear_all_queues', 'queue_remove', 'winner_mark_adjust'
       ) NOT NULL,
       target_member_id BIGINT UNSIGNED NULL,
       target_name VARCHAR(255) NOT NULL,
@@ -463,6 +475,7 @@ export async function migrateBidderAuditLogTable(pool) {
   `);
   await migrateBidderAuditLogAuctionActions(pool);
   await migrateBidderAuditLogQueueRemoveAction(pool);
+  await migrateBidderAuditLogWinnerMarkAdjustAction(pool);
 }
 
 /** Extend audit ENUM on DBs created before auction actions were added. */
@@ -500,7 +513,27 @@ export async function migrateBidderAuditLogQueueRemoveAction(pool) {
     ALTER TABLE bidder_audit_log MODIFY COLUMN action ENUM(
       'approve', 'reject', 'create', 'edit', 'delete',
       'shuffle_start', 'shuffle_reset', 'event_mode_change',
-      'winner_limits_set', 'clear_all_queues', 'queue_remove'
+      'winner_limits_set', 'clear_all_queues', 'queue_remove', 'winner_mark_adjust'
+    ) NOT NULL
+  `);
+}
+
+/** Add winner_mark_adjust to audit action ENUM. */
+export async function migrateBidderAuditLogWinnerMarkAdjustAction(pool) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'bidder_audit_log'
+       AND COLUMN_NAME = 'action'
+     LIMIT 1`
+  );
+  const colType = String(rows[0]?.COLUMN_TYPE ?? '').toLowerCase();
+  if (colType.includes('winner_mark_adjust')) return;
+  await pool.query(`
+    ALTER TABLE bidder_audit_log MODIFY COLUMN action ENUM(
+      'approve', 'reject', 'create', 'edit', 'delete',
+      'shuffle_start', 'shuffle_reset', 'event_mode_change',
+      'winner_limits_set', 'clear_all_queues', 'queue_remove', 'winner_mark_adjust'
     ) NOT NULL
   `);
 }

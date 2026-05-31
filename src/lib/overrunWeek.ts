@@ -1,10 +1,6 @@
-/**
- * Overrun payout week key = Sunday date in AUCTION_WEEK_TZ (default Asia/Manila).
- * We store a YYYY-MM-DD "sunday_key" to enforce idempotency (run once per Sunday).
- * Keep winner CD helpers in sync with `src/lib/overrunWeek.ts`.
- */
+import { getAuctionWeekTimezone } from './auctionWeek';
 
-import { getAuctionWeekTimezone } from './auctionWeek.js';
+const ONE_DAY_MS = 86_400_000;
 
 /** Skip this many Emperium Sundays after the win Sunday (1 = miss next Sunday only). */
 export const EMPERIUM_WIN_SKIP_SUNDAYS = 1;
@@ -12,13 +8,11 @@ export const EMPERIUM_WIN_SKIP_SUNDAYS = 1;
 /** Calendar days from win Sunday to unlock Sunday (skip 1 event → 2nd Sunday after win). */
 export const EMPERIUM_WIN_UNLOCK_DAY_OFFSET = 7 * (EMPERIUM_WIN_SKIP_SUNDAYS + 1);
 
-/**
- * @returns {string} YYYY-MM-DD for the Sunday that starts the current overrun payout day in {@link getAuctionWeekTimezone}.
- */
+/** YYYY-MM-DD for the Sunday on or before instantMs in the auction timezone. */
 export function getOverrunSundayKey(
   instantMs = Date.now(),
   timeZone = getAuctionWeekTimezone()
-) {
+): string {
   let t = instantMs;
   for (let i = 0; i < 8; i += 1) {
     const wd = new Intl.DateTimeFormat('en-US', {
@@ -33,20 +27,22 @@ export function getOverrunSundayKey(
         day: '2-digit',
       }).format(new Date(t));
     }
-    t -= 86_400_000;
+    t -= ONE_DAY_MS;
   }
   throw new Error(`[overrunWeek] could not find Sunday in TZ ${timeZone}`);
 }
 
-/** @param {string} dateKey YYYY-MM-DD @param {number} days */
-export function addDaysToDateKey(dateKey, days) {
+export function addDaysToDateKey(dateKey: string, days: number): string {
   const [y, m, d] = dateKey.split('-').map((x) => parseInt(x, 10));
   const dt = new Date(Date.UTC(y, m - 1, d + days));
   return dt.toISOString().slice(0, 10);
 }
 
-/** @param {string} dateKey @param {string} [timeZone] */
-export function startOfDateKeyMs(dateKey, timeZone = getAuctionWeekTimezone()) {
+/** First local instant of dateKey 00:00 in timeZone (for UI "until" labels). */
+export function startOfDateKeyMs(
+  dateKey: string,
+  timeZone = getAuctionWeekTimezone()
+): number {
   const [y, m, d] = dateKey.split('-').map((x) => parseInt(x, 10));
   if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
     return Date.now();
@@ -63,7 +59,8 @@ export function startOfDateKeyMs(dateKey, timeZone = getAuctionWeekTimezone()) {
       second: '2-digit',
       hour12: false,
     }).formatToParts(new Date(t));
-    const pick = (type) => parts.find((p) => p.type === type)?.value ?? '';
+    const pick = (type: string) =>
+      parts.find((p) => p.type === type)?.value ?? '';
     const key = `${pick('year')}-${pick('month')}-${pick('day')}`;
     const hour = parseInt(pick('hour'), 10);
     const minute = parseInt(pick('minute'), 10);
@@ -76,34 +73,31 @@ export function startOfDateKeyMs(dateKey, timeZone = getAuctionWeekTimezone()) {
   return Date.UTC(y, m - 1, d, 4, 0, 0);
 }
 
-/** @param {number} winAtMs @param {string} [timeZone] */
 export function emperiumWinUnlockSundayKey(
-  winAtMs,
+  winAtMs: number,
   timeZone = getAuctionWeekTimezone()
-) {
+): string {
   return addDaysToDateKey(
     getOverrunSundayKey(winAtMs, timeZone),
     EMPERIUM_WIN_UNLOCK_DAY_OFFSET
   );
 }
 
-/** @param {number} winAtMs @param {string} [timeZone] */
 export function emperiumWinCooldownExpiresAt(
-  winAtMs,
+  winAtMs: number,
   timeZone = getAuctionWeekTimezone()
-) {
+): number {
   return startOfDateKeyMs(emperiumWinUnlockSundayKey(winAtMs, timeZone), timeZone);
 }
 
-/** @param {number} winAtMs @param {number} [nowMs] @param {string} [timeZone] */
+/** True while the win still blocks the next Emperium Sunday (1-week / 1-event skip). */
 export function isEmperiumWinStillOnCooldown(
-  winAtMs,
+  winAtMs: number,
   nowMs = Date.now(),
   timeZone = getAuctionWeekTimezone()
-) {
+): boolean {
   if (!Number.isFinite(winAtMs) || winAtMs <= 0) return false;
   const unlockSun = emperiumWinUnlockSundayKey(winAtMs, timeZone);
   const nowSun = getOverrunSundayKey(nowMs, timeZone);
   return nowSun < unlockSun;
 }
-

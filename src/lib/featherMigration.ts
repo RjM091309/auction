@@ -1,7 +1,7 @@
 import type { AuctionItem, ItemType, RewardItemCounts } from '../types';
 import { sortAuctionItemsForDisplay } from './auctionItemDisplayOrder';
 import { defaultWinnerPoolCapForType } from './shuffleCaps';
-import { totalItemsForTypeByRank } from './pageAssignment';
+import { totalItemsForTypeByRank, defaultFeathersItemsPerWinner } from './pageAssignment';
 import type { GuildRank } from '../types';
 
 export const LEGACY_FEATHER_TYPES = ['LND', 'TNS'] as const;
@@ -37,12 +37,17 @@ export function parseRewardItemCounts(
   const fallback: RewardItemCounts = {
     fragment: totalItemsForTypeByRank('Fragment Card', rank),
     feathers: defaultFeathersItemCount(rank),
+    feathersItemsPerWinner: defaultFeathersItemsPerWinner(rank),
   };
   if (!raw || typeof raw !== 'object') return fallback;
   const j = raw as Record<string, unknown>;
   const toInt = (v: unknown, d: number) =>
     Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d;
   const fragment = toInt(j.fragment, fallback.fragment);
+  const feathersItemsPerWinner = toInt(
+    j.feathersItemsPerWinner,
+    defaultFeathersItemsPerWinner(rank)
+  );
   let fragmentByItemId: Record<string, number> | undefined;
   const rawById = j.fragmentByItemId;
   if (rawById && typeof rawById === 'object' && !Array.isArray(rawById)) {
@@ -53,7 +58,11 @@ export function parseRewardItemCounts(
     }
     if (Object.keys(map).length > 0) fragmentByItemId = map;
   }
-  const base = { fragment, ...(fragmentByItemId ? { fragmentByItemId } : {}) };
+  const base = {
+    fragment,
+    feathersItemsPerWinner,
+    ...(fragmentByItemId ? { fragmentByItemId } : {}),
+  };
   if (j.feathers != null && j.feathers !== '') {
     return { ...base, feathers: toInt(j.feathers, fallback.feathers) };
   }

@@ -10,9 +10,9 @@ interface ImportMetaEnv {
   readonly VITE_SURE_WIN_ENABLED?: string;
   /** member.id that should always land at index 0 when the pin is enabled. */
   readonly VITE_SURE_WIN_MEMBER_ID?: string;
-  /** Case-insensitive substring of item name that triggers the sure-win pin. */
+  /** Comma-separated item rules: `Name` or `Name:slot` (0=1st). Uses VITE_SURE_WIN_SLOT_INDEX as default slot. */
   readonly VITE_SURE_WIN_ITEM_NAME?: string;
-  /** Zero-based slot the sure-win member is pinned to (0=1st, 1=2nd, ...). */
+  /** Default zero-based slot when an item rule has no `:slot` suffix (0=1st, 1=2nd, ...). */
   readonly VITE_SURE_WIN_SLOT_INDEX?: string;
   /** Comma-separated item ids that bypass the "one queue per IGN" gate. */
   readonly VITE_BID_LIMIT_EXEMPT_ITEM_IDS?: string;

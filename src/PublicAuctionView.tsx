@@ -32,11 +32,14 @@ import {
   swal2QueueAlreadyListed,
   swal2QueueAlreadyOnAnotherItem,
   swal2QueueMemberAdded,
+  swal2EmperiumWinCooldown,
 } from './lib/sweetAlert2';
 import {
   findOtherActiveQueueBlockingWithMatch,
   shuffleLockClosesPublicSignup,
 } from './lib/queueEligibility';
+import { emperiumWinCooldownExpiresAt } from './lib/overrunWeek';
+import { findEmperiumWinCooldown } from './lib/emperiumWinCooldown';
 import {
   matchingIgnOnQueueItem,
 } from './lib/ignQueueIdentity';
@@ -54,6 +57,7 @@ import {
 } from './lib/auctionItemDisplayOrder';
 import { fragmentCountForItem } from './lib/featherMigration';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
+import { resolveEffectiveRewardContext, displayWinnerPoolCapForItem } from './lib/rewardContext';
 import {
   computeWinnerAssignmentLabelsFromItems,
   featherItemsPerWinnerUnit,
@@ -135,8 +139,13 @@ export default function PublicAuctionView() {
   const startPublicShuffleVisual = useCallback((snapshot: AuctionState) => {
     if (publicShuffleRunningRef.current) return;
     publicShuffleRunningRef.current = true;
+    const shuffleReward = resolveEffectiveRewardContext(snapshot);
     const activeItems = sortAuctionItemsForDisplay(
-      snapshot.items.filter((it) => it.status === 'active')
+      snapshot.items.filter(
+        (it) =>
+          it.status === 'active' &&
+          !isAuctionItemHidden(it, snapshot.eventMode)
+      )
     );
     const previewQueueByItemId: Record<string, number[]> = {};
     for (const it of activeItems) {
@@ -172,7 +181,13 @@ export default function PublicAuctionView() {
           if (len <= 0) continue;
           const winnerSlots = Math.max(
             0,
-            item ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap) : 0
+            item
+              ? displayWinnerPoolCapForItem(
+                  item,
+                  shuffleReward.rank,
+                  shuffleReward.counts
+                )
+              : 0
           );
           const window = item
             ? shuffleRevealWindowForItem(item, activeItems)
@@ -365,7 +380,7 @@ export default function PublicAuctionView() {
         });
         return;
       }
-      if (isAuctionItemHidden(card)) {
+      if (isAuctionItemHidden(card, fresh.eventMode)) {
         void Swal.fire({
           icon: 'error',
           title: 'Not available',
@@ -400,6 +415,21 @@ export default function PublicAuctionView() {
           ign: raw,
           itemName: displayAuctionItemName(card.name),
           matchedIgn: matchedOnCard,
+        });
+        return;
+      }
+
+      const cooldown = findEmperiumWinCooldown(
+        fresh.eventMode,
+        card,
+        fresh.weeklyTypeWins,
+        raw
+      );
+      if (cooldown) {
+        void swal2EmperiumWinCooldown({
+          ign: raw,
+          itemName: displayAuctionItemName(card.name),
+          expiresAt: cooldown.expiresAt,
         });
         return;
       }
@@ -449,6 +479,15 @@ export default function PublicAuctionView() {
             ),
             matchedIgn: err.extra?.matchedIgn,
           });
+        } else if (err.code === 'emperium_win_cooldown') {
+          void swal2EmperiumWinCooldown({
+            ign: raw,
+            itemName: displayAuctionItemName(
+              err.extra?.itemName ?? queueModalItem?.name ?? 'this item'
+            ),
+            expiresAt:
+              err.extra?.expiresAt ?? emperiumWinCooldownExpiresAt(Date.now()),
+          });
         } else if (err.code === 'shuffle_locked') {
           void Swal.fire({
             icon: 'info',
@@ -483,29 +522,39 @@ export default function PublicAuctionView() {
     }
   };
 
+  const effectiveReward = useMemo(
+    () => (state ? resolveEffectiveRewardContext(state) : null),
+    [state]
+  );
+
   const activeItems = useMemo(
     () =>
       sortAuctionItemsForDisplay(
         state?.items.filter(
-          (i) => i.status === 'active' && !isAuctionItemHidden(i)
+          (i) =>
+            i.status === 'active' &&
+            !isAuctionItemHidden(i, state?.eventMode)
         ) ?? []
       ),
-    [state]
+    [state?.items, state?.eventMode]
   );
 
   /** Match admin: if Fragment (etc.) is hidden, center 1–2 cards instead of a sparse grid. */
   const centerFewPublicQueueCards =
     activeItems.length > 0 && activeItems.length < 3;
   const featherPageStartByItemId = useMemo(() => {
-    const rank = parseGuildRank(state?.rewardRank);
-    const counts = state?.rewardItemCounts ?? {
-      fragment: totalItemsForTypeByRank('Fragment Card', rank),
-      feathers: totalItemsForTypeByRank('Feathers', rank),
-    };
+    const rank =
+      effectiveReward?.rank ?? parseGuildRank(state?.rewardRank);
+    const counts =
+      effectiveReward?.counts ?? {
+        fragment: totalItemsForTypeByRank('Fragment Card', rank),
+        feathers: totalItemsForTypeByRank('Feathers', rank),
+      };
     const featherItems = (state?.items ?? [])
       .filter(
         (it) =>
           it.status === 'active' &&
+          !isAuctionItemHidden(it, state?.eventMode) &&
           (it.type === 'Fragment Card' || it.type === 'Feathers')
       )
       .sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
@@ -523,19 +572,20 @@ export default function PublicAuctionView() {
           : featherRewardSpanFourItemPages(it.type, totalItems);
     }
     return out;
-  }, [state?.items, state?.rewardRank, state?.rewardItemCounts]);
+  }, [state?.items, state?.eventMode, effectiveReward]);
 
   const publicRewardRank = useMemo(
-    () => parseGuildRank(state?.rewardRank),
-    [state?.rewardRank]
+    () =>
+      effectiveReward?.rank ?? parseGuildRank(state?.rewardRank),
+    [effectiveReward, state?.rewardRank]
   );
   const publicRewardItemCounts = useMemo(
     () =>
-      state?.rewardItemCounts ?? {
+      effectiveReward?.counts ?? {
         fragment: totalItemsForTypeByRank('Fragment Card', publicRewardRank),
         feathers: totalItemsForTypeByRank('Feathers', publicRewardRank),
       },
-    [state?.rewardItemCounts, publicRewardRank]
+    [effectiveReward, publicRewardRank]
   );
 
   const bidderStateLogEntries = state?.bidderStateLog ?? [];
@@ -555,9 +605,9 @@ export default function PublicAuctionView() {
       countQueuedIgnByNormalized(
         state?.items ?? [],
         state?.members ?? [],
-        isAuctionItemHidden
+        (it) => isAuctionItemHidden(it, state?.eventMode)
       ),
-    [state?.items, state?.members]
+    [state?.items, state?.members, state?.eventMode]
   );
 
   const bidderStatsByIgn = useMemo(
@@ -748,7 +798,11 @@ export default function PublicAuctionView() {
                           shufflePreviewIds={publicShuffleUi.previewQueueByItemId[item.id]}
                           shuffleDone={
                             (publicShuffleUi.revealCountByItemId[item.id] ?? 0) >=
-                            maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
+                            displayWinnerPoolCapForItem(
+                              item,
+                              publicRewardRank,
+                              publicRewardItemCounts
+                            )
                           }
                           showWinnerShortlist={
                             state?.winnerShortlistUiEnabled === true
@@ -1161,15 +1215,11 @@ function PublicQueueCard({
     isShuffling && Array.isArray(shufflePreviewIds)
       ? shufflePreviewIds
       : item.interestedMemberIds;
-  const shortlistSlots = showWinnerShortlist
-    ? maxQueueSlotsAfterShuffle(item.type, item.winnerPoolCap)
-    : 0;
+  const poolCap = displayWinnerPoolCapForItem(item, rewardRank, rewardItemCounts);
+  const shortlistSlots = showWinnerShortlist ? poolCap : 0;
 
   /** Same cap as admin shortlist rows after “Shuffle all queues”. */
-  const winnerPickPoolSize = maxQueueSlotsAfterShuffle(
-    item.type,
-    item.winnerPoolCap
-  );
+  const winnerPickPoolSize = poolCap;
   const winnerPageRanges = (() => {
     const totalItems =
       item.type === 'Fragment Card'
@@ -1186,21 +1236,32 @@ function PublicQueueCard({
       totalItems,
       item.interestedMemberIds.length,
       pageStart,
-      rewardRank
+      rewardRank,
+      rewardItemCounts
     );
   })();
   const freeItems =
     item.type === 'Feathers'
-      ? freeItemsFromTotalItems(item.type, rewardItemCounts.feathers, rewardRank)
+      ? freeItemsFromTotalItems(
+          item.type,
+          rewardItemCounts.feathers,
+          rewardRank,
+          rewardItemCounts
+        )
       : 0;
   const freePageInfo = (() => {
     if (item.type !== 'Feathers') return null;
     const pageStart = featherPageStart ?? 1;
     const totalItems = rewardItemCounts.feathers;
-    const offset = featherPageCountBeforePartialFree(item.type, totalItems, rewardRank);
+    const offset = featherPageCountBeforePartialFree(
+      item.type,
+      totalItems,
+      rewardRank,
+      rewardItemCounts
+    );
     return freeItems > 0 ? { pageLabel: `P${pageStart + offset}`, freeItems } : null;
   })();
-  const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank);
+  const featherSlotUnit = featherItemsPerWinnerUnit(rewardRank, rewardItemCounts);
   const resolvedRevealCount =
     typeof shuffleRevealCount === 'number' && Number.isInteger(shuffleRevealCount)
       ? Math.max(0, Math.min(shuffleRevealCount, displayIds.length))

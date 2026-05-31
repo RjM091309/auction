@@ -11,7 +11,8 @@ export type BidderAuditAction =
   | 'event_mode_change'
   | 'winner_limits_set'
   | 'clear_all_queues'
-  | 'queue_remove';
+  | 'queue_remove'
+  | 'winner_mark_adjust';
 
 export interface BidderAuditChange {
   field: string;
@@ -55,6 +56,7 @@ const VALID_ACTIONS = new Set<string>([
   'winner_limits_set',
   'clear_all_queues',
   'queue_remove',
+  'winner_mark_adjust',
 ]);
 
 const cred: RequestInit = { credentials: 'include' };

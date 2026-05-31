@@ -17,7 +17,6 @@ import {
   EyeOff,
   Loader2,
   ShieldCheck,
-  UserPlus,
   XCircle,
 } from 'lucide-react';
 import Swal from 'sweetalert2';
@@ -227,12 +226,19 @@ export default function RegistrationPage() {
         <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/40">
           <header className="border-b border-slate-800 bg-gradient-to-br from-blue-600/15 via-slate-900 to-slate-900 px-6 py-7">
             <div className="flex items-center gap-3">
-              <div className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-600/20 text-blue-300">
-                <UserPlus className="h-6 w-6" aria-hidden />
+              <div className="inline-flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-slate-900 p-0.5 ring-1 ring-slate-700 shadow-lg shadow-black/30">
+                <img
+                  src="/images/OUTLAST_RO.png"
+                  alt="Outlast Guild"
+                  className="h-full w-full object-contain"
+                  width={48}
+                  height={48}
+                  decoding="async"
+                />
               </div>
               <div>
                 <h1 className="text-xl font-black tracking-tight text-white">
-                  Guild registration
+                  Outlast Guild registration
                 </h1>
                 <p className="mt-0.5 text-xs leading-snug text-slate-400">
                   Sign up to join auction queues. 

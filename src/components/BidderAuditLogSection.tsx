@@ -45,6 +45,7 @@ const ACTION_FILTERS: { id: 'all' | BidderAuditAction; label: string }[] = [
   { id: 'winner_limits_set', label: 'Limits' },
   { id: 'clear_all_queues', label: 'Clear all' },
   { id: 'queue_remove', label: 'Remove bid' },
+  { id: 'winner_mark_adjust', label: 'Winner mark' },
 ];
 
 function actionLabel(action: BidderAuditAction): string {
@@ -66,11 +67,13 @@ function actionLabel(action: BidderAuditAction): string {
     case 'event_mode_change':
       return 'Event mode';
     case 'winner_limits_set':
-      return 'Winner limits';
+      return 'Winner Settings';
     case 'clear_all_queues':
       return 'Clear all';
     case 'queue_remove':
       return 'Removed from queue';
+    case 'winner_mark_adjust':
+      return 'Winner mark adjusted';
     default:
       return action;
   }
@@ -100,6 +103,8 @@ function actionBadgeClass(action: BidderAuditAction): string {
       return 'border-rose-500/30 bg-rose-950/30 text-rose-200';
     case 'queue_remove':
       return 'border-pink-500/40 bg-pink-500/10 text-pink-300';
+    case 'winner_mark_adjust':
+      return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
     default:
       return 'border-slate-600 bg-slate-800 text-slate-400';
   }
@@ -130,6 +135,8 @@ function ActionIcon({ action }: { action: BidderAuditAction }) {
       return <ListX className={cls} aria-hidden />;
     case 'queue_remove':
       return <UserMinus className={cls} aria-hidden />;
+    case 'winner_mark_adjust':
+      return <Check className={cls} aria-hidden />;
     default:
       return null;
   }
@@ -159,6 +166,8 @@ function actionTitleColor(action: BidderAuditAction): string {
       return 'text-rose-200';
     case 'queue_remove':
       return 'text-pink-300';
+    case 'winner_mark_adjust':
+      return 'text-emerald-300';
     default:
       return 'text-slate-400';
   }
@@ -301,6 +310,13 @@ function AuditDetails({ entry }: { entry: BidderAuditEntry }) {
     );
   }
   if (entry.action === 'shuffle_start' && d.eventMode) {
+    return (
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+        Event: <span className="text-slate-300">{d.eventMode}</span>
+      </p>
+    );
+  }
+  if (entry.action === 'winner_mark_adjust' && d.eventMode) {
     return (
       <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
         Event: <span className="text-slate-300">{d.eventMode}</span>

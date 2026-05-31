@@ -9,6 +9,7 @@ import {
   migrateMembersOfficerRole,
   migrateMembersPasswordColumn,
   migrateAuctionWinnerNamesJson,
+  migrateAuctionRevokedWinnerNamesJson,
   migrateAuctionWinnerPoolCapColumn,
   migrateWinnerMarkLogTable,
   migrateBidderStateLogTable,
@@ -350,16 +351,42 @@ app.put('/api/state', requireAuth, async (req, res) => {
       if (!actor) {
         return res
           .status(401)
-          .json({ error: 'You must sign in as Officer/Admin/Developer to change winner set limits' });
+          .json({ error: 'You must sign in as Officer/Admin/Developer to change Winner Settings' });
       }
       pendingAudits.push({
         action: 'winner_limits_set',
         actor,
-        targetName: 'Winner set limits',
+        targetName: 'Winner Settings',
         details: buildWinnerLimitsDetails(prev, req.body),
       });
       console.log(
         `[audit] winner-limits-set rank=${req.body?.rewardRank ?? '?'} by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
+      );
+    }
+
+    if (
+      prev.shuffleLocked === true &&
+      recordedWinnerNamesChanged(prev, req.body)
+    ) {
+      const actor = await getFreshActor(pool, token);
+      if (!actor) {
+        return res.status(401).json({
+          error: 'You must sign in as Admin or Developer to adjust winner marks',
+        });
+      }
+      if (actor.role !== 'Admin' && actor.role !== 'Developer') {
+        return res.status(403).json({
+          error: 'Only Admin or Developer can adjust winner marks after shuffle',
+        });
+      }
+      pendingAudits.push({
+        action: 'winner_mark_adjust',
+        actor,
+        targetName: 'Winner marks adjusted',
+        details: { eventMode: prev.eventMode ?? 'Emperium Overrun' },
+      });
+      console.log(
+        `[audit] winner-mark-adjust by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
       );
     }
 
@@ -397,7 +424,10 @@ app.put('/api/state', requireAuth, async (req, res) => {
   } catch (e) {
     const code = e.statusCode ?? 500;
     if (code >= 500) console.error(e);
-    res.status(code).json({ error: String(e.message) });
+    const payload = { error: String(e.message ?? 'Error') };
+    if (e.code) payload.code = e.code;
+    if (e.extra) payload.extra = e.extra;
+    res.status(code).json(payload);
   }
 });
 
@@ -414,6 +444,12 @@ app.delete('/api/items/:itemId/queue/:memberId', requireAuth, async (req, res) =
     const itemId = String(req.params.itemId ?? '').trim();
     const memberId = parseInt(String(req.params.memberId ?? '').trim(), 10);
     const before = await getFullState(pool);
+    if (before.shuffleLocked === true) {
+      return res.status(409).json({
+        error: 'Cannot remove from queue while shuffle results are locked. Reset shuffle first.',
+        code: 'shuffle_locked',
+      });
+    }
     const item = before.items.find((i) => i.id === itemId);
     const member = before.members.find((m) => m.id === memberId);
     const state = await removeMemberFromItemQueue(pool, itemId, memberId);
@@ -474,6 +510,7 @@ function winnerLimitsChanged(prev, body) {
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
   if (num(a.fragment) !== num(b.fragment)) return true;
   if (num(a.feathers) !== num(b.feathers)) return true;
+  if (num(a.feathersItemsPerWinner) !== num(b.feathersItemsPerWinner)) return true;
   const aMap =
     a.fragmentByItemId && typeof a.fragmentByItemId === 'object'
       ? a.fragmentByItemId
@@ -485,6 +522,22 @@ function winnerLimitsChanged(prev, body) {
   const keys = new Set([...Object.keys(aMap), ...Object.keys(bMap)]);
   for (const k of keys) {
     if (num(aMap[k]) !== num(bMap[k])) return true;
+  }
+  return false;
+}
+
+/** True when any item's admin winner marks changed (recorded or revoked). */
+function recordedWinnerNamesChanged(prev, body) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.items)) return false;
+  const prevById = new Map((prev?.items ?? []).map((i) => [i.id, i]));
+  for (const it of body.items) {
+    const pi = prevById.get(it.id);
+    const a = JSON.stringify(pi?.recordedWinnerNames ?? []);
+    const b = JSON.stringify(it.recordedWinnerNames ?? []);
+    if (a !== b) return true;
+    const ra = JSON.stringify(pi?.revokedWinnerNames ?? []);
+    const rb = JSON.stringify(it.revokedWinnerNames ?? []);
+    if (ra !== rb) return true;
   }
   return false;
 }
@@ -765,6 +818,7 @@ async function main() {
   await migrateMembersPasswordColumn(pool);
   await migrateMembersApprovalStatusColumn(pool);
   await migrateAuctionWinnerNamesJson(pool);
+  await migrateAuctionRevokedWinnerNamesJson(pool);
   await migrateAuctionWinnerPoolCapColumn(pool);
   await migrateWinnerMarkLogTable(pool);
   await migrateBidderStateLogTable(pool);
