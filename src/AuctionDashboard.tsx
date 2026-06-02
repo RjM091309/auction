@@ -509,12 +509,22 @@ export default function AuctionDashboard() {
           remote != null
             ? mergeQueuesForPersist(snap, remote, queueBaselineRef.current)
             : snap;
-        let toSave = normalizeQueuesForEventMode(merged);
+        // Dedupe + caps must follow the server's event mode (e.g. Tuesday Guild
+        // League) even if this tab still has Sunday Emperium in memory.
+        const forNormalize =
+          remote != null
+            ? {
+                ...merged,
+                eventMode: remote.eventMode ?? merged.eventMode,
+              }
+            : merged;
+        let toSave = normalizeQueuesForEventMode(forNormalize);
         // Client normalization can rewrite reward limits for display; keep the
         // server snapshot on PUT so routine queue edits don't require Officer auth.
         if (remote != null) {
           toSave = {
             ...toSave,
+            eventMode: remote.eventMode ?? toSave.eventMode,
             rewardRank: remote.rewardRank ?? toSave.rewardRank,
             rewardItemCounts: remote.rewardItemCounts ?? toSave.rewardItemCounts,
           };
