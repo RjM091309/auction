@@ -499,8 +499,9 @@ export async function publicAddBidToQueue(pool, body) {
   }
 
   const state = await getFullState(pool);
+  const eventMode = state.eventMode ?? defaultEventMode();
 
-  if (shuffleLockClosesPublicSignup(state.shuffleLocked === true, state.eventMode)) {
+  if (shuffleLockClosesPublicSignup(state.shuffleLocked === true, eventMode)) {
     throw clientError(400, 'Queue signup is closed until the next reset', {
       code: 'shuffle_locked',
     });
@@ -527,8 +528,6 @@ export async function publicAddBidToQueue(pool, body) {
       extra: { itemName: card.name, matchedIgn: matchedOnCard },
     });
   }
-
-  const eventMode = state.eventMode ?? defaultEventMode();
 
   const cooldown = findEmperiumWinCooldown(
     eventMode,

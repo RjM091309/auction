@@ -52,11 +52,14 @@ import {
   weeklyTypeWinBlocksQueueJoin,
 } from './lib/queueEligibility';
 import { findEmperiumWinCooldown } from './lib/emperiumWinCooldown';
+import { emperiumWinCooldownExpiresAt } from './lib/overrunWeek';
 import {
   deactivateMemberOnServer,
   removeMemberFromItemQueueOnServer,
   fetchAuctionState,
   persistAuctionState,
+  publicAddBidToQueue,
+  PublicAddBidError,
   setEventModeOnServer,
   clearAllActiveQueuesOnServer,
 } from './lib/apiState';
@@ -506,7 +509,16 @@ export default function AuctionDashboard() {
           remote != null
             ? mergeQueuesForPersist(snap, remote, queueBaselineRef.current)
             : snap;
-        const toSave = normalizeQueuesForEventMode(merged);
+        let toSave = normalizeQueuesForEventMode(merged);
+        // Client normalization can rewrite reward limits for display; keep the
+        // server snapshot on PUT so routine queue edits don't require Officer auth.
+        if (remote != null) {
+          toSave = {
+            ...toSave,
+            rewardRank: remote.rewardRank ?? toSave.rewardRank,
+            rewardItemCounts: remote.rewardItemCounts ?? toSave.rewardItemCounts,
+          };
+        }
         return persistAuctionState(toSave);
       })()
         .then((server) => {
@@ -1895,11 +1907,13 @@ export default function AuctionDashboard() {
         token
       );
       queueBaselineRef.current = buildQueueBaselineFromState(server);
+      cancelPendingPersist();
+      skipPersistOnceRef.current = true;
       setState(
-          normalizeWinnerPoolCapsForLimits(
-            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
-          )
-        );
+        normalizeWinnerPoolCapsForLimits(
+          dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
+        )
+      );
       notifyBidderAuditChanged();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -2230,116 +2244,73 @@ export default function AuctionDashboard() {
         return;
       }
 
-      // Same immediate-save pattern as `handleQueueMove` — no debounced
-      // optimistic update + polling race; the result of this user action
-      // becomes the new server state in one round-trip.
+      // Queue-only endpoint — avoids full `/api/state` PUT, which requires
+      // Officer/Admin/Developer when reward limits differ from the snapshot
+      // (e.g. after client-side `normalizeWinnerPoolCapsForLimits`).
       cancelPendingPersist();
       persistInFlightRef.current = true;
       skipPersistAfterPollRef.current = false;
 
-      const remote = await fetchAuctionState();
-      const base = remote
-        ? normalizeWinnerPoolCapsForLimits(
-            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote))
-          )
-        : state
-          ? normalizeWinnerPoolCapsForLimits(
-              dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(state))
-            )
-          : null;
-      if (!base) {
-        void swal2SaveError('Could not load latest auction state.');
-        return;
-      }
-
-      const card = base.items.find((it) => it.id === itemId);
-      if (!card) {
-        void swal2SaveError('Auction card not found.');
-        closeJoinQueueModal();
-        return;
-      }
-
-      const matchedOnCard = matchingIgnOnQueueItem(card, base.members, raw);
-      if (matchedOnCard) {
-        setState(base);
-        void swal2QueueAlreadyListed({
-          ign: raw,
-          itemName: displayAuctionItemName(card.name),
-          matchedIgn: matchedOnCard,
-        });
-        closeJoinQueueModal();
-        return;
-      }
-
-      const cooldown = findEmperiumWinCooldown(
-        base.eventMode,
-        card,
-        base.weeklyTypeWins,
-        raw
-      );
-      if (cooldown) {
-        setState(base);
-        void swal2EmperiumWinCooldown({
-          ign: raw,
-          itemName: displayAuctionItemName(card.name),
-          expiresAt: cooldown.expiresAt,
-        });
-        closeJoinQueueModal();
-        return;
-      }
-
-      const otherBlock = findOtherActiveQueueBlockingWithMatch(
-        base.eventMode,
-        base.items,
-        base.members,
-        raw,
-        itemId,
-        card.type
-      );
-      if (otherBlock) {
-        setState(base);
-        void swal2QueueAlreadyOnAnotherItem({
-          ign: raw,
-          otherItemName: displayAuctionItemName(otherBlock.item.name),
-          matchedIgn: otherBlock.matchedIgn,
-        });
-        closeJoinQueueModal();
-        return;
-      }
-
-      const existing = findMemberByIgnIdentity(base.members, raw);
-      const memberId = existing?.id ?? nextTempMemberId();
-      const mid = existing?.id ?? memberId;
-      const members = existing
-        ? base.members
-        : [...base.members, { id: mid, name: raw, role: 'Member' as const }];
-      const items = base.items.map((it) => {
-        if (it.id !== itemId) return it;
-        if (it.interestedMemberIds.includes(mid)) return it;
-        return { ...it, interestedMemberIds: [...it.interestedMemberIds, mid] };
-      });
-
-      // Optimistic apply + tell state-effect not to schedule a debounce.
+      const server = await publicAddBidToQueue(itemId, raw);
+      queueBaselineRef.current = buildQueueBaselineFromState(server);
       skipPersistOnceRef.current = true;
-      const nextState: AuctionState = { ...base, members, items };
-      setState(nextState);
-
-      const server = await persistAuctionState(nextState);
-      if (server) {
-        queueBaselineRef.current = buildQueueBaselineFromState(server);
-        skipPersistOnceRef.current = true;
-        setState(
-          normalizeWinnerPoolCapsForLimits(
-            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
-          )
-        );
-      }
+      setState(
+        normalizeWinnerPoolCapsForLimits(
+          dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
+        )
+      );
+      const cardName =
+        server.items.find((it) => it.id === itemId)?.name ??
+        queueModalItem?.name ??
+        'this item';
       void swal2QueueMemberAdded({
         ign: raw,
-        itemName: displayAuctionItemName(card.name),
+        itemName: displayAuctionItemName(cardName),
       });
       closeJoinQueueModal();
     } catch (e) {
+      if (e instanceof PublicAddBidError) {
+        if (e.code === 'already_listed') {
+          void swal2QueueAlreadyListed({
+            ign: raw,
+            itemName: displayAuctionItemName(
+              e.extra?.itemName ?? queueModalItem?.name ?? 'this item'
+            ),
+            matchedIgn: e.extra?.matchedIgn,
+          });
+          closeJoinQueueModal();
+          return;
+        }
+        if (e.code === 'on_other_item') {
+          void swal2QueueAlreadyOnAnotherItem({
+            ign: raw,
+            otherItemName: displayAuctionItemName(
+              e.extra?.otherItemName ?? 'another item'
+            ),
+            matchedIgn: e.extra?.matchedIgn,
+          });
+          closeJoinQueueModal();
+          return;
+        }
+        if (e.code === 'emperium_win_cooldown') {
+          void swal2EmperiumWinCooldown({
+            ign: raw,
+            itemName: displayAuctionItemName(
+              e.extra?.itemName ?? queueModalItem?.name ?? 'this item'
+            ),
+            expiresAt:
+              e.extra?.expiresAt ?? emperiumWinCooldownExpiresAt(Date.now()),
+          });
+          closeJoinQueueModal();
+          return;
+        }
+        if (e.code === 'shuffle_locked') {
+          void swal2SaveError(
+            e.message || 'Queue signup is closed until the next reset.'
+          );
+          return;
+        }
+      }
       const msg = e instanceof Error ? e.message : String(e);
       void swal2SaveError(msg || 'Could not join the queue');
       try {

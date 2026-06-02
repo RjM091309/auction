@@ -447,7 +447,7 @@ export function BidderAuthForm({
       </div>
       <div>
         <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400">
-          Password / ingame ID number
+          Password
         </label>
         <div className="relative mt-1.5">
           <input
@@ -457,7 +457,7 @@ export function BidderAuthForm({
             disabled={submitting}
             autoComplete="current-password"
             className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 pr-10 font-mono text-sm text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-blue-500 disabled:opacity-50"
-            placeholder="Enter your password or ingame ID number"
+            placeholder="Enter your password"
           />
           <button
             type="button"
