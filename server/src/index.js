@@ -66,6 +66,7 @@ import {
 } from './overrunRewards.js';
 import { getOverrunSundayKey } from './overrunWeek.js';
 import { getAuctionWeekTimezone } from './auctionWeek.js';
+import { pinShuffleQueueItems } from './sureWinPin.js';
 
 const PORT = Number(process.env.PORT ?? 3333);
 
@@ -304,6 +305,27 @@ app.post('/api/state/clear-queues', requireAuth, async (req, res) => {
       `[audit] clear-all-queues by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
     );
     res.json(state);
+  } catch (e) {
+    const code = e.statusCode ?? 500;
+    if (code >= 500) console.error(e);
+    res.status(code).json({ error: String(e.message ?? 'Error') });
+  }
+});
+
+/** Officer+ only: apply server-side sure-win pins to shuffled preview rows (no config in response). */
+app.post('/api/shuffle/pin-queues', requireAuth, async (req, res) => {
+  try {
+    const actor = await getFreshActor(pool, bearerToken(req));
+    if (!actor) {
+      return res
+        .status(401)
+        .json({ error: 'You must sign in as Officer/Admin/Developer to shuffle' });
+    }
+    const items = req.body?.items;
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ error: 'Expected { items: [...] }' });
+    }
+    res.json({ queueByItemId: pinShuffleQueueItems(items) });
   } catch (e) {
     const code = e.statusCode ?? 500;
     if (code >= 500) console.error(e);

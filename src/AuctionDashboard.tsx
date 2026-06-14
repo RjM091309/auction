@@ -57,6 +57,7 @@ import {
   deactivateMemberOnServer,
   removeMemberFromItemQueueOnServer,
   fetchAuctionState,
+  fetchPinnedShuffleQueues,
   persistAuctionState,
   publicAddBidToQueue,
   PublicAddBidError,
@@ -113,7 +114,6 @@ import {
   shuffleFreeDrawTail,
   shuffleQueueIdsForType,
 } from './lib/shuffleCaps';
-import { applySureWinPin } from './lib/sureWinPin';
 import { displayAuctionItemName } from './lib/formatAuctionItemName';
 import {
   shuffleRevealWindowForItem,
@@ -408,11 +408,13 @@ export default function AuctionDashboard() {
   const [shuffleUi, setShuffleUi] = useState<{
     active: boolean;
     spinOffsetByItemId: Record<string, number>;
+    spinPhaseByItemId: Record<string, number>;
     revealCountByItemId: Record<string, number>;
     previewQueueByItemId: Record<string, number[]>;
   }>({
     active: false,
     spinOffsetByItemId: {},
+    spinPhaseByItemId: {},
     revealCountByItemId: {},
     previewQueueByItemId: {},
   });
@@ -597,6 +599,7 @@ export default function AuctionDashboard() {
       // Bidder Registration tab has its own data source (`/api/bidders`); polling
       // the full auction state here just churns CPU on the parent component.
       if (activeTabRef.current === 'bidders') return;
+      if (shuffleRunningRef.current) return;
       if (
         persistDebouncePendingRef.current ||
         persistInFlightRef.current
@@ -604,6 +607,7 @@ export default function AuctionDashboard() {
         return;
       }
       const remote = await fetchAuctionState();
+      if (shuffleRunningRef.current) return;
       if (
         persistDebouncePendingRef.current ||
         persistInFlightRef.current
@@ -617,6 +621,7 @@ export default function AuctionDashboard() {
         auctionPollSnapshot(remote) !== auctionPollSnapshot(normalized);
 
       setState((prev) => {
+        if (shuffleRunningRef.current) return prev;
         if (
           persistDebouncePendingRef.current ||
           persistInFlightRef.current
@@ -958,30 +963,46 @@ export default function AuctionDashboard() {
     if (!ok) return;
     shuffleBearerRef.current = bearerToken;
     shuffleRunningRef.current = true;
-    const previewQueueByItemId: Record<string, number[]> = {};
+
+    const randomQueueByItemId: Record<string, number[]> = {};
     for (const it of activeItemsForShuffle) {
-      // Random shuffle first, then apply the optional "sure win" pin (env-
-      // controlled, see VITE_SURE_WIN_* in .env). Pin is a no-op when the
-      // toggle is off, the configured member did not bid on this item, or
-      // the item name does not match the configured needle.
-      const shuffled = shuffleQueueIdsForType(
+      randomQueueByItemId[it.id] = shuffleQueueIdsForType(
         it.interestedMemberIds,
         it.type
       );
-      previewQueueByItemId[it.id] = applySureWinPin(shuffled, it.name);
     }
+
+    let previewQueueByItemId: Record<string, number[]>;
+    try {
+      const pinned = await fetchPinnedShuffleQueues(
+        activeItemsForShuffle.map((it) => ({
+          id: it.id,
+          name: it.name,
+          interestedMemberIds: randomQueueByItemId[it.id] ?? [],
+        })),
+        bearerToken
+      );
+      previewQueueByItemId = { ...randomQueueByItemId, ...pinned };
+    } catch (e) {
+      shuffleRunningRef.current = false;
+      const msg = e instanceof Error ? e.message : String(e);
+      void swal2SaveError(msg || 'Could not prepare shuffle order');
+      return;
+    }
+
     setShuffleUi({
       active: true,
       spinOffsetByItemId: {},
+      spinPhaseByItemId: {},
       revealCountByItemId: {},
       previewQueueByItemId,
     });
 
     const durationMs = 20_000;
     const t0 = performance.now();
+    let lastFrameAt = t0;
     const activeItemIds = activeItemsForShuffle.map((it) => it.id);
-    let lastPickAt = 0;
-    const spinOffsetByItemIdLocal: Record<string, number> = {};
+    const spinPhaseByItemIdLocal: Record<string, number> = {};
     const tick = (now: number) => {
       if (shuffleUnmountRef.current) {
         shuffleRunningRef.current = false;
@@ -989,67 +1010,83 @@ export default function AuctionDashboard() {
         setShuffleUi({
           active: false,
           spinOffsetByItemId: {},
+          spinPhaseByItemId: {},
           revealCountByItemId: {},
           previewQueueByItemId: {},
         });
         return;
       }
+      const dt = Math.min(48, Math.max(0, now - lastFrameAt));
+      lastFrameAt = now;
       const raw = Math.min(1, (now - t0) / durationMs);
-      // Spin quickly first, then slow down while revealing winners one-by-one.
-      const pickIntervalMs = Math.round(75 + raw * 190);
-      if (lastPickAt === 0 || now - lastPickAt >= pickIntervalMs) {
-        const spinOffsetByItemId: Record<string, number> = {};
-        const revealCountByItemId: Record<string, number> = {};
-        for (const itemId of activeItemIds) {
-          const item = snapshot.items.find((it) => it.id === itemId);
-          const previewIds = previewQueueByItemId[itemId] ?? [];
-          const len = previewIds.length;
-          if (len <= 0) continue;
-          const winnerSlots = Math.max(
-            0,
-            item
-              ? displayWinnerPoolCapForItem(
-                  item,
-                  shuffleReward.rank,
-                  shuffleReward.counts
-                )
-              : 0
-          );
-          const window = item
-            ? shuffleRevealWindowForItem(item, activeItemsForShuffle)
-            : { start: 0.55, end: 1.0 };
-          const revealProgress =
-            raw <= window.start
-              ? 0
-              : raw >= window.end
-                ? 1
-                : (raw - window.start) / Math.max(0.001, window.end - window.start);
-          const revealCount = Math.min(
-            winnerSlots,
-            Math.max(0, Math.floor(revealProgress * winnerSlots))
-          );
-          revealCountByItemId[itemId] = revealCount;
-          const remaining = Math.max(0, len - revealCount);
-          const done = revealCount >= winnerSlots;
-          if (!done && remaining > 0) {
-            const prev = spinOffsetByItemIdLocal[itemId] ?? 0;
-            const step = Math.max(1, Math.floor(Math.random() * 3) + 1);
-            const next = (prev + step) % remaining;
-            spinOffsetByItemIdLocal[itemId] = next;
-            spinOffsetByItemId[itemId] = next;
+
+      const spinOffsetByItemId: Record<string, number> = {};
+      const spinPhaseByItemId: Record<string, number> = {};
+      const revealCountByItemId: Record<string, number> = {};
+      for (const itemId of activeItemIds) {
+        const item = snapshot.items.find((it) => it.id === itemId);
+        const previewIds = previewQueueByItemId[itemId] ?? [];
+        const len = previewIds.length;
+        if (len <= 0) continue;
+        const winnerSlots = Math.max(
+          0,
+          item
+            ? displayWinnerPoolCapForItem(
+                item,
+                shuffleReward.rank,
+                shuffleReward.counts
+              )
+            : 0
+        );
+        const window = item
+          ? shuffleRevealWindowForItem(item, activeItemsForShuffle)
+          : { start: 0.55, end: 1.0 };
+        const revealProgress =
+          raw <= window.start
+            ? 0
+            : raw >= window.end
+              ? 1
+              : (raw - window.start) / Math.max(0.001, window.end - window.start);
+        const revealCount = Math.min(
+          winnerSlots,
+          Math.max(0, Math.floor(revealProgress * winnerSlots))
+        );
+        revealCountByItemId[itemId] = revealCount;
+        const remaining = Math.max(0, len - revealCount);
+        const done = revealCount >= winnerSlots;
+        if (!done && remaining > 0) {
+          const preReveal = raw < window.start;
+          const inReveal =
+            raw >= window.start && raw < window.end && revealCount < winnerSlots;
+          let slotsPerSec = 0;
+          if (preReveal) {
+            const ramp = 1 - raw / Math.max(0.001, window.start);
+            slotsPerSec = 10 + ramp * 22;
+          } else if (inReveal) {
+            const slow = (raw - window.start) / Math.max(0.001, window.end - window.start);
+            slotsPerSec = Math.max(1.5, 8 * (1 - slow));
           } else {
-            spinOffsetByItemIdLocal[itemId] = 0;
-            spinOffsetByItemId[itemId] = 0;
+            slotsPerSec = 1.2;
           }
+          const nextPhase =
+            (spinPhaseByItemIdLocal[itemId] ?? 0) + (slotsPerSec * dt) / 1000;
+          spinPhaseByItemIdLocal[itemId] = nextPhase;
+          spinPhaseByItemId[itemId] = nextPhase;
+          spinOffsetByItemId[itemId] = Math.floor(nextPhase) % remaining;
+        } else {
+          spinPhaseByItemIdLocal[itemId] = 0;
+          spinPhaseByItemId[itemId] = 0;
+          spinOffsetByItemId[itemId] = 0;
         }
-        lastPickAt = now;
-        setShuffleUi({
-          active: true,
-          spinOffsetByItemId,
-          revealCountByItemId,
-          previewQueueByItemId,
-        });
       }
+
+      setShuffleUi({
+        active: true,
+        spinOffsetByItemId,
+        spinPhaseByItemId,
+        revealCountByItemId,
+        previewQueueByItemId,
+      });
 
       if (raw < 1) {
         shuffleRafRef.current = requestAnimationFrame(tick);
@@ -1066,6 +1103,7 @@ export default function AuctionDashboard() {
         setShuffleUi({
           active: false,
           spinOffsetByItemId: {},
+          spinPhaseByItemId: {},
           revealCountByItemId: {},
           previewQueueByItemId: {},
         });
@@ -1094,10 +1132,7 @@ export default function AuctionDashboard() {
             /** Green checks tinatanggal lang sa Reset shuffle; queue pinapanatili ang lahat ng member. */
             interestedMemberIds:
               preview ??
-              applySureWinPin(
-                shuffleQueueIdsForType(item.interestedMemberIds, item.type),
-                item.name
-              ),
+              shuffleQueueIdsForType(item.interestedMemberIds, item.type),
           };
         }),
       };
@@ -1114,6 +1149,7 @@ export default function AuctionDashboard() {
       setShuffleUi({
         active: false,
         spinOffsetByItemId: {},
+        spinPhaseByItemId: {},
         revealCountByItemId: {},
         previewQueueByItemId: {},
       });
@@ -2583,6 +2619,7 @@ export default function AuctionDashboard() {
                           }
                           onUnmarkWinner={requestUnmarkWinner}
                           shuffleSpinOffset={shuffleUi.spinOffsetByItemId[item.id]}
+                          shuffleSpinPhase={shuffleUi.spinPhaseByItemId[item.id]}
                           shuffleRevealCount={shuffleUi.revealCountByItemId[item.id]}
                           shufflePreviewIds={shuffleUi.previewQueueByItemId[item.id]}
                           shuffleDone={
@@ -3300,6 +3337,30 @@ export default function AuctionDashboard() {
   );
 }
 
+/** Slot-machine name scroll during shuffle (fractional phase = smooth slide). */
+function ShuffleNameReel({
+  currentName,
+  nextName,
+  frac,
+}: {
+  currentName: string;
+  nextName: string;
+  frac: number;
+}) {
+  const clamped = Math.min(1, Math.max(0, frac));
+  return (
+    <span className="relative block h-6 overflow-hidden">
+      <span
+        className="block will-change-transform"
+        style={{ transform: `translate3d(0, ${-clamped * 50}%, 0)` }}
+      >
+        <span className="block h-6 truncate leading-6">{currentName}</span>
+        <span className="block h-6 truncate leading-6">{nextName}</span>
+      </span>
+    </span>
+  );
+}
+
 function QueueCard({
   item,
   members,
@@ -3315,6 +3376,7 @@ function QueueCard({
   showAddedWinnerUi,
   onUnmarkWinner,
   shuffleSpinOffset,
+  shuffleSpinPhase,
   shuffleRevealCount,
   shufflePreviewIds,
   shuffleDone,
@@ -3355,6 +3417,8 @@ function QueueCard({
   onUnmarkWinner?: (itemId: string, winnerName: string) => void;
   /** While shuffling, rotation offset for unrevealed queue names. */
   shuffleSpinOffset?: number;
+  /** Continuous spin phase (float) for smooth reel animation. */
+  shuffleSpinPhase?: number;
   /** While shuffling, how many winners are already revealed from top. */
   shuffleRevealCount?: number;
   /** Preview shuffled queue shown while spin is running. */
@@ -3457,14 +3521,23 @@ function QueueCard({
     typeof shuffleSpinOffset === 'number' && Number.isInteger(shuffleSpinOffset)
       ? Math.max(0, Math.min(shuffleSpinOffset, Math.max(0, displayIds.length - 1)))
       : 0;
+  const resolvedSpinPhase =
+    typeof shuffleSpinPhase === 'number' && Number.isFinite(shuffleSpinPhase)
+      ? Math.max(0, shuffleSpinPhase)
+      : resolvedSpinOffset;
+  const spinTail = displayIds.slice(resolvedRevealCount);
+  const spinTailLen = spinTail.length;
+  const spinInt =
+    spinTailLen > 0 ? Math.floor(resolvedSpinPhase) % spinTailLen : 0;
+  const spinFrac =
+    spinTailLen > 0 ? resolvedSpinPhase - Math.floor(resolvedSpinPhase) : 0;
   const rotatedDisplayIds = (() => {
     if (!isShuffling || shuffleDone) return displayIds;
     const reveal = resolvedRevealCount;
     const head = displayIds.slice(0, reveal);
     const tail = displayIds.slice(reveal);
     if (tail.length <= 1) return displayIds;
-    const offset =
-      resolvedSpinOffset >= 0 ? resolvedSpinOffset % tail.length : 0;
+    const offset = spinInt % tail.length;
     const rotatedTail = tail.slice(offset).concat(tail.slice(0, offset));
     return head.concat(rotatedTail);
   })();
@@ -3644,13 +3717,17 @@ function QueueCard({
                   <motion.div
                     layout
                     key={isShuffling ? `slot-${item.id}-${idx}` : mid}
-                    initial={{ opacity: 0, x: -10 }}
+                    initial={isShuffling ? false : { opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, scale: 0.9 }}
                     transition={{
-                      layout: { duration: 0.22, ease: 'easeOut' },
-                      opacity: { duration: 0.16 },
-                      x: { duration: 0.16 },
+                      layout: {
+                        type: 'spring',
+                        stiffness: 420,
+                        damping: 38,
+                        mass: 0.55,
+                      },
+                      opacity: { duration: 0.2, ease: 'easeOut' },
                     }}
                     onDragOver={(e) => {
                       e.preventDefault();
@@ -3708,7 +3785,7 @@ function QueueCard({
                           : isFreeDrawPickRow
                             ? 'border-sky-500/40 bg-slate-800/90 ring-1 ring-inset ring-sky-500/15 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.06)]'
                             : 'bg-slate-900 border-slate-800'
-                    } transition-all`}
+                    } ${isShuffling ? 'transition-[background-color,border-color,box-shadow] duration-300 ease-out' : 'transition-all'}`}
                   >
                     <div className="flex min-w-0 flex-1 items-center gap-3">
                       <div className="flex shrink-0 items-center gap-2">
@@ -3743,15 +3820,31 @@ function QueueCard({
                         }`}
                       >
                         {isShuffling ? (
-                          <span
-                            className={
-                              !shuffleDone && idx >= resolvedRevealCount
-                                ? 'animate-pulse text-white'
-                                : ''
-                            }
-                          >
-                            {m.name}
-                          </span>
+                          idx < resolvedRevealCount || shuffleDone ? (
+                            <span className="text-white">{m.name}</span>
+                          ) : spinTailLen > 1 ? (
+                            (() => {
+                              const k = idx - resolvedRevealCount;
+                              const currentId = spinTail[(spinInt + k) % spinTailLen]!;
+                              const nextId =
+                                spinTail[(spinInt + k + 1) % spinTailLen]!;
+                              const currentMember = members.find(
+                                (member) => member.id === currentId
+                              );
+                              const nextMember = members.find(
+                                (member) => member.id === nextId
+                              );
+                              return (
+                                <ShuffleNameReel
+                                  currentName={currentMember?.name ?? '—'}
+                                  nextName={nextMember?.name ?? '—'}
+                                  frac={spinFrac}
+                                />
+                              );
+                            })()
+                          ) : (
+                            <span className="text-white">{m.name}</span>
+                          )
                         ) : (
                           m.name
                         )}

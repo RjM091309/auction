@@ -480,6 +480,27 @@ export async function persistAuctionState(
   }
 }
 
+/** Apply server-side sure-win pins to shuffled rows (Officer+ session). */
+export async function fetchPinnedShuffleQueues(
+  items: { id: string; name: string; interestedMemberIds: number[] }[],
+  bearerToken: string
+): Promise<Record<string, number[]>> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
+  const res = await fetch(apiUrl('/api/shuffle/pin-queues'), {
+    ...cred,
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `${res.status} ${res.statusText}`);
+  }
+  const json = (await res.json()) as { queueByItemId?: Record<string, number[]> };
+  return json.queueByItemId ?? {};
+}
+
 /** Remove a member from one item queue only (admin). Requires a privileged
  *  Bidders-tab session — pass the token returned by `/api/bidders/auth`. */
 export async function removeMemberFromItemQueueOnServer(

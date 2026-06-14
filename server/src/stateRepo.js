@@ -32,6 +32,7 @@ import {
   appendBidderStateLog,
 } from './bidderStateLog.js';
 import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
+import { applySureWinPinsToItems } from './sureWinPin.js';
 
 const EVENT_MODE_META_KEY = 'event_mode';
 const REWARD_RANK_META_KEY = 'reward_rank';
@@ -931,6 +932,10 @@ export async function replaceFullState(pool, body) {
     Array.isArray(shuffleMetaPrev) &&
     shuffleMetaPrev[0] &&
     shuffleMetaPrev[0].value === '1';
+
+  if (!prevShuffleLocked && body.shuffleLocked === true) {
+    applySureWinPinsToItems(body.items);
+  }
 
   const [oldItemRows] = await pool.query(
     `SELECT id, name, type, status, winner_name AS winnerName, winner_names_json AS winnerNamesJson, revoked_winner_names_json AS revokedWinnerNamesJson FROM auction_items`
