@@ -287,6 +287,7 @@ function swalSuccess(message: string): Promise<void> {
 }
 
 type StatusFilter = 'all' | 'active' | 'inactive';
+type CdFilter = 'all' | 'on_cd' | 'ready';
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 type PageSize = (typeof PAGE_SIZE_OPTIONS)[number];
@@ -452,6 +453,7 @@ function BidderRegistrationAuthed({
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('active');
+  const [cdFilter, setCdFilter] = useState<CdFilter>('all');
   const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
   const [page, setPage] = useState(1);
 
@@ -639,11 +641,16 @@ function BidderRegistrationAuthed({
     return bidders.filter((b) => {
       if (statusFilter === 'active' && !b.active) return false;
       if (statusFilter === 'inactive' && b.active) return false;
+      if (cdFilter !== 'all') {
+        const cd = cardCdByIgn.get(b.name.trim().toLowerCase());
+        if (cdFilter === 'on_cd' && cd?.tone !== 'cd') return false;
+        if (cdFilter === 'ready' && cd?.tone !== 'clear') return false;
+      }
       if (!q) return true;
       const hay = `${b.id} ${b.name} ${b.role} ${b.password}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [bidders, searchTerm, statusFilter]);
+  }, [bidders, searchTerm, statusFilter, cdFilter, cardCdByIgn]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, totalPages);
@@ -658,7 +665,7 @@ function BidderRegistrationAuthed({
   // page 1 so we never end up on an empty page.
   useEffect(() => {
     setPage(1);
-  }, [searchTerm, statusFilter, pageSize]);
+  }, [searchTerm, statusFilter, cdFilter, pageSize]);
 
   // Keep `page` clamped if rows were deleted and the current page no longer
   // exists.
@@ -986,6 +993,28 @@ function BidderRegistrationAuthed({
                 }`}
               >
                 {opt}
+              </button>
+            ))}
+          </div>
+          <div className="inline-flex rounded-xl border border-amber-900/50 bg-slate-900 p-1">
+            {(
+              [
+                { id: 'all', label: 'All CD' },
+                { id: 'on_cd', label: 'On CD' },
+                { id: 'ready', label: 'Ready' },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setCdFilter(opt.id)}
+                className={`rounded-lg px-3 py-1.5 text-xs font-black uppercase tracking-wide transition-colors ${
+                  cdFilter === opt.id
+                    ? 'bg-amber-600 text-white'
+                    : 'text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                {opt.label}
               </button>
             ))}
           </div>

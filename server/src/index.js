@@ -27,6 +27,7 @@ import {
   deactivateMember,
   removeMemberFromItemQueue,
   publicAddBidToQueue,
+  publicMoveQueueMember,
   setEventMode,
   clearAllActiveQueues,
 } from './stateRepo.js';
@@ -187,6 +188,29 @@ app.post('/api/public/queue/add', async (req, res) => {
       typeof req.body?.itemId === 'string' ? req.body.itemId.trim() : '';
     console.log(
       `[audit] add: public queue ign="${ign}" item=${itemId} ip=${clientIp(req)}`
+    );
+    res.json(state);
+  } catch (e) {
+    const code = e.statusCode ?? 500;
+    if (code >= 500) console.error(e);
+    const payload = { error: String(e.message ?? 'Error') };
+    if (e.code) payload.code = e.code;
+    if (e.extra) payload.extra = e.extra;
+    res.status(code).json(payload);
+  }
+});
+
+/** Public: drag-and-drop queue move/reorder (no full-state PUT). */
+app.post('/api/public/queue/move', async (req, res) => {
+  try {
+    const state = await publicMoveQueueMember(pool, req.body);
+    const fromItemId =
+      typeof req.body?.fromItemId === 'string' ? req.body.fromItemId.trim() : '';
+    const toItemId =
+      typeof req.body?.toItemId === 'string' ? req.body.toItemId.trim() : '';
+    const memberId = String(req.body?.memberId ?? '');
+    console.log(
+      `[audit] move: queue member=${memberId} from=${fromItemId} to=${toItemId} ip=${clientIp(req)}`
     );
     res.json(state);
   } catch (e) {

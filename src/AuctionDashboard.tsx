@@ -60,6 +60,8 @@ import {
   persistAuctionState,
   publicAddBidToQueue,
   PublicAddBidError,
+  publicMoveQueueMember,
+  PublicMoveQueueError,
   setEventModeOnServer,
   clearAllActiveQueuesOnServer,
 } from './lib/apiState';
@@ -1658,11 +1660,10 @@ export default function AuctionDashboard() {
   };
 
   /**
-   * Drag-and-drop queue move. Saves the move IMMEDIATELY via PUT /api/state
-   * instead of relying on the debounced auto-persist. This eliminates the
-   * race-condition class where polling + merge could resurrect the bidder
-   * on the source card mid-flight, which was the cause of every "the drag
-   * reverts to the original card" report.
+   * Drag-and-drop queue move. Saves via POST /api/public/queue/move (queue
+   * rows only) instead of PUT /api/state, which incorrectly required
+   * Officer/Admin/Developer when client-side winner-limit normalization
+   * differed from the server snapshot.
    *
    * Pattern mirrors `handleClearAllQueues`: cancel any pending debounce,
    * mark the persist as in-flight (so the 2s poll skips this cycle), apply
@@ -1730,41 +1731,43 @@ export default function AuctionDashboard() {
       skipPersistOnceRef.current = true;
       setState(next);
 
-      const server = await persistAuctionState(next);
-      if (server) {
-        queueBaselineRef.current = buildQueueBaselineFromState(server);
-        // Suppress the redundant debounced save that the post-server
-        // setState would otherwise schedule.
-        skipPersistOnceRef.current = true;
-        setState(
-          normalizeWinnerPoolCapsForLimits(
-            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
-          )
-        );
-      }
+      const server = await publicMoveQueueMember(payload);
+      queueBaselineRef.current = buildQueueBaselineFromState(server);
+      // Suppress the redundant debounced save that the post-server
+      // setState would otherwise schedule.
+      skipPersistOnceRef.current = true;
+      setState(
+        normalizeWinnerPoolCapsForLimits(
+          dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(server))
+        )
+      );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      try {
-        const parsed = JSON.parse(msg) as {
-          code?: string;
-          error?: string;
-          extra?: { itemName?: string; expiresAt?: number };
-        };
-        if (parsed.code === 'emperium_win_cooldown') {
+      if (e instanceof PublicMoveQueueError) {
+        if (e.code === 'name_conflict') {
+          const ign =
+            state.members.find((m) => m.id === payload.memberId)?.name ?? '';
+          void swal2QueueAlreadyOnAnotherItem({
+            ign,
+            otherItemName: displayAuctionItemName(
+              e.extra?.itemName ?? 'another item'
+            ),
+          });
+          return;
+        }
+        if (e.code === 'emperium_win_cooldown') {
           const ign =
             state.members.find((m) => m.id === payload.memberId)?.name ?? '';
           void swal2EmperiumWinCooldown({
             ign,
             itemName: displayAuctionItemName(
-              parsed.extra?.itemName ?? 'this item'
+              e.extra?.itemName ?? 'this item'
             ),
-            expiresAt: parsed.extra?.expiresAt ?? Date.now(),
+            expiresAt: e.extra?.expiresAt ?? Date.now(),
           });
           return;
         }
-      } catch {
-        /* not JSON */
       }
+      const msg = e instanceof Error ? e.message : String(e);
       void swal2SaveError(msg || 'Could not move bid');
       // Roll back to whatever the server actually has.
       try {

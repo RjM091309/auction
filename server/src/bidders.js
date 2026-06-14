@@ -145,7 +145,7 @@ function rowToBidder(row) {
  * authentication clears the counter. Memory-only and bounded by login rate.
  * ----------------------------------------------------------------------- */
 const MAX_FAILS_BEFORE_LOCKOUT = 5;
-const LOCKOUT_MS = 5 * 60 * 1000;
+const LOCKOUT_MS = 30 * 1000;
 const FAIL_WINDOW_MS = 15 * 60 * 1000;
 const authFailures = new Map();
 

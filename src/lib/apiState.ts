@@ -379,6 +379,60 @@ export async function publicAddBidToQueue(
   return parsed;
 }
 
+export class PublicMoveQueueError extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly extra?: {
+      itemName?: string;
+      otherItemName?: string;
+      expiresAt?: number;
+    }
+  ) {
+    super(message);
+    this.name = 'PublicMoveQueueError';
+  }
+}
+
+export type PublicMoveQueuePayload = {
+  fromItemId: string;
+  toItemId: string;
+  memberId: number;
+  insertBeforeMemberId: number | null;
+};
+
+/** Public POST — drag-and-drop queue move (no session, no full-state PUT). */
+export async function publicMoveQueueMember(
+  payload: PublicMoveQueuePayload
+): Promise<AuctionState> {
+  const res = await fetch(apiUrl('/api/public/queue/move'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let json: unknown;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    throw new PublicMoveQueueError(text || 'Invalid response');
+  }
+  if (!res.ok) {
+    const o = (json && typeof json === 'object' ? json : {}) as Record<
+      string,
+      unknown
+    >;
+    throw new PublicMoveQueueError(
+      typeof o.error === 'string' ? o.error : res.statusText,
+      typeof o.code === 'string' ? o.code : undefined,
+      o.extra as PublicMoveQueueError['extra'] | undefined
+    );
+  }
+  const parsed = parseAuctionState(json);
+  if (!parsed) throw new PublicMoveQueueError('Invalid auction state from server');
+  return parsed;
+}
+
 /**
  * Replace server state (members, items, queues). Called after local edits;
  * server maps this to `members`, `auction_items`, and `item_queue` rows.

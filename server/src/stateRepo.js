@@ -610,6 +610,222 @@ export async function publicAddBidToQueue(pool, body) {
   return getFullState(pool);
 }
 
+/** Rewrite ordered `item_queue` rows for one auction item. */
+async function rewriteItemQueueRows(conn, itemId, memberIds) {
+  await conn.query('DELETE FROM item_queue WHERE item_id = ?', [itemId]);
+  let pos = 0;
+  for (const rawMid of memberIds) {
+    const mid =
+      typeof rawMid === 'number' && Number.isInteger(rawMid)
+        ? rawMid
+        : parseInt(String(rawMid ?? '').trim(), 10);
+    if (!Number.isInteger(mid) || mid <= 0) continue;
+    await conn.query(
+      'INSERT INTO item_queue (item_id, member_id, position) VALUES (?, ?, ?)',
+      [itemId, mid, pos]
+    );
+    pos += 1;
+  }
+}
+
+/**
+ * Apply a queue drag-and-drop move in memory (mirrors client `applyQueueMemberMove`).
+ * @returns {object | { error: string, toItemName?: string, expiresAt?: number }}
+ */
+function applyQueueMemberMoveInMemory(state, p) {
+  const { fromItemId, toItemId, memberId, insertBeforeMemberId } = p;
+
+  const member = state.members.find((m) => m.id === memberId);
+  if (!member) return { error: 'not_found' };
+
+  const fromItem = state.items.find((i) => i.id === fromItemId);
+  const toItem = state.items.find((i) => i.id === toItemId);
+  if (!fromItem || !toItem || toItem.status !== 'active') {
+    return { error: 'not_found' };
+  }
+  if (!fromItem.interestedMemberIds.includes(memberId)) {
+    return { error: 'no_change' };
+  }
+
+  const fromList = fromItem.interestedMemberIds.filter((id) => id !== memberId);
+  const toListBase =
+    fromItemId === toItemId ? fromList : [...toItem.interestedMemberIds];
+
+  const nameTakenOnTarget = toListBase.some((id) => {
+    if (id === memberId) return false;
+    const n = state.members.find((m) => m.id === id)?.name;
+    return n != null && ignMatchesForQueueIdentity(n, member.name);
+  });
+  if (nameTakenOnTarget) {
+    return { error: 'name_conflict', toItemName: toItem.name };
+  }
+
+  if (fromItemId !== toItemId && toListBase.includes(memberId)) {
+    return { error: 'no_change' };
+  }
+
+  if (fromItemId !== toItemId) {
+    const eventMode = state.eventMode ?? defaultEventMode();
+    const cooldown = findEmperiumWinCooldown(
+      eventMode,
+      toItem,
+      state.weeklyTypeWins,
+      member.name
+    );
+    if (cooldown) {
+      return {
+        error: 'emperium_win_cooldown',
+        toItemName: toItem.name,
+        expiresAt: cooldown.expiresAt,
+      };
+    }
+
+    const itemsSim = state.items.map((it) => {
+      if (it.id === fromItemId) {
+        return {
+          ...it,
+          interestedMemberIds: it.interestedMemberIds.filter((id) => id !== memberId),
+        };
+      }
+      if (it.id === toItemId) {
+        const without = it.interestedMemberIds.filter((id) => id !== memberId);
+        return {
+          ...it,
+          interestedMemberIds: without.includes(memberId)
+            ? without
+            : [...without, memberId],
+        };
+      }
+      return it;
+    });
+    const otherBlock = findOtherActiveQueueBlockingWithMatch(
+      eventMode,
+      itemsSim,
+      state.members,
+      member.name,
+      toItemId,
+      toItem.type
+    );
+    if (otherBlock) {
+      return { error: 'name_conflict', toItemName: otherBlock.item.name };
+    }
+  }
+
+  const toList = [...toListBase];
+  let insertAt =
+    insertBeforeMemberId == null
+      ? toList.length
+      : toList.indexOf(insertBeforeMemberId);
+  if (insertAt < 0) insertAt = toList.length;
+
+  if (fromItemId === toItemId && insertBeforeMemberId === memberId) {
+    return { error: 'no_change' };
+  }
+
+  toList.splice(insertAt, 0, memberId);
+
+  if (fromItemId === toItemId) {
+    return {
+      ...state,
+      items: state.items.map((it) =>
+        it.id === fromItemId ? { ...it, interestedMemberIds: toList } : it
+      ),
+    };
+  }
+
+  return {
+    ...state,
+    items: state.items.map((it) => {
+      if (it.id === fromItemId) return { ...it, interestedMemberIds: fromList };
+      if (it.id === toItemId) return { ...it, interestedMemberIds: toList };
+      return it;
+    }),
+  };
+}
+
+/**
+ * Public: reorder or move a queued bidder between cards (queue rows only).
+ * Avoids full `/api/state` PUT so client-side winner-limit normalization
+ * cannot trip the Officer/Admin/Developer gate.
+ */
+export async function publicMoveQueueMember(pool, body) {
+  const fromItemId =
+    typeof body?.fromItemId === 'string' ? body.fromItemId.trim() : '';
+  const toItemId =
+    typeof body?.toItemId === 'string' ? body.toItemId.trim() : '';
+  const memberId = parseInt(String(body?.memberId ?? '').trim(), 10);
+  let insertBeforeMemberId = body?.insertBeforeMemberId;
+  if (insertBeforeMemberId != null && insertBeforeMemberId !== '') {
+    insertBeforeMemberId = parseInt(String(insertBeforeMemberId).trim(), 10);
+    if (!Number.isInteger(insertBeforeMemberId) || insertBeforeMemberId <= 0) {
+      insertBeforeMemberId = null;
+    }
+  } else {
+    insertBeforeMemberId = null;
+  }
+
+  if (!fromItemId || !toItemId) {
+    throw clientError(400, 'Source and target items are required');
+  }
+  if (!Number.isInteger(memberId) || memberId <= 0) {
+    throw clientError(400, 'Invalid member id');
+  }
+
+  const state = await getFullState(pool);
+  const moved = applyQueueMemberMoveInMemory(state, {
+    fromItemId,
+    toItemId,
+    memberId,
+    insertBeforeMemberId,
+  });
+
+  if ('error' in moved) {
+    if (moved.error === 'not_found') {
+      throw clientError(404, 'Queue entry not found');
+    }
+    if (moved.error === 'no_change') {
+      return state;
+    }
+    if (moved.error === 'name_conflict') {
+      throw clientError(400, 'Already on another item', {
+        code: 'name_conflict',
+        extra: { itemName: moved.toItemName ?? '' },
+      });
+    }
+    if (moved.error === 'emperium_win_cooldown') {
+      throw clientError(400, 'Winner cooldown active (skip next Emperium Sunday)', {
+        code: 'emperium_win_cooldown',
+        extra: {
+          itemName: moved.toItemName ?? '',
+          expiresAt: moved.expiresAt,
+        },
+      });
+    }
+    throw clientError(400, 'Could not move bid');
+  }
+
+  const affectedItemIds =
+    fromItemId === toItemId ? [fromItemId] : [fromItemId, toItemId];
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    for (const itemId of affectedItemIds) {
+      const item = moved.items.find((it) => it.id === itemId);
+      if (!item) continue;
+      await rewriteItemQueueRows(conn, itemId, item.interestedMemberIds);
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback().catch(() => {});
+    throw e;
+  } finally {
+    conn.release();
+  }
+
+  return getFullState(pool);
+}
+
 /** Remove one member from a single item queue (roster row stays active). */
 export async function removeMemberFromItemQueue(pool, itemId, memberId) {
   const tid = typeof itemId === 'string' ? itemId.trim() : '';
