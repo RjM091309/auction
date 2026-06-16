@@ -62,6 +62,7 @@ export function parseRewardItemCounts(
     fragment,
     feathersItemsPerWinner,
     ...(fragmentByItemId ? { fragmentByItemId } : {}),
+    ...(j.rankWinnerDouble === true ? { rankWinnerDouble: true } : {}),
   };
   if (j.feathers != null && j.feathers !== '') {
     return { ...base, feathers: toInt(j.feathers, fallback.feathers) };

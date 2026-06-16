@@ -7,6 +7,7 @@ import {
 import { dedupeRosterMembersByIgn } from './dedupeRosterMembersByIgn';
 import { migrateFeatherItems, parseRewardItemCounts } from './featherMigration';
 import { parseGuildRank } from './pageAssignment';
+import { upgradeLegacyRankWinnerCounts } from './rewardContext';
 
 const STORAGE_KEY = 'roo_auction_state';
 
@@ -93,19 +94,29 @@ export const loadState = (): AuctionState => {
               ...it,
               interestedMemberIds: [],
             }));
+      const migratedItems = migrateFeatherItems(normalizeAuctionItems(baseItems));
       return dedupeRosterMembersByIgn({
-        items: migrateFeatherItems(normalizeAuctionItems(baseItems)),
+        items: migratedItems,
         members,
         dataVersion: AUCTION_DATA_VERSION,
-        rewardItemCounts: parseRewardItemCounts(parsed.rewardItemCounts, rewardRank),
+        rewardItemCounts: upgradeLegacyRankWinnerCounts(
+          parseRewardItemCounts(parsed.rewardItemCounts, rewardRank),
+          rewardRank,
+          migratedItems
+        ),
       });
     }
 
+    const migratedItems = migrateFeatherItems(normalizeAuctionItems(rawItems));
     return dedupeRosterMembersByIgn({
-      items: migrateFeatherItems(normalizeAuctionItems(rawItems)),
+      items: migratedItems,
       members,
       dataVersion: AUCTION_DATA_VERSION,
-      rewardItemCounts: parseRewardItemCounts(parsed.rewardItemCounts, rewardRank),
+      rewardItemCounts: upgradeLegacyRankWinnerCounts(
+        parseRewardItemCounts(parsed.rewardItemCounts, rewardRank),
+        rewardRank,
+        migratedItems
+      ),
     });
   } catch (e) {
     console.error('Failed to load state', e);

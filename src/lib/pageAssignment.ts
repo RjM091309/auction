@@ -2,15 +2,28 @@ import type { GuildRank, ItemType, RewardItemCounts } from '../types';
 
 /**
  * Current game reward presets by rank:
- * Bronze => Card=2, Feathers=80 items; Emperium overrun => Card=20, Feathers=320.
+ * Bronze => Card=2, Feathers=80; Silver => Card=2, Feathers=95; Emperium overrun => Card=20, Feathers=320.
  */
-/** Ranks shown in Winner set limit (Bronze guild rewards vs Emperium overrun). */
-export const GUILD_RANK_OPTIONS: GuildRank[] = ['Bronze', 'Emperium overrun'];
+/** Ranks shown in Winner set limit (Guild League: Bronze/Silver; Emperium overrun). */
+export const GUILD_RANK_OPTIONS: GuildRank[] = ['Bronze', 'Silver', 'Emperium overrun'];
+
+/** Guild League winner-set presets (Bronze + Silver). */
+export const GUILD_LEAGUE_RANKS: GuildRank[] = ['Bronze', 'Silver'];
+
+export function isGuildLeagueRank(rank: GuildRank): boolean {
+  return rank === 'Bronze' || rank === 'Silver';
+}
 
 const TOTAL_ITEMS_BY_RANK_AND_TYPE: Record<GuildRank, Record<ItemType, number>> = {
   Bronze: {
     'Fragment Card': 2,
     Feathers: 80,
+    'Ancient Item': 1,
+    Other: 1,
+  },
+  Silver: {
+    'Fragment Card': 2,
+    Feathers: 95,
     'Ancient Item': 1,
     Other: 1,
   },
@@ -22,9 +35,10 @@ const TOTAL_ITEMS_BY_RANK_AND_TYPE: Record<GuildRank, Record<ItemType, number>> 
   },
 };
 
-/** Normalize persisted / API rank strings (legacy Silver/Gold → Bronze). */
+/** Normalize persisted / API rank strings (legacy Gold → Bronze). */
 export function parseGuildRank(v: unknown): GuildRank {
   if (v === 'Emperium overrun') return 'Emperium overrun';
+  if (v === 'Silver') return 'Silver';
   return 'Bronze';
 }
 
@@ -34,7 +48,9 @@ export function totalItemsForTypeByRank(type: ItemType, rank: GuildRank = 'Bronz
 
 /** Feathers: default items per winning bidder by rank preset. */
 export function defaultFeathersItemsPerWinner(rank: GuildRank): number {
-  return rank === 'Emperium overrun' ? 13 : 8;
+  if (rank === 'Emperium overrun') return 13;
+  if (rank === 'Silver') return 9;
+  return 8;
 }
 
 /** Feathers: items per winning bidder (configurable via Winner set limit). */

@@ -7,7 +7,17 @@ const DEFAULTS = {
 };
 
 function defaultFeathersItemsPerWinner(rank) {
-  return rank === 'Emperium overrun' ? 13 : 8;
+  if (rank === 'Emperium overrun') return 13;
+  if (rank === 'Silver') return 9;
+  return 8;
+}
+
+function parseRewardRank(raw) {
+  if (raw == null || raw === '') return 'Bronze';
+  const s = typeof raw === 'string' ? raw : String(raw);
+  if (s === 'Emperium overrun') return 'Emperium overrun';
+  if (s === 'Silver') return 'Silver';
+  return 'Bronze';
 }
 
 function featherItemsPerWinnerUnit(rank, counts) {
@@ -35,8 +45,7 @@ export function maxRecordedWinnersForItem(type, winnerPoolCap) {
 export function maxWinnersForItemInState(it, body) {
   const type = typeof it?.type === 'string' ? it.type : '';
   const counts = body?.rewardItemCounts;
-  const rank =
-    body?.rewardRank === 'Emperium overrun' ? 'Emperium overrun' : 'Bronze';
+  const rank = parseRewardRank(body?.rewardRank);
   if (type === 'Feathers' && counts && counts.feathers != null) {
     const n = Math.max(0, Math.floor(Number(counts.feathers)));
     const u = featherItemsPerWinnerUnit(rank, counts);

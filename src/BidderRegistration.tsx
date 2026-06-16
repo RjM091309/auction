@@ -47,6 +47,7 @@ import {
   puppetCardCdDisplayForIgn,
   type PuppetCardCdDisplay,
 } from './lib/puppetCardCdDisplay';
+import { isEmperiumWinCooldownEnabled } from './lib/emperiumWinCooldown';
 import type { WeeklyEventType, WeeklyTypeWin } from './types';
 import BidderAuthGate from './BidderAuthGate';
 
@@ -103,6 +104,7 @@ function roleBadgeClass(role: BidderRole): string {
 interface BidderRowProps {
   bidder: Bidder;
   cardCd: PuppetCardCdDisplay;
+  showCardCd: boolean;
   canEdit: boolean;
   canDelete: boolean;
   onEdit: (b: Bidder) => void;
@@ -113,6 +115,7 @@ interface BidderRowProps {
 const BidderRow = React.memo(function BidderRow({
   bidder,
   cardCd,
+  showCardCd,
   canEdit,
   canDelete,
   onEdit,
@@ -167,19 +170,21 @@ const BidderRow = React.memo(function BidderRow({
           </span>
         )}
       </td>
-      <td className="px-4 py-3">
-        <span
-          title={cardCd.title}
-          className={`inline-flex max-w-[9.5rem] items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${puppetCardCdBadgeClass(
-            cardCd.tone
-          )}`}
-        >
-          {cardCd.tone === 'cd' ? (
-            <Clock className="h-3 w-3 shrink-0 opacity-80" aria-hidden />
-          ) : null}
-          <span className="truncate normal-case">{cardCd.label}</span>
-        </span>
-      </td>
+      {showCardCd ? (
+        <td className="px-4 py-3">
+          <span
+            title={cardCd.title}
+            className={`inline-flex max-w-[9.5rem] items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${puppetCardCdBadgeClass(
+              cardCd.tone
+            )}`}
+          >
+            {cardCd.tone === 'cd' ? (
+              <Clock className="h-3 w-3 shrink-0 opacity-80" aria-hidden />
+            ) : null}
+            <span className="truncate normal-case">{cardCd.label}</span>
+          </span>
+        </td>
+      ) : null}
       <td className="px-4 py-3">
         <div className="flex items-center justify-end gap-2">
           {canEdit && (
@@ -471,6 +476,8 @@ function BidderRegistrationAuthed({
   const canActorDelete =
     actor.role === 'Admin' || actor.role === 'Developer';
   const roleOptions = useMemo(() => roleOptionsFor(actor.role), [actor.role]);
+  const showCardCd = isEmperiumWinCooldownEnabled(auctionEventMode);
+  const tableColSpan = showCardCd ? 7 : 6;
 
   const handleAuthFailure = useCallback(
     (msg: string) => {
@@ -636,12 +643,16 @@ function BidderRegistrationAuthed({
     return map;
   }, [bidders, weeklyTypeWins, auctionEventMode]);
 
+  useEffect(() => {
+    if (!showCardCd && cdFilter !== 'all') setCdFilter('all');
+  }, [showCardCd, cdFilter]);
+
   const filtered = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
     return bidders.filter((b) => {
       if (statusFilter === 'active' && !b.active) return false;
       if (statusFilter === 'inactive' && b.active) return false;
-      if (cdFilter !== 'all') {
+      if (showCardCd && cdFilter !== 'all') {
         const cd = cardCdByIgn.get(b.name.trim().toLowerCase());
         if (cdFilter === 'on_cd' && cd?.tone !== 'cd') return false;
         if (cdFilter === 'ready' && cd?.tone !== 'clear') return false;
@@ -650,7 +661,7 @@ function BidderRegistrationAuthed({
       const hay = `${b.id} ${b.name} ${b.role} ${b.password}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [bidders, searchTerm, statusFilter, cdFilter, cardCdByIgn]);
+  }, [bidders, searchTerm, statusFilter, cdFilter, cardCdByIgn, showCardCd]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, totalPages);
@@ -996,28 +1007,30 @@ function BidderRegistrationAuthed({
               </button>
             ))}
           </div>
-          <div className="inline-flex rounded-xl border border-amber-900/50 bg-slate-900 p-1">
-            {(
-              [
-                { id: 'all', label: 'All CD' },
-                { id: 'on_cd', label: 'On CD' },
-                { id: 'ready', label: 'Ready' },
-              ] as const
-            ).map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => setCdFilter(opt.id)}
-                className={`rounded-lg px-3 py-1.5 text-xs font-black uppercase tracking-wide transition-colors ${
-                  cdFilter === opt.id
-                    ? 'bg-amber-600 text-white'
-                    : 'text-slate-300 hover:bg-slate-800'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
+          {showCardCd ? (
+            <div className="inline-flex rounded-xl border border-amber-900/50 bg-slate-900 p-1">
+              {(
+                [
+                  { id: 'all', label: 'All CD' },
+                  { id: 'on_cd', label: 'On CD' },
+                  { id: 'ready', label: 'Ready' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setCdFilter(opt.id)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-black uppercase tracking-wide transition-colors ${
+                    cdFilter === opt.id
+                      ? 'bg-amber-600 text-white'
+                      : 'text-slate-300 hover:bg-slate-800'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -1037,7 +1050,7 @@ function BidderRegistrationAuthed({
                 <th className="px-4 py-3">Role</th>
                 <th className="px-4 py-3">Password</th>
                 <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Card CD</th>
+                {showCardCd ? <th className="px-4 py-3">Card CD</th> : null}
                 <th className="px-4 py-3 text-right">Actions</th>
               </tr>
             </thead>
@@ -1045,7 +1058,7 @@ function BidderRegistrationAuthed({
               {loading ? (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={tableColSpan}
                     className="px-4 py-10 text-center text-sm text-slate-500"
                   >
                     Loading bidders…
@@ -1054,7 +1067,7 @@ function BidderRegistrationAuthed({
               ) : filtered.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={tableColSpan}
                     className="px-4 py-10 text-center text-sm text-slate-500"
                   >
                     {bidders.length === 0
@@ -1072,6 +1085,7 @@ function BidderRegistrationAuthed({
                     <BidderRow
                       key={b.id}
                       bidder={b}
+                      showCardCd={showCardCd}
                       cardCd={
                         cardCdByIgn.get(b.name.trim().toLowerCase()) ??
                         puppetCardCdDisplayForIgn(

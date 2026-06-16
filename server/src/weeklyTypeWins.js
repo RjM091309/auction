@@ -60,6 +60,12 @@ export function parseWeeklyTypeWins(raw) {
   }
 }
 
+/** @param {unknown} raw */
+export function parseWeeklyTypeWinsArray(raw) {
+  if (!Array.isArray(raw)) return [];
+  return parseWeeklyTypeWins(JSON.stringify(raw));
+}
+
 export function serializeWeeklyTypeWins(wins) {
   return JSON.stringify(wins);
 }

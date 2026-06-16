@@ -24,6 +24,7 @@ import {
   rolloverWeeklyWinsIfNewWeek,
   saveWeeklyTypeWins,
   dedupeWeeklyWinsList,
+  parseWeeklyTypeWinsArray,
 } from './weeklyTypeWins.js';
 import { getAuctionWeekMondayKey } from './auctionWeek.js';
 import { loadWinnerMarkLog, appendWinnerMarkLog } from './winnerMarkLog.js';
@@ -76,6 +77,7 @@ function parseEventMode(raw) {
 function sanitizeRewardRank(v) {
   const s = typeof v === 'string' ? v : String(v ?? '');
   if (s === 'Emperium overrun') return 'Emperium overrun';
+  if (s === 'Silver') return 'Silver';
   return 'Bronze';
 }
 function parseRewardRank(raw) {
@@ -97,14 +99,18 @@ function parseRewardItemCounts(raw, rankHint) {
         ? toInt(j.feathers, fallback.feathers)
         : toInt(j.lnd, 30) + toInt(j.tns, 50);
     const inferredRank =
-      rankHint === 'Emperium overrun' || rankHint === 'Bronze'
+      rankHint === 'Emperium overrun' ||
+      rankHint === 'Bronze' ||
+      rankHint === 'Silver'
         ? rankHint
         : feathersTotal >= 200
           ? 'Emperium overrun'
-          : 'Bronze';
+          : feathersTotal >= 90
+            ? 'Silver'
+            : 'Bronze';
     const feathersItemsPerWinner = toInt(
       j.feathersItemsPerWinner,
-      inferredRank === 'Emperium overrun' ? 13 : 8
+      inferredRank === 'Emperium overrun' ? 13 : inferredRank === 'Silver' ? 9 : 8
     );
     let fragmentByItemId;
     if (j.fragmentByItemId && typeof j.fragmentByItemId === 'object' && !Array.isArray(j.fragmentByItemId)) {
@@ -118,6 +124,7 @@ function parseRewardItemCounts(raw, rankHint) {
     const base = fragmentByItemId
       ? { fragment, fragmentByItemId, feathersItemsPerWinner }
       : { fragment, feathersItemsPerWinner };
+    if (j.rankWinnerDouble === true) base.rankWinnerDouble = true;
     if (j.feathers != null && j.feathers !== '') {
       return { ...base, feathers: toInt(j.feathers, fallback.feathers) };
     }
@@ -1052,8 +1059,16 @@ export async function replaceFullState(pool, body) {
   }
 
   /** Emperium Overrun only: 1-week (skip next Sunday) Puppet CD. Feathers = no CD. Guild League = no CD entries. */
-  let nextWeeklyWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
-  if (isEmperiumWinCooldownEnabled(saveEventMode)) {
+  let nextWeeklyWins;
+  if (
+    isEmperiumWinCooldownEnabled(saveEventMode) &&
+    Array.isArray(body.weeklyTypeWins)
+  ) {
+    nextWeeklyWins = pruneExpiredEmperiumWins(
+      dedupeWeeklyWinsList(parseWeeklyTypeWinsArray(body.weeklyTypeWins))
+    );
+  } else if (isEmperiumWinCooldownEnabled(saveEventMode)) {
+    nextWeeklyWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
     nextWeeklyWins = await backfillWeeklyWinsFromRecordedWinners(
       pool,
       body.items,
@@ -1156,8 +1171,10 @@ export async function replaceFullState(pool, body) {
         });
       }
     }
+    nextWeeklyWins = pruneExpiredEmperiumWins(dedupeWeeklyWinsList(nextWeeklyWins));
+  } else {
+    nextWeeklyWins = [];
   }
-  nextWeeklyWins = pruneExpiredEmperiumWins(dedupeWeeklyWinsList(nextWeeklyWins));
 
   const membersById = new Map();
   for (const m of body.members) {

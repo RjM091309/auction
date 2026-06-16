@@ -70,16 +70,18 @@ export interface BidderStateLogEntry {
 }
 
 export type WeeklyEventType = 'Guild League' | 'Emperium Overrun';
-export type GuildRank = 'Bronze' | 'Emperium overrun';
+export type GuildRank = 'Bronze' | 'Silver' | 'Emperium overrun';
 
 export interface RewardItemCounts {
   /** Default item count for fragment cards without a per-id override. */
   fragment: number;
   feathers: number;
-  /** Feathers items allocated per winning bidder (Emperium default 13, Bronze 8). */
+  /** Feathers items allocated per winning bidder (Emperium 13, Silver 9, Bronze 8). */
   feathersItemsPerWinner?: number;
   /** Per fragment auction item (e.g. m1 Puppet, m4 Illusion). */
   fragmentByItemId?: Record<string, number>;
+  /** Guild League: ×2 Puppet items + Feathers total when true (Illusion & per-winner unchanged). */
+  rankWinnerDouble?: boolean;
 }
 
 export interface AuctionState {

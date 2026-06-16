@@ -12,13 +12,14 @@ import { AUCTION_DATA_VERSION } from '../data/auctionDefaults';
 import { sortBidderStateLogNewestFirst } from './bidderStateLogUi';
 import { dedupeRosterMembersByIgn } from './dedupeRosterMembersByIgn';
 import { normalizeQueuesForEventMode } from './dedupeIgnAcrossQueues';
-import { parseGuildRank } from './pageAssignment';
+import { upgradeLegacyRankWinnerCounts } from './rewardContext';
 import { stripEmperiumCardQueuesAfterFragmentWeeklyWin } from './queueEligibility';
 import { pruneExpiredEmperiumWins } from './emperiumWinCooldown';
 import {
   migrateFeatherItems,
   parseRewardItemCounts,
 } from './featherMigration';
+import { parseGuildRank } from './pageAssignment';
 
 /** Absolute API origin, or empty string to use same origin (Vite `/api` proxy in dev). */
 export function apiUrl(path: string): string {
@@ -259,9 +260,15 @@ export function parseAuctionState(json: unknown): AuctionState | null {
     v === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
   const eventMode = parseEventType(o.eventMode);
   const rewardRank = parseGuildRank(o.rewardRank);
-  const rewardItemCounts: RewardItemCounts = parseRewardItemCounts(
+  const migratedItems = migrateFeatherItems(items);
+  let rewardItemCounts: RewardItemCounts = parseRewardItemCounts(
     o.rewardItemCounts,
     rewardRank
+  );
+  rewardItemCounts = upgradeLegacyRankWinnerCounts(
+    rewardItemCounts,
+    rewardRank,
+    migratedItems
   );
 
   let freeDrawChosenByItemId: Record<string, number> | undefined;
@@ -296,7 +303,7 @@ export function parseAuctionState(json: unknown): AuctionState | null {
   return normalizeQueuesForEventMode(
     stripEmperiumCardQueuesAfterFragmentWeeklyWin(
       dedupeRosterMembersByIgn({
-        items: migrateFeatherItems(items),
+        items: migratedItems,
         members,
         dataVersion,
         winnerShortlistUiEnabled,
@@ -446,9 +453,9 @@ export async function publicMoveQueueMember(
  */
 export async function persistAuctionState(
   state: AuctionState,
-  opts: { bearerToken?: string } = {}
+  opts: { bearerToken?: string; includeWeeklyTypeWins?: boolean } = {}
 ): Promise<AuctionState | null> {
-  const body = {
+  const body: Record<string, unknown> = {
     items: state.items,
     members: state.members,
     dataVersion: state.dataVersion ?? AUCTION_DATA_VERSION,
@@ -460,6 +467,9 @@ export async function persistAuctionState(
     freeDrawChosenByItemId: state.freeDrawChosenByItemId ?? {},
     shuffleWinnerSlotsByItemId: state.shuffleWinnerSlotsByItemId ?? {},
   };
+  if (opts.includeWeeklyTypeWins && Array.isArray(state.weeklyTypeWins)) {
+    body.weeklyTypeWins = state.weeklyTypeWins;
+  }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts.bearerToken) headers.Authorization = `Bearer ${opts.bearerToken}`;
   const res = await fetch(apiUrl('/api/state'), {

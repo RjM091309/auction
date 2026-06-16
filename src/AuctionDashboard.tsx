@@ -29,6 +29,7 @@ import {
   GuildRank,
   GuildMember,
   ItemType,
+  RewardItemCounts,
   WeeklyEventType,
 } from './types';
 import { saveState } from './lib/storage';
@@ -53,6 +54,7 @@ import {
 } from './lib/queueEligibility';
 import { findEmperiumWinCooldown } from './lib/emperiumWinCooldown';
 import { emperiumWinCooldownExpiresAt } from './lib/overrunWeek';
+import { syncEmperiumWeeklyWinsForWinnerMarkChange } from './lib/weeklyTypeWinsSync';
 import {
   deactivateMemberOnServer,
   removeMemberFromItemQueueOnServer,
@@ -120,7 +122,9 @@ import {
   sortAuctionItemsForDisplay,
 } from './lib/auctionItemDisplayOrder';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
-import { resolveEffectiveRewardContext, displayWinnerPoolCapForItem } from './lib/rewardContext';
+import { resolveEffectiveRewardContext, displayWinnerPoolCapForItem, totalItemsForAuctionItem } from './lib/rewardContext';
+import { isIllusionFragmentItem } from './lib/hiddenAuctionItems';
+import SettingsToggle from './components/SettingsToggle';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
 import { filterToCurrentAuctionWeek, getAuctionWeekMondayKey } from './lib/auctionWeek';
 import {
@@ -131,6 +135,7 @@ import {
   fragmentGeneralPageSpan,
   freeItemsFromTotalItems,
   GUILD_RANK_OPTIONS,
+  isGuildLeagueRank,
   parseGuildRank,
   totalItemsForTypeByRank,
   winnerSlotsFromTotalItems,
@@ -386,16 +391,63 @@ export default function AuctionDashboard() {
     feathers: number;
     feathersItemsPerWinner: number;
     fragmentByItemId: Record<string, number>;
+    rankWinnerDouble: boolean;
   }>({
     rank: 'Bronze',
     feathers: defaultWinnerPoolCapForType('Feathers'),
     feathersItemsPerWinner: defaultFeathersItemsPerWinner('Bronze'),
     fragmentByItemId: {},
+    rankWinnerDouble: false,
   });
-  const winnerSlotsFromItems = (type: ItemType, items: number): number => {
-    return winnerSlotsFromTotalItems(type, items, winnerSetLimitForm.rank, {
-      feathersItemsPerWinner: winnerSetLimitForm.feathersItemsPerWinner,
-    });
+  const winnerCountsFromForm = (): RewardItemCounts => ({
+    fragment:
+      winnerSetLimitForm.fragmentByItemId.m1 ??
+      Object.values(winnerSetLimitForm.fragmentByItemId)[0] ??
+      0,
+    feathers: winnerSetLimitForm.feathers,
+    feathersItemsPerWinner: winnerSetLimitForm.feathersItemsPerWinner,
+    fragmentByItemId: winnerSetLimitForm.fragmentByItemId,
+    ...(winnerSetLimitForm.rankWinnerDouble ? { rankWinnerDouble: true } : {}),
+  });
+  const winnerSlotsFromItems = (
+    type: ItemType,
+    items: number,
+    item?: Pick<AuctionItem, 'id' | 'name'>
+  ): number => {
+    const counts = winnerCountsFromForm();
+    const total =
+      type === 'Fragment Card' && item
+        ? counts.fragmentByItemId?.[item.id] ?? counts.fragment ?? 0
+        : items;
+    return winnerSlotsFromTotalItems(
+      type,
+      total,
+      winnerSetLimitForm.rank,
+      counts
+    );
+  };
+
+  const applyRankWinnerDoubleToForm = (
+    prev: typeof winnerSetLimitForm,
+    checked: boolean,
+    items: AuctionItem[]
+  ): typeof winnerSetLimitForm => {
+    const nextFragment = { ...prev.fragmentByItemId };
+    for (const card of activeFragmentAuctionItems(items)) {
+      const v = nextFragment[card.id] ?? 0;
+      if (isIllusionFragmentItem(card)) continue;
+      nextFragment[card.id] = checked
+        ? v * 2
+        : Math.max(0, Math.floor(v / 2));
+    }
+    return {
+      ...prev,
+      rankWinnerDouble: checked,
+      feathers: checked
+        ? prev.feathers * 2
+        : Math.max(0, Math.floor(prev.feathers / 2)),
+      fragmentByItemId: nextFragment,
+    };
   };
 
   const [newItemName, setNewItemName] = useState('');
@@ -1528,6 +1580,9 @@ export default function AuctionDashboard() {
       const drawSlots =
         base.shuffleWinnerSlotsByItemId?.[action.itemId] ?? poolFromLimits;
 
+      const prevRecorded = target.recordedWinnerNames ?? [];
+      const prevRevoked = target.revokedWinnerNames ?? [];
+
       let nextNames: string[];
       let nextRevoked: string[];
       if (action.kind === 'mark') {
@@ -1582,8 +1637,19 @@ export default function AuctionDashboard() {
         }
       }
 
+      const syncedWins = syncEmperiumWeeklyWinsForWinnerMarkChange(
+        base.eventMode,
+        target,
+        prevRecorded,
+        nextNames,
+        prevRevoked,
+        nextRevoked,
+        base.weeklyTypeWins
+      );
+
       const next: AuctionState = {
         ...base,
+        ...(syncedWins !== undefined ? { weeklyTypeWins: syncedWins } : {}),
         items: base.items.map((it) => {
           if (it.id !== action.itemId) return it;
           return {
@@ -1598,7 +1664,10 @@ export default function AuctionDashboard() {
       skipPersistOnceRef.current = true;
       setState(next);
 
-      const server = await persistAuctionState(next, { bearerToken });
+      const server = await persistAuctionState(next, {
+        bearerToken,
+        includeWeeklyTypeWins: syncedWins !== undefined,
+      });
       if (server) {
         queueBaselineRef.current = buildQueueBaselineFromState(server);
         skipPersistOnceRef.current = true;
@@ -2064,15 +2133,15 @@ export default function AuctionDashboard() {
   const openWinnerSetLimitModal = () => {
     if (!state) return;
     const persistedRank = parseGuildRank(state.rewardRank);
-    // Each event mode pins its rank preset (Guild League → Bronze,
-    // Emperium Overrun → Emperium overrun). If the persisted rank doesn't
-    // match the current event mode (e.g. event was flipped without re-
-    // saving limits), coerce to the matching rank and recompute presets so
-    // the modal opens in a valid state.
-    const requiredRank: GuildRank =
-      eventModeActive === 'Guild League' ? 'Bronze' : 'Emperium overrun';
+    // Guild League → Bronze or Silver; Emperium Overrun → Emperium overrun only.
     const rank: GuildRank =
-      persistedRank === requiredRank ? persistedRank : requiredRank;
+      eventModeActive === 'Guild League'
+        ? isGuildLeagueRank(persistedRank)
+          ? persistedRank
+          : 'Bronze'
+        : persistedRank === 'Emperium overrun'
+          ? persistedRank
+          : 'Emperium overrun';
     const preset =
       rank === persistedRank
         ? state.rewardItemCounts ?? rankPresetLimits(rank)
@@ -2086,6 +2155,10 @@ export default function AuctionDashboard() {
             defaultFeathersItemsPerWinner(rank))
           : defaultFeathersItemsPerWinner(rank),
       fragmentByItemId: buildFragmentLimitsByItemId(state.items, preset),
+      rankWinnerDouble:
+        rank === persistedRank
+          ? state.rewardItemCounts?.rankWinnerDouble === true
+          : false,
     });
     setWinnerSetLimitModalOpen(true);
   };
@@ -2115,15 +2188,13 @@ export default function AuctionDashboard() {
         feathers: formSnap.feathers,
         feathersItemsPerWinner: Math.max(1, formSnap.feathersItemsPerWinner),
         fragmentByItemId: { ...formSnap.fragmentByItemId },
+        ...(formSnap.rankWinnerDouble ? { rankWinnerDouble: true } : {}),
       },
       items: state.items.map((it) => {
         if (it.type === 'Fragment Card') {
-          const fragItems =
-            formSnap.fragmentByItemId[it.id] ??
-            totalItemsForTypeByRank('Fragment Card', formSnap.rank);
           return {
             ...it,
-            winnerPoolCap: winnerSlotsFromItems('Fragment Card', fragItems),
+            winnerPoolCap: winnerSlotsFromItems('Fragment Card', 0, it),
           };
         }
         if (it.type === 'Feathers') {
@@ -3170,13 +3241,13 @@ export default function AuctionDashboard() {
                 <div className="inline-flex w-full rounded-xl border border-slate-700 bg-slate-900 p-1">
                   {GUILD_RANK_OPTIONS
                     // Each event mode pins its rank preset:
-                    //   • Guild League     → Bronze only
+                    //   • Guild League     → Bronze or Silver
                     //   • Emperium Overrun → Emperium overrun only
                     // The off-mode rank button is hidden so users can't pick
                     // a mismatching preset.
                     .filter((rank) =>
                       eventModeActive === 'Guild League'
-                        ? rank === 'Bronze'
+                        ? isGuildLeagueRank(rank)
                         : rank === 'Emperium overrun'
                     )
                     .map((rank) => (
@@ -3189,6 +3260,7 @@ export default function AuctionDashboard() {
                             return {
                               ...prev,
                               rank,
+                              rankWinnerDouble: false,
                               feathers: preset.feathers,
                               feathersItemsPerWinner:
                                 defaultFeathersItemsPerWinner(rank),
@@ -3211,6 +3283,23 @@ export default function AuctionDashboard() {
                     ))}
                 </div>
               </div>
+              {eventModeActive === 'Guild League' ? (
+                <SettingsToggle
+                  id="rank-winner-double"
+                  checked={winnerSetLimitForm.rankWinnerDouble}
+                  onChange={(checked) =>
+                    setWinnerSetLimitForm((prev) =>
+                      applyRankWinnerDoubleToForm(
+                        prev,
+                        checked,
+                        state?.items ?? []
+                      )
+                    )
+                  }
+                  label="Rank winner"
+                  description="×2 Puppet items & Feathers total. Illusion and items per winner stay the same."
+                />
+              ) : null}
               {activeFragmentAuctionItems(state?.items ?? []).map((card, idx) => {
                 const value = winnerSetLimitForm.fragmentByItemId[card.id] ?? 0;
                 return (
@@ -3306,18 +3395,13 @@ export default function AuctionDashboard() {
                     'Feathers',
                     winnerSetLimitForm.feathers,
                     winnerSetLimitForm.rank,
-                    {
-                      feathersItemsPerWinner: winnerSetLimitForm.feathersItemsPerWinner,
-                    }
+                    winnerCountsFromForm()
                   ) > 0
                     ? ` (+${freeItemsFromTotalItems(
                         'Feathers',
                         winnerSetLimitForm.feathers,
                         winnerSetLimitForm.rank,
-                        {
-                          feathersItemsPerWinner:
-                            winnerSetLimitForm.feathersItemsPerWinner,
-                        }
+                        winnerCountsFromForm()
                       )} free items)`
                     : ''}
                 </p>
@@ -3392,7 +3476,9 @@ function QueueCard({
   rewardItemCounts: {
     fragment: number;
     feathers: number;
+    feathersItemsPerWinner?: number;
     fragmentByItemId?: Record<string, number>;
+    rankWinnerDouble?: boolean;
   };
   /** Shared general page index for Fragment + Feathers (creation order). Fragment badges also show I# (one item per winner). */
   featherPageStart?: number;
@@ -3493,7 +3579,7 @@ function QueueCard({
     item.type === 'Feathers'
       ? freeItemsFromTotalItems(
           item.type,
-          rewardItemCounts.feathers,
+          totalItemsForAuctionItem(item, rewardItemCounts) ?? 0,
           rewardRank,
           rewardItemCounts
         )
@@ -3501,7 +3587,8 @@ function QueueCard({
   const freePageInfo = (() => {
     if (item.type !== 'Feathers') return null;
     const pageStart = featherPageStart ?? 1;
-    const totalItems = rewardItemCounts.feathers;
+    const totalItems =
+      totalItemsForAuctionItem(item, rewardItemCounts) ?? rewardItemCounts.feathers;
     const offset = featherPageCountBeforePartialFree(
       item.type,
       totalItems,
@@ -3585,13 +3672,7 @@ function QueueCard({
         </h3>
         {(() => {
           const winnerCount = poolCap;
-          const totalItems =
-            item.type === 'Feathers'
-              ? rewardItemCounts.feathers
-              : item.type === 'Fragment Card'
-                ? (rewardItemCounts.fragmentByItemId?.[item.id] ??
-                    rewardItemCounts.fragment)
-                : null;
+          const totalItems = totalItemsForAuctionItem(item, rewardItemCounts);
           const winnerLabel = winnerCount === 1 ? 'winner' : 'winners';
           const itemNoun = totalItems === 1 ? 'item' : 'items';
           const winnerTitle =
