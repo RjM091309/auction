@@ -9,7 +9,6 @@ module.exports = {
       cwd: __dirname,
       script: 'server/src/index.js',
       interpreter: 'node',
-      node_args: '--watch',
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,

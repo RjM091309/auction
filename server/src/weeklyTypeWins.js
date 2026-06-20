@@ -1,5 +1,6 @@
 import { getAuctionWeekMondayKey, getAuctionWeekTimezone } from './auctionWeek.js';
 import { isEmperiumCooldownItem, pruneExpiredEmperiumWins } from './emperiumWinCooldown.js';
+import { isEmperiumWinStillOnCooldown } from './overrunWeek.js';
 
 export const META_AUCTION_WEEK_MONDAY = 'auction_week_monday';
 export const META_WEEKLY_TYPE_WINS = 'weekly_type_wins';
@@ -192,6 +193,84 @@ export async function backfillWeeklyWinsFromRecordedWinners(q, items, wins) {
     }
   }
   return out;
+}
+
+function winKey(ign, t, itemId) {
+  return `${ign}\0${t}\0${itemId ?? ''}`;
+}
+
+/** Keep the newest `at` per IGN when multiple log sources backfill the same row. */
+function upsertEmperiumCooldownWin(out, ign, t, itemId, at, nowMs = Date.now()) {
+  if (!Number.isFinite(at) || at <= 0) return;
+  if (!isEmperiumWinStillOnCooldown(at, nowMs)) return;
+  const k = winKey(ign, t, itemId);
+  const idx = out.findIndex((w) => winKey(w.ign, w.t, w.itemId) === k);
+  if (idx >= 0) {
+    const prevAt = out[idx].at ?? 0;
+    if (at > prevAt) out[idx] = { ign, t, itemId, at };
+    return;
+  }
+  out.push({ ign, t, itemId, at });
+}
+
+async function backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs = Date.now()) {
+  const out = dedupeWeeklyWinsList(wins);
+  for (const it of items) {
+    if (!isEmperiumCooldownItem(it)) continue;
+    const latestByIgn = new Map();
+    for (const row of rows) {
+      if (row.itemId !== it.id) continue;
+      const ign = normalizeIgn(row.ign);
+      if (!ign || latestByIgn.has(ign)) continue;
+      latestByIgn.set(ign, Number(row.atMs));
+    }
+    for (const [ign, at] of latestByIgn) {
+      upsertEmperiumCooldownWin(out, ign, it.type, it.id, at, nowMs);
+    }
+  }
+  return out;
+}
+
+/**
+ * Rebuild missing Puppet CD rows from `winner_mark_log` when `weekly_type_wins`
+ * or `recordedWinnerNames` were cleared (e.g. Reset shuffle) but marks remain.
+ * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} q
+ * @param {Array<{ id: string, type: string, name?: string }>} items
+ * @param {WeeklyTypeWin[]} wins
+ * @param {number} [nowMs]
+ */
+export async function backfillWeeklyWinsFromWinnerMarkLog(q, items, wins, nowMs = Date.now()) {
+  const puppetIds = items.filter(isEmperiumCooldownItem).map((it) => it.id);
+  if (puppetIds.length === 0) return dedupeWeeklyWinsList(wins);
+  const placeholders = puppetIds.map(() => '?').join(', ');
+  const [rows] = await q.query(
+    `SELECT item_id AS itemId, ign, at_ms AS atMs FROM winner_mark_log
+     WHERE item_id IN (${placeholders})
+     ORDER BY at_ms DESC, id DESC`,
+    puppetIds
+  );
+  return backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs);
+}
+
+/**
+ * Rebuild missing Puppet CD rows from shuffle-lock wins in `bidder_state_log`
+ * (state = 1). Covers shortlist winners that never got an admin green check.
+ * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} q
+ * @param {Array<{ id: string, type: string, name?: string }>} items
+ * @param {WeeklyTypeWin[]} wins
+ * @param {number} [nowMs]
+ */
+export async function backfillWeeklyWinsFromBidderStateLog(q, items, wins, nowMs = Date.now()) {
+  const puppetIds = items.filter(isEmperiumCooldownItem).map((it) => it.id);
+  if (puppetIds.length === 0) return dedupeWeeklyWinsList(wins);
+  const placeholders = puppetIds.map(() => '?').join(', ');
+  const [rows] = await q.query(
+    `SELECT item_id AS itemId, ign, at_ms AS atMs FROM bidder_state_log
+     WHERE item_id IN (${placeholders}) AND state = 1
+     ORDER BY at_ms DESC, id DESC`,
+    puppetIds
+  );
+  return backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs);
 }
 
 /**

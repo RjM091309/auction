@@ -20,6 +20,8 @@ import {
 import { maxWinnersForItemInState } from './winnerPoolCaps.js';
 import {
   backfillWeeklyWinsFromRecordedWinners,
+  backfillWeeklyWinsFromWinnerMarkLog,
+  backfillWeeklyWinsFromBidderStateLog,
   loadWeeklyTypeWins,
   rolloverWeeklyWinsIfNewWeek,
   saveWeeklyTypeWins,
@@ -324,6 +326,16 @@ export async function getFullState(pool) {
   let weeklyTypeWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
   if (isEmperiumWinCooldownEnabled(eventMode)) {
     weeklyTypeWins = await backfillWeeklyWinsFromRecordedWinners(
+      pool,
+      items,
+      weeklyTypeWins
+    );
+    weeklyTypeWins = await backfillWeeklyWinsFromWinnerMarkLog(
+      pool,
+      items,
+      weeklyTypeWins
+    );
+    weeklyTypeWins = await backfillWeeklyWinsFromBidderStateLog(
       pool,
       items,
       weeklyTypeWins
@@ -1070,6 +1082,16 @@ export async function replaceFullState(pool, body) {
   } else if (isEmperiumWinCooldownEnabled(saveEventMode)) {
     nextWeeklyWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
     nextWeeklyWins = await backfillWeeklyWinsFromRecordedWinners(
+      pool,
+      body.items,
+      nextWeeklyWins
+    );
+    nextWeeklyWins = await backfillWeeklyWinsFromWinnerMarkLog(
+      pool,
+      body.items,
+      nextWeeklyWins
+    );
+    nextWeeklyWins = await backfillWeeklyWinsFromBidderStateLog(
       pool,
       body.items,
       nextWeeklyWins
