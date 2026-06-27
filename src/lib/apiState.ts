@@ -605,6 +605,35 @@ export async function setEventModeOnServer(
   return parsed;
 }
 
+/** Save Winner Settings only (Officer+ session). Skips full-state PUT validation. */
+export async function saveWinnerLimitsOnServer(
+  rewardRank: string,
+  rewardItemCounts: RewardItemCounts,
+  bearerToken: string
+): Promise<AuctionState> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
+  const res = await fetch(apiUrl('/api/state/winner-limits'), {
+    ...cred,
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ rewardRank, rewardItemCounts }),
+  });
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    throw new Error(text || `${res.status} ${res.statusText}`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error('Invalid JSON from server');
+  }
+  const parsed = parseAuctionState(json);
+  if (!parsed) throw new Error('Invalid auction state from server');
+  return parsed;
+}
+
 /** Soft-delete a member on the server (DB `active = 0`, queues cleared); returns latest state. */
 export async function deactivateMemberOnServer(memberId: number): Promise<AuctionState> {
   const res = await fetch(apiUrl(`/api/members/${encodeURIComponent(String(memberId))}`), {

@@ -1,4 +1,6 @@
 import { apiUrl } from './apiState';
+import type { PuppetCardCdDisplay } from './puppetCardCdDisplay';
+import type { WeeklyEventType } from '../types';
 
 export type BidderRole = 'Officer' | 'Member' | 'Developer' | 'Admin';
 export type PrivilegedRole = 'Officer' | 'Developer' | 'Admin';
@@ -12,7 +14,16 @@ export interface Bidder {
   password: string;
   active: boolean;
   approvalStatus: BidderApprovalStatus;
+  cardCd?: PuppetCardCdDisplay;
 }
+
+export interface BiddersListResponse {
+  bidders: Bidder[];
+  eventMode: WeeklyEventType;
+  fetchedAt: number;
+}
+
+export const BIDDERS_LIST_CACHE_KEY = 'bidders-list';
 
 export interface BidderInput {
   name: string;
@@ -103,6 +114,19 @@ function authHeaders(): HeadersInit {
 
 const cred: RequestInit = { credentials: 'include' };
 
+function parseCardCd(raw: unknown): PuppetCardCdDisplay | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const tone =
+    r.tone === 'cd' || r.tone === 'clear' || r.tone === 'na' ? r.tone : null;
+  if (!tone) return undefined;
+  return {
+    label: typeof r.label === 'string' ? r.label : '',
+    title: typeof r.title === 'string' ? r.title : '',
+    tone,
+  };
+}
+
 function parseBidder(raw: unknown): Bidder | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
@@ -115,6 +139,7 @@ function parseBidder(raw: unknown): Bidder | null {
         : NaN;
   if (!Number.isInteger(id) || id <= 0) return null;
   const approval = r.approvalStatus ?? r.approval_status;
+  const cardCd = parseCardCd(r.cardCd);
   return {
     id,
     name: typeof r.name === 'string' ? r.name : '',
@@ -134,6 +159,7 @@ function parseBidder(raw: unknown): Bidder | null {
         : approval === 'rejected'
           ? 'rejected'
           : 'approved',
+    ...(cardCd ? { cardCd } : {}),
   };
 }
 
@@ -314,7 +340,7 @@ export async function signOutBidderRequest(): Promise<void> {
   }
 }
 
-export async function fetchBidders(): Promise<Bidder[]> {
+export async function fetchBidders(): Promise<BiddersListResponse> {
   const res = await fetch(apiUrl('/api/bidders'), {
     ...cred,
     headers: { ...authHeaders() },
@@ -323,13 +349,18 @@ export async function fetchBidders(): Promise<Bidder[]> {
   if (!res.ok) {
     throw new Error(errorMessage(json, `${res.status} ${res.statusText}`));
   }
-  const arr =
-    json && typeof json === 'object' && Array.isArray((json as { bidders?: unknown }).bidders)
-      ? ((json as { bidders: unknown[] }).bidders)
-      : [];
-  return arr
+  const o = (json ?? {}) as { bidders?: unknown; eventMode?: unknown; fetchedAt?: unknown };
+  const arr = Array.isArray(o.bidders) ? o.bidders : [];
+  const bidders = arr
     .map(parseBidder)
     .filter((b): b is Bidder => b != null);
+  const eventMode: WeeklyEventType =
+    o.eventMode === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
+  const fetchedAt =
+    typeof o.fetchedAt === 'number' && Number.isFinite(o.fetchedAt)
+      ? o.fetchedAt
+      : Date.now();
+  return { bidders, eventMode, fetchedAt };
 }
 
 export async function createBidderRequest(input: BidderInput): Promise<Bidder> {

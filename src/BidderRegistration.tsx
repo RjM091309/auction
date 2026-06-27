@@ -34,6 +34,7 @@ import {
   deleteBidderRequest,
   fetchBidders,
   fetchPendingBidders,
+  BIDDERS_LIST_CACHE_KEY,
   loadStoredActor,
   rejectBidderRequest,
   signOutBidderRequest,
@@ -41,14 +42,10 @@ import {
   updateBidderRequest,
 } from './lib/apiBidders';
 import { notifyBidderAuditChanged } from './lib/apiBidderAudit';
-import { fetchAuctionState } from './lib/apiState';
-import {
-  puppetCardCdBadgeClass,
-  puppetCardCdDisplayForIgn,
-  type PuppetCardCdDisplay,
-} from './lib/puppetCardCdDisplay';
+import { puppetCardCdBadgeClass, type PuppetCardCdDisplay } from './lib/puppetCardCdDisplay';
 import { isEmperiumWinCooldownEnabled } from './lib/emperiumWinCooldown';
-import type { WeeklyEventType, WeeklyTypeWin } from './types';
+import { fetchWithCache, invalidateFetchCache } from './lib/fetchCache';
+import type { WeeklyEventType } from './types';
 import BidderAuthGate from './BidderAuthGate';
 
 /**
@@ -297,6 +294,7 @@ type CdFilter = 'all' | 'on_cd' | 'ready';
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 type PageSize = (typeof PAGE_SIZE_OPTIONS)[number];
 const DEFAULT_PAGE_SIZE: PageSize = 25;
+const BIDDERS_REFRESH_MS = 30_000;
 
 interface PageSizeMenuProps {
   value: PageSize;
@@ -451,10 +449,10 @@ function BidderRegistrationAuthed({
   onExpired,
 }: BidderRegistrationAuthedProps) {
   const [bidders, setBidders] = useState<Bidder[]>([]);
-  const [weeklyTypeWins, setWeeklyTypeWins] = useState<WeeklyTypeWin[]>([]);
   const [auctionEventMode, setAuctionEventMode] =
     useState<WeeklyEventType>('Emperium Overrun');
-  const [loading, setLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('active');
@@ -463,7 +461,6 @@ function BidderRegistrationAuthed({
   const [page, setPage] = useState(1);
 
   const [pendingBidders, setPendingBidders] = useState<Bidder[]>([]);
-  const [pendingLoading, setPendingLoading] = useState(true);
   const [pendingError, setPendingError] = useState<string | null>(null);
   const [pendingBusyId, setPendingBusyId] = useState<number | null>(null);
 
@@ -491,47 +488,45 @@ function BidderRegistrationAuthed({
     [onExpired]
   );
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      setError(null);
+  const loadBidders = useCallback(
+    async (opts: { silent?: boolean } = {}) => {
+      if (opts.silent) setRefreshing(true);
       try {
-        const [list, auction] = await Promise.all([
-          fetchBidders(),
-          fetchAuctionState(),
-        ]);
-        if (!cancelled) {
-          setBidders(list);
-          setWeeklyTypeWins(auction?.weeklyTypeWins ?? []);
-          setAuctionEventMode(auction?.eventMode ?? 'Emperium Overrun');
+        const { data, fromCache } = await fetchWithCache(
+          BIDDERS_LIST_CACHE_KEY,
+          fetchBidders,
+          { ttlMs: BIDDERS_REFRESH_MS }
+        );
+        setBidders(data.bidders);
+        setAuctionEventMode(data.eventMode);
+        setError(null);
+        if (!fromCache || data.bidders.length > 0) {
+          setInitialLoading(false);
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (/sign in|401|expired/i.test(msg)) {
-          if (!cancelled) onExpired();
-          return;
-        }
-        if (!cancelled) setError(msg);
+        if (handleAuthFailure(msg)) return;
+        setError(msg);
       } finally {
-        if (!cancelled) setLoading(false);
+        setInitialLoading(false);
+        setRefreshing(false);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [onExpired]);
+    },
+    [handleAuthFailure]
+  );
+
+  const bustBiddersCache = useCallback(() => {
+    invalidateFetchCache(BIDDERS_LIST_CACHE_KEY);
+    void loadBidders({ silent: true });
+  }, [loadBidders]);
 
   useEffect(() => {
+    void loadBidders();
     const id = window.setInterval(() => {
-      void fetchAuctionState().then((auction) => {
-        if (!auction) return;
-        setWeeklyTypeWins(auction.weeklyTypeWins ?? []);
-        setAuctionEventMode(auction.eventMode ?? 'Emperium Overrun');
-      });
-    }, 30_000);
+      void loadBidders({ silent: true });
+    }, BIDDERS_REFRESH_MS);
     return () => window.clearInterval(id);
-  }, []);
+  }, [loadBidders]);
 
   // Pending approvals: load on mount and refresh periodically so new public
   // registrations show up without the admin having to refresh the page.
@@ -551,8 +546,6 @@ function BidderRegistrationAuthed({
           return;
         }
         if (!cancelled) setPendingError(msg);
-      } finally {
-        if (!cancelled) setPendingLoading(false);
       }
     };
     void load();
@@ -578,6 +571,7 @@ function BidderRegistrationAuthed({
         // Tell the parent nav (AuctionDashboard) to refresh its pending badge.
         window.dispatchEvent(new Event('pendingBiddersChanged'));
         notifyBidderAuditChanged();
+        bustBiddersCache();
         void swalSuccess(`"${approved.name}" has been approved.`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -590,7 +584,7 @@ function BidderRegistrationAuthed({
         setPendingBusyId(null);
       }
     },
-    [onExpired]
+    [onExpired, bustBiddersCache]
   );
 
   const handleRejectPending = useCallback(
@@ -609,6 +603,7 @@ function BidderRegistrationAuthed({
         });
         window.dispatchEvent(new Event('pendingBiddersChanged'));
         notifyBidderAuditChanged();
+        bustBiddersCache();
         void swalSuccess(`"${rejected.name}" has been rejected.`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -621,31 +616,8 @@ function BidderRegistrationAuthed({
         setPendingBusyId(null);
       }
     },
-    [onExpired]
+    [onExpired, bustBiddersCache]
   );
-
-  const cardCdByIgn = useMemo(() => {
-    const now = Date.now();
-    const map = new Map<string, PuppetCardCdDisplay>();
-    for (const b of bidders) {
-      const key = b.name.trim().toLowerCase();
-      if (!key || map.has(key)) continue;
-      map.set(
-        key,
-        puppetCardCdDisplayForIgn(
-          b.name,
-          weeklyTypeWins,
-          auctionEventMode,
-          now
-        )
-      );
-    }
-    return map;
-  }, [bidders, weeklyTypeWins, auctionEventMode]);
-
-  useEffect(() => {
-    if (!showCardCd && cdFilter !== 'all') setCdFilter('all');
-  }, [showCardCd, cdFilter]);
 
   const filtered = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
@@ -653,7 +625,7 @@ function BidderRegistrationAuthed({
       if (statusFilter === 'active' && !b.active) return false;
       if (statusFilter === 'inactive' && b.active) return false;
       if (showCardCd && cdFilter !== 'all') {
-        const cd = cardCdByIgn.get(b.name.trim().toLowerCase());
+        const cd = b.cardCd;
         if (cdFilter === 'on_cd' && cd?.tone !== 'cd') return false;
         if (cdFilter === 'ready' && cd?.tone !== 'clear') return false;
       }
@@ -661,7 +633,11 @@ function BidderRegistrationAuthed({
       const hay = `${b.id} ${b.name} ${b.role} ${b.password}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [bidders, searchTerm, statusFilter, cdFilter, cardCdByIgn, showCardCd]);
+  }, [bidders, searchTerm, statusFilter, cdFilter, showCardCd]);
+
+  useEffect(() => {
+    if (!showCardCd && cdFilter !== 'all') setCdFilter('all');
+  }, [showCardCd, cdFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, totalPages);
@@ -743,6 +719,7 @@ function BidderRegistrationAuthed({
         setModalOpen(false);
         setDraft(EMPTY_DRAFT);
         notifyBidderAuditChanged();
+        bustBiddersCache();
         void swalSuccess(`"${created.name}" has been added.`);
       } else {
         // Password and active are managed elsewhere (row toggle / create flow),
@@ -758,6 +735,7 @@ function BidderRegistrationAuthed({
         setModalOpen(false);
         setDraft(EMPTY_DRAFT);
         notifyBidderAuditChanged();
+        bustBiddersCache();
         void swalSuccess(`"${updated.name}" has been updated.`);
       }
     } catch (e) {
@@ -781,6 +759,7 @@ function BidderRegistrationAuthed({
         await deleteBidderRequest(b.id);
         setBidders((prev) => prev.filter((row) => row.id !== b.id));
         notifyBidderAuditChanged();
+        bustBiddersCache();
         void swalSuccess(`"${b.name}" has been deleted.`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -788,7 +767,7 @@ function BidderRegistrationAuthed({
         void swalError(msg);
       }
     },
-    [handleAuthFailure]
+    [handleAuthFailure, bustBiddersCache]
   );
 
   const toggleActive = useCallback(
@@ -799,6 +778,7 @@ function BidderRegistrationAuthed({
           prev.map((row) => (row.id === updated.id ? updated : row))
         );
         notifyBidderAuditChanged();
+        bustBiddersCache();
         void swalSuccess(
           `"${updated.name}" is now ${updated.active ? 'Active' : 'Inactive'}.`
         );
@@ -808,7 +788,7 @@ function BidderRegistrationAuthed({
         void swalError(msg);
       }
     },
-    [handleAuthFailure]
+    [handleAuthFailure, bustBiddersCache]
   );
 
   return (
@@ -820,6 +800,9 @@ function BidderRegistrationAuthed({
           </h2>
           <p className="text-slate-400 text-xs sm:text-sm">
             Manage bidders.
+            {refreshing ? (
+              <span className="ml-2 text-slate-500">Refreshing…</span>
+            ) : null}
           </p>
           <p className="mt-1.5 inline-flex items-center gap-2 text-[11px] text-slate-400">
             Signed in as{' '}
@@ -885,6 +868,7 @@ function BidderRegistrationAuthed({
         </div>
       </div>
 
+      {pendingBidders.length > 0 ? (
       <section
         className="overflow-hidden rounded-2xl border border-amber-900/50 bg-gradient-to-br from-amber-950/40 via-slate-900 to-slate-900"
         aria-labelledby="pending-bidders-heading"
@@ -906,77 +890,66 @@ function BidderRegistrationAuthed({
               </p>
             </div>
           </div>
-          {pendingBidders.length > 0 && (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/20 px-2.5 py-0.5 text-[11px] font-black uppercase tracking-widest text-amber-200">
-              {pendingBidders.length} waiting
-            </span>
-          )}
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/20 px-2.5 py-0.5 text-[11px] font-black uppercase tracking-widest text-amber-200">
+            {pendingBidders.length} waiting
+          </span>
         </header>
-        {pendingError && (
+        {pendingError ? (
           <div className="border-b border-rose-900/40 bg-rose-950/40 px-4 py-2 text-xs text-rose-200">
             {pendingError}
           </div>
-        )}
-        {pendingLoading ? (
-          <p className="px-4 py-6 text-center text-sm text-slate-500">
-            Loading pending registrations…
-          </p>
-        ) : pendingBidders.length === 0 ? (
-          <p className="px-4 py-6 text-center text-sm text-slate-500">
-            No pending registrations. New public sign-ups will show up here.
-          </p>
-        ) : (
-          <ul className="divide-y divide-amber-900/30">
-            {pendingBidders.map((b) => {
-              const busy = pendingBusyId === b.id;
-              return (
-                <li
-                  key={b.id}
-                  className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-slate-800 text-sm font-black text-slate-300">
-                      {b.name.charAt(0).toUpperCase() || '?'}
-                    </div>
-                    <div>
-                      <p className="text-sm font-bold text-white">{b.name}</p>
-                      <p className="text-[11px] text-slate-400">
-                        <span className="font-mono">id {b.id}</span>
-                        <span className="mx-1.5 text-slate-600">•</span>
-                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-amber-300">
-                          Pending approval
-                        </span>
-                      </p>
-                    </div>
+        ) : null}
+        <ul className="divide-y divide-amber-900/30">
+          {pendingBidders.map((b) => {
+            const busy = pendingBusyId === b.id;
+            return (
+              <li
+                key={b.id}
+                className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-slate-800 text-sm font-black text-slate-300">
+                    {b.name.charAt(0).toUpperCase() || '?'}
                   </div>
-                  <div className="flex items-center gap-2 sm:justify-end">
-                    <button
-                      type="button"
-                      onClick={() => void handleApprovePending(b)}
-                      disabled={busy}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-black uppercase tracking-wide text-white shadow-md shadow-emerald-900/30 transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
-                      Approve
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleRejectPending(b)}
-                      disabled={busy}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-rose-700 bg-rose-950/60 px-3 py-1.5 text-xs font-black uppercase tracking-wide text-rose-200 transition-colors hover:border-rose-500 hover:bg-rose-900/50 hover:text-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <X className="h-3.5 w-3.5" aria-hidden />
-                      Reject
-                    </button>
+                  <div>
+                    <p className="text-sm font-bold text-white">{b.name}</p>
+                    <p className="text-[11px] text-slate-400">
+                      <span className="font-mono">id {b.id}</span>
+                      <span className="mx-1.5 text-slate-600">•</span>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-amber-300">
+                        Pending approval
+                      </span>
+                    </p>
                   </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+                </div>
+                <div className="flex items-center gap-2 sm:justify-end">
+                  <button
+                    type="button"
+                    onClick={() => void handleApprovePending(b)}
+                    disabled={busy}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-black uppercase tracking-wide text-white shadow-md shadow-emerald-900/30 transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRejectPending(b)}
+                    disabled={busy}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-rose-700 bg-rose-950/60 px-3 py-1.5 text-xs font-black uppercase tracking-wide text-rose-200 transition-colors hover:border-rose-500 hover:bg-rose-900/50 hover:text-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <X className="h-3.5 w-3.5" aria-hidden />
+                    Reject
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       </section>
+      ) : null}
 
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3">
         <div className="relative w-full sm:max-w-sm">
           <Search
             className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
@@ -990,14 +963,14 @@ function BidderRegistrationAuthed({
             className="w-full rounded-xl border border-slate-700 bg-slate-900 px-9 py-2.5 text-sm text-slate-100 outline-none transition-colors placeholder:text-slate-500 focus:border-blue-500"
           />
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="inline-flex rounded-xl border border-slate-700 bg-slate-900 p-1">
+        <div className="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+          <div className="flex w-full rounded-xl border border-slate-700 bg-slate-900 p-1 sm:inline-flex sm:w-auto">
             {(['all', 'active', 'inactive'] as const).map((opt) => (
               <button
                 key={opt}
                 type="button"
                 onClick={() => setStatusFilter(opt)}
-                className={`rounded-lg px-3 py-1.5 text-xs font-black uppercase tracking-wide transition-colors ${
+                className={`min-w-0 flex-1 rounded-lg px-2 py-2 text-center text-[11px] font-black uppercase tracking-wide transition-colors sm:flex-none sm:px-3 sm:py-1.5 sm:text-xs ${
                   statusFilter === opt
                     ? 'bg-blue-600 text-white'
                     : 'text-slate-300 hover:bg-slate-800'
@@ -1008,7 +981,7 @@ function BidderRegistrationAuthed({
             ))}
           </div>
           {showCardCd ? (
-            <div className="inline-flex rounded-xl border border-amber-900/50 bg-slate-900 p-1">
+            <div className="flex w-full rounded-xl border border-amber-900/50 bg-slate-900 p-1 sm:inline-flex sm:w-auto">
               {(
                 [
                   { id: 'all', label: 'All CD' },
@@ -1020,7 +993,7 @@ function BidderRegistrationAuthed({
                   key={opt.id}
                   type="button"
                   onClick={() => setCdFilter(opt.id)}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-black uppercase tracking-wide transition-colors ${
+                  className={`min-w-0 flex-1 rounded-lg px-2 py-2 text-center text-[11px] font-black uppercase tracking-wide transition-colors sm:flex-none sm:px-3 sm:py-1.5 sm:text-xs ${
                     cdFilter === opt.id
                       ? 'bg-amber-600 text-white'
                       : 'text-slate-300 hover:bg-slate-800'
@@ -1055,7 +1028,7 @@ function BidderRegistrationAuthed({
               </tr>
             </thead>
             <tbody>
-              {loading ? (
+              {initialLoading ? (
                 <tr>
                   <td
                     colSpan={tableColSpan}
@@ -1087,12 +1060,11 @@ function BidderRegistrationAuthed({
                       bidder={b}
                       showCardCd={showCardCd}
                       cardCd={
-                        cardCdByIgn.get(b.name.trim().toLowerCase()) ??
-                        puppetCardCdDisplayForIgn(
-                          b.name,
-                          weeklyTypeWins,
-                          auctionEventMode
-                        )
+                        b.cardCd ?? {
+                          label: '—',
+                          title: 'Card CD loading',
+                          tone: 'na',
+                        }
                       }
                       canEdit={canEditThis}
                       canDelete={canDeleteThis}

@@ -6,7 +6,7 @@ import type {
   RewardItemCounts,
   WeeklyEventType,
 } from '../types';
-import { buildFragmentLimitsByItemId, activeFragmentAuctionItems } from './featherMigration';
+import { activeFragmentAuctionItems } from './featherMigration';
 import { isIllusionFragmentItem } from './hiddenAuctionItems';
 import {
   parseGuildRank,
@@ -15,6 +15,7 @@ import {
   winnerSlotsFromTotalItems,
   featherItemsPerWinnerUnit,
   defaultFeathersItemsPerWinner,
+  defaultFragmentCountForItem,
 } from './pageAssignment';
 import { maxQueueSlotsAfterShuffle } from './shuffleCaps';
 
@@ -42,10 +43,10 @@ export function presetRewardItemCounts(
   const activeItems = (items ?? []).filter(
     (it) => it.status === 'active'
   ) as AuctionItem[];
-  const fragmentByItemId = buildFragmentLimitsByItemId(activeItems, {
-    fragment,
-    feathers,
-  });
+  const fragmentByItemId: Record<string, number> = {};
+  for (const it of activeFragmentAuctionItems(activeItems)) {
+    fragmentByItemId[it.id] = defaultFragmentCountForItem(rank, it);
+  }
   return {
     fragment,
     feathers,

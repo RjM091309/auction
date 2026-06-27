@@ -29,6 +29,7 @@ import {
   publicAddBidToQueue,
   publicMoveQueueMember,
   setEventMode,
+  setWinnerLimits,
   clearAllActiveQueues,
 } from './stateRepo.js';
 import { requireAuth } from './auth.js';
@@ -67,6 +68,7 @@ import {
 import { getOverrunSundayKey } from './overrunWeek.js';
 import { getAuctionWeekTimezone } from './auctionWeek.js';
 import { pinShuffleQueueItems } from './sureWinPin.js';
+import { getOnCdList, listBiddersWithCardCd } from './cardCdApi.js';
 
 const PORT = Number(process.env.PORT ?? 3333);
 
@@ -100,6 +102,17 @@ app.get('/api/state', async (_req, res) => {
   try {
     const state = await getFullState(pool);
     res.json(state);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+/** Public read — On CD list only (server-computed, no full auction state). */
+app.get('/api/card-cd', async (_req, res) => {
+  try {
+    const payload = await getOnCdList(pool);
+    res.json(payload);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: String(e.message) });
@@ -260,6 +273,44 @@ app.post('/api/state/event-mode', requireAuth, async (req, res) => {
     });
     console.log(
       `[audit] event-mode set=${rawMode} by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
+    );
+    res.json(state);
+  } catch (e) {
+    const code = e.statusCode ?? 500;
+    if (code >= 500) console.error(e);
+    res.status(code).json({ error: String(e.message ?? 'Error') });
+  }
+});
+
+/**
+ * Privileged Winner Settings save. Updates rank, item counts, and pool caps
+ * without running full-state recorded-winner validation (so limits can be
+ * raised above existing manual marks).
+ */
+app.post('/api/state/winner-limits', requireAuth, async (req, res) => {
+  try {
+    const actor = await getFreshActor(pool, bearerToken(req));
+    if (!actor) {
+      return res
+        .status(401)
+        .json({ error: 'You must sign in as Officer/Admin/Developer to change Winner Settings' });
+    }
+    const prev = await getFullState(pool);
+    const rewardRank =
+      typeof req.body?.rewardRank === 'string' ? req.body.rewardRank : prev.rewardRank;
+    const rewardItemCounts =
+      req.body?.rewardItemCounts != null && typeof req.body.rewardItemCounts === 'object'
+        ? req.body.rewardItemCounts
+        : prev.rewardItemCounts;
+    const state = await setWinnerLimits(pool, { rewardRank, rewardItemCounts });
+    await recordAdminAudit(pool, {
+      action: 'winner_limits_set',
+      actor,
+      targetName: 'Winner Settings',
+      details: buildWinnerLimitsDetails(prev, { rewardRank, rewardItemCounts }),
+    });
+    console.log(
+      `[audit] winner-limits-set rank=${rewardRank ?? '?'} by=${actor.name} role=${actor.role} ip=${clientIp(req)}`
     );
     res.json(state);
   } catch (e) {
@@ -639,8 +690,8 @@ app.get('/api/bidders', requireAuth, async (req, res) => {
   try {
     const actor = await getFreshActor(pool, bearerToken(req));
     if (!actor) return res.status(401).json({ error: 'You must sign in to perform this action' });
-    const bidders = await listBidders(pool, actor);
-    res.json({ bidders });
+    const payload = await listBiddersWithCardCd(pool, listBidders, actor);
+    res.json(payload);
   } catch (e) {
     const code = e.statusCode ?? 500;
     if (code >= 500) console.error(e);

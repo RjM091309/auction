@@ -199,6 +199,19 @@ function winKey(ign, t, itemId) {
   return `${ign}\0${t}\0${itemId ?? ''}`;
 }
 
+/** Admin green-check list (`recordedWinnerNames`) — only these IGNs get Puppet CD. */
+function recordedIgnsForItem(it) {
+  const arr = it.recordedWinnerNames;
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const set = new Set();
+  for (const raw of arr) {
+    if (raw == null || typeof raw !== 'string') continue;
+    const ign = normalizeIgn(raw);
+    if (ign) set.add(ign);
+  }
+  return set.size > 0 ? set : null;
+}
+
 /** Keep the newest `at` per IGN when multiple log sources backfill the same row. */
 function upsertEmperiumCooldownWin(out, ign, t, itemId, at, nowMs = Date.now()) {
   if (!Number.isFinite(at) || at <= 0) return;
@@ -217,11 +230,13 @@ async function backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs = Date.n
   const out = dedupeWeeklyWinsList(wins);
   for (const it of items) {
     if (!isEmperiumCooldownItem(it)) continue;
+    const allowed = recordedIgnsForItem(it);
+    if (!allowed) continue;
     const latestByIgn = new Map();
     for (const row of rows) {
       if (row.itemId !== it.id) continue;
       const ign = normalizeIgn(row.ign);
-      if (!ign || latestByIgn.has(ign)) continue;
+      if (!ign || !allowed.has(ign) || latestByIgn.has(ign)) continue;
       latestByIgn.set(ign, Number(row.atMs));
     }
     for (const [ign, at] of latestByIgn) {
@@ -232,10 +247,10 @@ async function backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs = Date.n
 }
 
 /**
- * Rebuild missing Puppet CD rows from `winner_mark_log` when `weekly_type_wins`
- * or `recordedWinnerNames` were cleared (e.g. Reset shuffle) but marks remain.
+ * Rebuild missing Puppet CD timestamps from `winner_mark_log` for IGNs already
+ * listed in `recordedWinnerNames` (e.g. after Reset shuffle cleared `at` only).
  * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} q
- * @param {Array<{ id: string, type: string, name?: string }>} items
+ * @param {Array<{ id: string, type: string, name?: string, recordedWinnerNames?: string[] }>} items
  * @param {WeeklyTypeWin[]} wins
  * @param {number} [nowMs]
  */
@@ -253,10 +268,10 @@ export async function backfillWeeklyWinsFromWinnerMarkLog(q, items, wins, nowMs 
 }
 
 /**
- * Rebuild missing Puppet CD rows from shuffle-lock wins in `bidder_state_log`
- * (state = 1). Covers shortlist winners that never got an admin green check.
+ * Fill `at` from shuffle-lock wins (`bidder_state_log` state = 1) only for IGNs
+ * in `recordedWinnerNames` (e.g. shuffle shortlist winner without a mark log row).
  * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} q
- * @param {Array<{ id: string, type: string, name?: string }>} items
+ * @param {Array<{ id: string, type: string, name?: string, recordedWinnerNames?: string[] }>} items
  * @param {WeeklyTypeWin[]} wins
  * @param {number} [nowMs]
  */

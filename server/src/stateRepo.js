@@ -79,7 +79,10 @@ function parseEventMode(raw) {
 function sanitizeRewardRank(v) {
   const s = typeof v === 'string' ? v : String(v ?? '');
   if (s === 'Emperium overrun') return 'Emperium overrun';
+  if (s === 'Platinum') return 'Platinum';
+  if (s === 'Gold') return 'Gold';
   if (s === 'Silver') return 'Silver';
+  if (s === 'Bronze') return 'Bronze';
   return 'Bronze';
 }
 function parseRewardRank(raw) {
@@ -103,16 +106,30 @@ function parseRewardItemCounts(raw, rankHint) {
     const inferredRank =
       rankHint === 'Emperium overrun' ||
       rankHint === 'Bronze' ||
-      rankHint === 'Silver'
+      rankHint === 'Silver' ||
+      rankHint === 'Gold' ||
+      rankHint === 'Platinum'
         ? rankHint
         : feathersTotal >= 200
           ? 'Emperium overrun'
-          : feathersTotal >= 90
-            ? 'Silver'
-            : 'Bronze';
+          : feathersTotal >= 120
+            ? 'Platinum'
+            : feathersTotal >= 105
+              ? 'Gold'
+              : feathersTotal >= 90
+                ? 'Silver'
+                : 'Bronze';
     const feathersItemsPerWinner = toInt(
       j.feathersItemsPerWinner,
-      inferredRank === 'Emperium overrun' ? 13 : inferredRank === 'Silver' ? 9 : 8
+      inferredRank === 'Emperium overrun'
+        ? 13
+        : inferredRank === 'Platinum'
+          ? 12
+          : inferredRank === 'Gold'
+            ? 10
+            : inferredRank === 'Silver'
+              ? 9
+              : 8
     );
     let fragmentByItemId;
     if (j.fragmentByItemId && typeof j.fragmentByItemId === 'object' && !Array.isArray(j.fragmentByItemId)) {
@@ -247,6 +264,57 @@ export async function setEventMode(pool, rawMode) {
   return getFullState(pool);
 }
 
+/**
+ * Update Winner Settings only (rank + item counts + per-item pool caps).
+ * Avoids full `/api/state` PUT so existing manual winner marks are not
+ * blocked by the recorded-winner vs pool-cap validation.
+ */
+export async function setWinnerLimits(pool, { rewardRank, rewardItemCounts }) {
+  const rank = sanitizeRewardRank(rewardRank);
+  const counts =
+    rewardItemCounts != null && typeof rewardItemCounts === 'object'
+      ? parseRewardItemCounts(JSON.stringify(rewardItemCounts), rank)
+      : parseRewardItemCounts('', rank);
+
+  const [itemRows] = await pool.query(
+    `SELECT id, name, type FROM auction_items WHERE status = 'active'`
+  );
+
+  const limitsBody = { rewardRank: rank, rewardItemCounts: counts };
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(
+      'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+      [REWARD_RANK_META_KEY, rank]
+    );
+    await conn.query(
+      'INSERT INTO app_meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+      [REWARD_ITEM_COUNTS_META_KEY, JSON.stringify(counts)]
+    );
+    for (const it of itemRows) {
+      if (it.type !== 'Fragment Card' && it.type !== 'Feathers') continue;
+      const cap = maxWinnersForItemInState(
+        { id: it.id, type: it.type, name: it.name },
+        limitsBody
+      );
+      await conn.query('UPDATE auction_items SET winner_pool_cap = ? WHERE id = ?', [
+        cap,
+        it.id,
+      ]);
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+
+  return getFullState(pool);
+}
+
 export async function getFullState(pool) {
   await rolloverWeeklyWinsIfNewWeek(pool);
 
@@ -341,8 +409,6 @@ export async function getFullState(pool) {
       weeklyTypeWins
     );
     weeklyTypeWins = pruneExpiredEmperiumWins(weeklyTypeWins);
-  } else {
-    weeklyTypeWins = [];
   }
   const winnerMarkLog = await loadWinnerMarkLog(pool);
   const bidderStateLog = await loadBidderStateLog(pool);
@@ -1195,7 +1261,8 @@ export async function replaceFullState(pool, body) {
     }
     nextWeeklyWins = pruneExpiredEmperiumWins(dedupeWeeklyWinsList(nextWeeklyWins));
   } else {
-    nextWeeklyWins = [];
+    // Guild League: keep existing Emperium CD rows in DB; do not add new ones here.
+    nextWeeklyWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
   }
 
   const membersById = new Map();
@@ -1447,7 +1514,13 @@ export async function replaceFullState(pool, body) {
 
     await saveWeeklyTypeWins(conn, nextWeeklyWins);
 
-    await appendWinnerMarkLog(conn, newWinnerMarkEntries);
+    const winnerMarkEntriesForLog = isEmperiumWinCooldownEnabled(saveEventMode)
+      ? newWinnerMarkEntries.filter((entry) => {
+          const card = body.items.find((i) => i.id === entry.itemId);
+          return card && isEmperiumCooldownItem(card);
+        })
+      : [];
+    await appendWinnerMarkLog(conn, winnerMarkEntriesForLog);
 
     const bidderStateRows = [];
     if (shuffleLockNow) {

@@ -61,6 +61,24 @@ function dedupeWeeklyWins(wins: WeeklyTypeWin[]): WeeklyTypeWin[] {
 }
 
 /**
+ * Manual winner marks affect Puppet CD only when saved event mode is Emperium
+ * Overrun and the admin UI is not mid-edit on a different mode (unsaved draft).
+ */
+export function winnerMarkCooldownApplies(
+  savedEventMode: WeeklyEventType | undefined,
+  draftEventMode?: WeeklyEventType | undefined
+): boolean {
+  if (
+    draftEventMode != null &&
+    savedEventMode != null &&
+    draftEventMode !== savedEventMode
+  ) {
+    return false;
+  }
+  return isEmperiumWinCooldownEnabled(savedEventMode);
+}
+
+/**
  * Emperium Overrun + Puppet only: keep weekly_type_wins in sync when admin
  * manually marks/unmarks winners after shuffle lock.
  */

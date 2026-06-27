@@ -1,17 +1,36 @@
-import type { GuildRank, ItemType, RewardItemCounts } from '../types';
+import type { AuctionItem, GuildRank, ItemType, RewardItemCounts } from '../types';
+import { isIllusionFragmentItem } from './hiddenAuctionItems';
 
 /**
  * Current game reward presets by rank:
- * Bronze => Card=2, Feathers=80; Silver => Card=2, Feathers=95; Emperium overrun => Card=20, Feathers=320.
+ * Bronze => Puppet=2, Illu=2, Feathers=80; Silver => Puppet=2, Illu=2, Feathers=95;
+ * Gold => Puppet=4, Illu=2, Feathers=110; Platinum => Puppet=5, Illu=2, Feathers=125;
+ * Emperium overrun => Card=20, Feathers=320.
  */
-/** Ranks shown in Winner set limit (Guild League: Bronze/Silver; Emperium overrun). */
-export const GUILD_RANK_OPTIONS: GuildRank[] = ['Bronze', 'Silver', 'Emperium overrun'];
+/** Ranks shown in Winner set limit (Guild League tiers + Emperium overrun). */
+export const GUILD_RANK_OPTIONS: GuildRank[] = [
+  'Bronze',
+  'Silver',
+  'Gold',
+  'Platinum',
+  'Emperium overrun',
+];
 
-/** Guild League winner-set presets (Bronze + Silver). */
-export const GUILD_LEAGUE_RANKS: GuildRank[] = ['Bronze', 'Silver'];
+/** Guild League winner-set presets. */
+export const GUILD_LEAGUE_RANKS: GuildRank[] = [
+  'Bronze',
+  'Silver',
+  'Gold',
+  'Platinum',
+];
 
 export function isGuildLeagueRank(rank: GuildRank): boolean {
-  return rank === 'Bronze' || rank === 'Silver';
+  return (
+    rank === 'Bronze' ||
+    rank === 'Silver' ||
+    rank === 'Gold' ||
+    rank === 'Platinum'
+  );
 }
 
 const TOTAL_ITEMS_BY_RANK_AND_TYPE: Record<GuildRank, Record<ItemType, number>> = {
@@ -27,6 +46,18 @@ const TOTAL_ITEMS_BY_RANK_AND_TYPE: Record<GuildRank, Record<ItemType, number>> 
     'Ancient Item': 1,
     Other: 1,
   },
+  Gold: {
+    'Fragment Card': 4,
+    Feathers: 110,
+    'Ancient Item': 1,
+    Other: 1,
+  },
+  Platinum: {
+    'Fragment Card': 5,
+    Feathers: 125,
+    'Ancient Item': 1,
+    Other: 1,
+  },
   'Emperium overrun': {
     'Fragment Card': 20,
     Feathers: 320,
@@ -35,11 +66,28 @@ const TOTAL_ITEMS_BY_RANK_AND_TYPE: Record<GuildRank, Record<ItemType, number>> 
   },
 };
 
-/** Normalize persisted / API rank strings (legacy Gold → Bronze). */
+/** Normalize persisted / API rank strings. */
 export function parseGuildRank(v: unknown): GuildRank {
   if (v === 'Emperium overrun') return 'Emperium overrun';
+  if (v === 'Platinum') return 'Platinum';
+  if (v === 'Gold') return 'Gold';
   if (v === 'Silver') return 'Silver';
+  if (v === 'Bronze') return 'Bronze';
   return 'Bronze';
+}
+
+/** Per-card fragment preset (Puppet vs Illusion differ on Gold / Platinum). */
+export function defaultFragmentCountForItem(
+  rank: GuildRank,
+  item: Pick<AuctionItem, 'id' | 'name'>
+): number {
+  if (isIllusionFragmentItem(item)) {
+    if (rank === 'Gold' || rank === 'Platinum') return 2;
+    return totalItemsForTypeByRank('Fragment Card', rank);
+  }
+  if (rank === 'Gold') return 4;
+  if (rank === 'Platinum') return 5;
+  return totalItemsForTypeByRank('Fragment Card', rank);
 }
 
 export function totalItemsForTypeByRank(type: ItemType, rank: GuildRank = 'Bronze'): number {
@@ -49,6 +97,8 @@ export function totalItemsForTypeByRank(type: ItemType, rank: GuildRank = 'Bronz
 /** Feathers: default items per winning bidder by rank preset. */
 export function defaultFeathersItemsPerWinner(rank: GuildRank): number {
   if (rank === 'Emperium overrun') return 13;
+  if (rank === 'Platinum') return 12;
+  if (rank === 'Gold') return 10;
   if (rank === 'Silver') return 9;
   return 8;
 }

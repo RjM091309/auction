@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
+  ClipboardList,
   History,
   Trash2,
   Check,
@@ -16,6 +17,7 @@ import {
   ListX,
   GripVertical,
   UserPlus,
+  Menu,
   X,
   XCircle,
   Eye,
@@ -54,7 +56,10 @@ import {
 } from './lib/queueEligibility';
 import { findEmperiumWinCooldown } from './lib/emperiumWinCooldown';
 import { emperiumWinCooldownExpiresAt } from './lib/overrunWeek';
-import { syncEmperiumWeeklyWinsForWinnerMarkChange } from './lib/weeklyTypeWinsSync';
+import {
+  syncEmperiumWeeklyWinsForWinnerMarkChange,
+  winnerMarkCooldownApplies,
+} from './lib/weeklyTypeWinsSync';
 import {
   deactivateMemberOnServer,
   removeMemberFromItemQueueOnServer,
@@ -66,6 +71,7 @@ import {
   publicMoveQueueMember,
   PublicMoveQueueError,
   setEventModeOnServer,
+  saveWinnerLimitsOnServer,
   clearAllActiveQueuesOnServer,
 } from './lib/apiState';
 import { randomId } from './lib/randomId';
@@ -122,7 +128,7 @@ import {
   sortAuctionItemsForDisplay,
 } from './lib/auctionItemDisplayOrder';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
-import { resolveEffectiveRewardContext, displayWinnerPoolCapForItem, totalItemsForAuctionItem } from './lib/rewardContext';
+import { resolveEffectiveRewardContext, displayWinnerPoolCapForItem, totalItemsForAuctionItem, presetRewardItemCounts } from './lib/rewardContext';
 import { isIllusionFragmentItem } from './lib/hiddenAuctionItems';
 import SettingsToggle from './components/SettingsToggle';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
@@ -160,6 +166,7 @@ import {
 import { BidderRankingExpandableRows } from './components/BidderRankingExpandableRows';
 import BidderAuditLogSection from './components/BidderAuditLogSection';
 import BidderRegistration from './BidderRegistration';
+import CardCdSection from './CardCdSection';
 import BidderAuthModal from './BidderAuthModal';
 import { NameDropdown } from './BidderAuthGate';
 import {
@@ -174,7 +181,7 @@ import {
   verifyStoredActor,
 } from './lib/apiBidders';
 import { notifyBidderAuditChanged } from './lib/apiBidderAudit';
-import { DashboardTab, pathForTab, tabFromPath } from './lib/tabRoute';
+import { DashboardTab, pathForTab, tabFromPath, PUBLIC_REGISTRATION_PATH } from './lib/tabRoute';
 
 /** How often the admin dashboard pulls server state so public joins show up without manual refresh. */
 const ADMIN_STATE_POLL_MS = 2000;
@@ -222,6 +229,55 @@ function guildRankButtonLabel(rank: GuildRank): string {
   return rank;
 }
 
+type WinnerSetLimitFormState = {
+  rank: GuildRank;
+  feathers: string;
+  feathersItemsPerWinner: string;
+  fragmentByItemId: Record<string, string>;
+  rankWinnerDouble: boolean;
+};
+
+function winnerLimitDigitsOnly(raw: string): string {
+  return raw.replace(/[^\d]/g, '');
+}
+
+function winnerLimitParseInt(raw: string, min: number, fallback: number): number {
+  const digits = winnerLimitDigitsOnly(raw);
+  if (digits === '') return fallback;
+  const n = Math.floor(Number(digits));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, n);
+}
+
+function fragmentLimitsToFormStrings(
+  limits: Record<string, number>
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(limits).map(([id, n]) => [id, String(n)])
+  );
+}
+
+function rewardCountsFromWinnerLimitForm(
+  form: WinnerSetLimitFormState
+): RewardItemCounts {
+  const fragmentByItemId: Record<string, number> = {};
+  for (const [id, raw] of Object.entries(form.fragmentByItemId)) {
+    fragmentByItemId[id] = winnerLimitParseInt(raw, 0, 0);
+  }
+  return {
+    fragment:
+      fragmentByItemId.m1 ?? Object.values(fragmentByItemId)[0] ?? 0,
+    feathers: winnerLimitParseInt(form.feathers, 0, 0),
+    feathersItemsPerWinner: winnerLimitParseInt(
+      form.feathersItemsPerWinner,
+      1,
+      1
+    ),
+    fragmentByItemId,
+    ...(form.rankWinnerDouble ? { rankWinnerDouble: true } : {}),
+  };
+}
+
 export default function AuctionDashboard() {
   const [state, setState] = useState<AuctionState | null>(null);
   const mayPersist = useRef(false);
@@ -254,6 +310,7 @@ export default function AuctionDashboard() {
   const [activeTab, setActiveTabState] = useState<DashboardTab>(() =>
     typeof window === 'undefined' ? 'dashboard' : tabFromPath(window.location.pathname)
   );
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   /** Switch tab and keep `window.location.pathname` in sync (back/forward works). */
   const setActiveTab = (next: DashboardTab) => {
@@ -268,6 +325,29 @@ export default function AuctionDashboard() {
       return next === prev ? prev : next;
     });
   };
+
+  const selectTab = (next: DashboardTab) => {
+    setActiveTab(next);
+    setMobileNavOpen(false);
+  };
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileNavOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)');
+    const onChange = () => {
+      if (mq.matches) setMobileNavOpen(false);
+    };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
 
   useEffect(() => {
     const handler = () => setActiveTabState(tabFromPath(window.location.pathname));
@@ -386,29 +466,15 @@ export default function AuctionDashboard() {
   const [editMemberId, setEditMemberId] = useState<number | null>(null);
   const [editMemberNameInput, setEditMemberNameInput] = useState('');
   const [winnerSetLimitModalOpen, setWinnerSetLimitModalOpen] = useState(false);
-  const [winnerSetLimitForm, setWinnerSetLimitForm] = useState<{
-    rank: GuildRank;
-    feathers: number;
-    feathersItemsPerWinner: number;
-    fragmentByItemId: Record<string, number>;
-    rankWinnerDouble: boolean;
-  }>({
+  const [winnerSetLimitForm, setWinnerSetLimitForm] = useState<WinnerSetLimitFormState>({
     rank: 'Bronze',
-    feathers: defaultWinnerPoolCapForType('Feathers'),
-    feathersItemsPerWinner: defaultFeathersItemsPerWinner('Bronze'),
+    feathers: String(defaultWinnerPoolCapForType('Feathers')),
+    feathersItemsPerWinner: String(defaultFeathersItemsPerWinner('Bronze')),
     fragmentByItemId: {},
     rankWinnerDouble: false,
   });
-  const winnerCountsFromForm = (): RewardItemCounts => ({
-    fragment:
-      winnerSetLimitForm.fragmentByItemId.m1 ??
-      Object.values(winnerSetLimitForm.fragmentByItemId)[0] ??
-      0,
-    feathers: winnerSetLimitForm.feathers,
-    feathersItemsPerWinner: winnerSetLimitForm.feathersItemsPerWinner,
-    fragmentByItemId: winnerSetLimitForm.fragmentByItemId,
-    ...(winnerSetLimitForm.rankWinnerDouble ? { rankWinnerDouble: true } : {}),
-  });
+  const winnerCountsFromForm = (): RewardItemCounts =>
+    rewardCountsFromWinnerLimitForm(winnerSetLimitForm);
   const winnerSlotsFromItems = (
     type: ItemType,
     items: number,
@@ -428,24 +494,25 @@ export default function AuctionDashboard() {
   };
 
   const applyRankWinnerDoubleToForm = (
-    prev: typeof winnerSetLimitForm,
+    prev: WinnerSetLimitFormState,
     checked: boolean,
     items: AuctionItem[]
-  ): typeof winnerSetLimitForm => {
+  ): WinnerSetLimitFormState => {
     const nextFragment = { ...prev.fragmentByItemId };
     for (const card of activeFragmentAuctionItems(items)) {
-      const v = nextFragment[card.id] ?? 0;
+      const v = winnerLimitParseInt(nextFragment[card.id] ?? '', 0, 0);
       if (isIllusionFragmentItem(card)) continue;
-      nextFragment[card.id] = checked
-        ? v * 2
-        : Math.max(0, Math.floor(v / 2));
+      nextFragment[card.id] = String(
+        checked ? v * 2 : Math.max(0, Math.floor(v / 2))
+      );
     }
+    const feathersN = winnerLimitParseInt(prev.feathers, 0, 0);
     return {
       ...prev,
       rankWinnerDouble: checked,
-      feathers: checked
-        ? prev.feathers * 2
-        : Math.max(0, Math.floor(prev.feathers / 2)),
+      feathers: String(
+        checked ? feathersN * 2 : Math.max(0, Math.floor(feathersN / 2))
+      ),
       fragmentByItemId: nextFragment,
     };
   };
@@ -650,7 +717,8 @@ export default function AuctionDashboard() {
       if (!mayPersist.current) return;
       // Bidder Registration tab has its own data source (`/api/bidders`); polling
       // the full auction state here just churns CPU on the parent component.
-      if (activeTabRef.current === 'bidders') return;
+      if (activeTabRef.current === 'bidders' || activeTabRef.current === 'cardCd')
+        return;
       if (shuffleRunningRef.current) return;
       if (
         persistDebouncePendingRef.current ||
@@ -1637,15 +1705,17 @@ export default function AuctionDashboard() {
         }
       }
 
-      const syncedWins = syncEmperiumWeeklyWinsForWinnerMarkChange(
-        base.eventMode,
-        target,
-        prevRecorded,
-        nextNames,
-        prevRevoked,
-        nextRevoked,
-        base.weeklyTypeWins
-      );
+      const syncedWins = winnerMarkCooldownApplies(base.eventMode, eventModeDraft)
+        ? syncEmperiumWeeklyWinsForWinnerMarkChange(
+            base.eventMode,
+            target,
+            prevRecorded,
+            nextNames,
+            prevRevoked,
+            nextRevoked,
+            base.weeklyTypeWins
+          )
+        : undefined;
 
       const next: AuctionState = {
         ...base,
@@ -2133,7 +2203,7 @@ export default function AuctionDashboard() {
   const openWinnerSetLimitModal = () => {
     if (!state) return;
     const persistedRank = parseGuildRank(state.rewardRank);
-    // Guild League → Bronze or Silver; Emperium Overrun → Emperium overrun only.
+    // Guild League → Bronze/Silver/Gold/Platinum; Emperium Overrun → Emperium overrun only.
     const rank: GuildRank =
       eventModeActive === 'Guild League'
         ? isGuildLeagueRank(persistedRank)
@@ -2148,13 +2218,16 @@ export default function AuctionDashboard() {
         : rankPresetLimits(rank);
     setWinnerSetLimitForm({
       rank,
-      feathers: preset.feathers,
-      feathersItemsPerWinner:
+      feathers: String(preset.feathers),
+      feathersItemsPerWinner: String(
         rank === persistedRank
           ? (state.rewardItemCounts?.feathersItemsPerWinner ??
             defaultFeathersItemsPerWinner(rank))
-          : defaultFeathersItemsPerWinner(rank),
-      fragmentByItemId: buildFragmentLimitsByItemId(state.items, preset),
+          : defaultFeathersItemsPerWinner(rank)
+      ),
+      fragmentByItemId: fragmentLimitsToFormStrings(
+        buildFragmentLimitsByItemId(state.items, preset)
+      ),
       rankWinnerDouble:
         rank === persistedRank
           ? state.rewardItemCounts?.rankWinnerDouble === true
@@ -2168,39 +2241,52 @@ export default function AuctionDashboard() {
   // performSaveWinnerSetLimit that runs the immediate-save with bearer.
   const [winnerSetLimitAuthPromptOpen, setWinnerSetLimitAuthPromptOpen] =
     useState(false);
-  const pendingWinnerSetLimitRef = useRef<typeof winnerSetLimitForm | null>(
+  const pendingWinnerSetLimitRef = useRef<WinnerSetLimitFormState | null>(
     null
   );
 
   const performSaveWinnerSetLimit = async (
-    formSnap: typeof winnerSetLimitForm,
+    formSnap: WinnerSetLimitFormState,
     bearerToken: string
   ) => {
     if (!state) return;
+    const parsedCounts = rewardCountsFromWinnerLimitForm(formSnap);
     const nextState: AuctionState = {
       ...state,
       rewardRank: formSnap.rank,
       rewardItemCounts: {
-        fragment:
-          formSnap.fragmentByItemId.m1 ??
-          Object.values(formSnap.fragmentByItemId)[0] ??
-          totalItemsForTypeByRank('Fragment Card', formSnap.rank),
-        feathers: formSnap.feathers,
-        feathersItemsPerWinner: Math.max(1, formSnap.feathersItemsPerWinner),
-        fragmentByItemId: { ...formSnap.fragmentByItemId },
+        fragment: parsedCounts.fragment,
+        feathers: parsedCounts.feathers,
+        feathersItemsPerWinner: Math.max(
+          1,
+          parsedCounts.feathersItemsPerWinner ?? 1
+        ),
+        fragmentByItemId: { ...(parsedCounts.fragmentByItemId ?? {}) },
         ...(formSnap.rankWinnerDouble ? { rankWinnerDouble: true } : {}),
       },
       items: state.items.map((it) => {
         if (it.type === 'Fragment Card') {
           return {
             ...it,
-            winnerPoolCap: winnerSlotsFromItems('Fragment Card', 0, it),
+            winnerPoolCap: winnerSlotsFromTotalItems(
+              'Fragment Card',
+              parsedCounts.fragmentByItemId?.[it.id] ??
+                parsedCounts.fragment ??
+                0,
+              formSnap.rank,
+              parsedCounts
+            ),
           };
         }
         if (it.type === 'Feathers') {
           return {
             ...it,
-            winnerPoolCap: winnerSlotsFromItems('Feathers', formSnap.feathers),
+            winnerPoolCap: winnerSlotsFromTotalItems(
+              'Feathers',
+              parsedCounts.feathers,
+              formSnap.rank,
+              parsedCounts
+            ),
           };
         }
         return it;
@@ -2217,7 +2303,11 @@ export default function AuctionDashboard() {
     setState(nextState);
     setWinnerSetLimitModalOpen(false);
     try {
-      const server = await persistAuctionState(nextState, { bearerToken });
+      const server = await saveWinnerLimitsOnServer(
+        formSnap.rank,
+        nextState.rewardItemCounts!,
+        bearerToken
+      );
       const merged = server ?? nextState;
       queueBaselineRef.current = buildQueueBaselineFromState(merged);
       skipPersistOnceRef.current = true;
@@ -2226,13 +2316,20 @@ export default function AuctionDashboard() {
       void swal2WinnerLimitsUpdated({
         fragmentCards: activeFragmentAuctionItems(merged.items).map((it) => ({
           name: it.name,
-          winners: winnerSlotsFromItems(
+          winners: winnerSlotsFromTotalItems(
             'Fragment Card',
-            formSnap.fragmentByItemId[it.id] ?? 0
+            parsedCounts.fragmentByItemId?.[it.id] ?? parsedCounts.fragment ?? 0,
+            formSnap.rank,
+            parsedCounts
           ),
         })),
-        feathersWinners: winnerSlotsFromItems('Feathers', formSnap.feathers),
-        feathersItemsPerWinner: formSnap.feathersItemsPerWinner,
+        feathersWinners: winnerSlotsFromTotalItems(
+          'Feathers',
+          parsedCounts.feathers,
+          formSnap.rank,
+          parsedCounts
+        ),
+        feathersItemsPerWinner: parsedCounts.feathersItemsPerWinner ?? 1,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -2460,72 +2557,204 @@ export default function AuctionDashboard() {
     );
   }
 
+  const activeTabLabel =
+    activeTab === 'dashboard'
+      ? 'Queues'
+      : activeTab === 'history'
+        ? 'Logs'
+        : activeTab === 'cardCd'
+          ? 'On CD'
+          : 'Bidders';
+
+  const queueAdminToolbar =
+    visibleActiveAuctions.length > 0 ? (
+      <>
+        <div className="w-full">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="grid w-full grid-cols-2 rounded-xl border border-slate-700 bg-slate-900 p-1 sm:inline-flex sm:w-fit">
+              {(['Guild League', 'Emperium Overrun'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setEventModeDraft(mode)}
+                  disabled={eventModeSaving}
+                  className={`cursor-pointer rounded-lg px-3 py-1.5 text-center text-[11px] font-black uppercase tracking-wide transition-colors disabled:cursor-not-allowed sm:text-xs ${
+                    eventModeDraft === mode
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-300 hover:bg-slate-800'
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleSaveEventMode()}
+              disabled={
+                eventModeSaving || eventModeDraft === eventModeActive
+              }
+              className="inline-flex w-full cursor-pointer items-center justify-center rounded-xl bg-blue-600 px-4 py-2 text-xs font-black uppercase tracking-wide text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+            >
+              {eventModeSaving ? 'Saving...' : 'Save Event Mode'}
+            </button>
+          </div>
+        </div>
+        <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 md:flex md:flex-wrap md:items-center md:justify-end">
+          <button
+            type="button"
+            onClick={() => void handleShuffleAllQueues()}
+            disabled={shuffleUi.active || state?.shuffleLocked === true}
+            aria-busy={shuffleUi.active}
+            title={
+              state?.shuffleLocked === true
+                ? 'Already shuffled this round — use Reset shuffle / Unmark all to unlock shuffle again.'
+                : undefined
+            }
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-blue-600 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 md:w-auto md:px-4"
+          >
+            <Shuffle className="h-4 w-4 shrink-0" aria-hidden />
+            {state?.shuffleLocked === true ? 'Shuffle Used' : 'Start Shuffle'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleResetShuffleUnmarkAll()}
+            disabled={shuffleUi.active}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-amber-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 md:w-auto md:px-4"
+          >
+            <RotateCcw className="h-4 w-4 shrink-0" aria-hidden />
+            Reset shuffle / Unmark all
+          </button>
+          <button
+            type="button"
+            onClick={openWinnerSetLimitModal}
+            disabled={shuffleUi.active}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-blue-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 md:w-auto md:px-4"
+          >
+            Winner Settings
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleClearAllQueues()}
+            disabled={
+              shuffleUi.active ||
+              clearQueuesSaving ||
+              totalActiveQueueEntries === 0
+            }
+            title={
+              totalActiveQueueEntries === 0
+                ? 'No bidders in any active queue'
+                : 'Empty every active auction card’s queue (roster unchanged)'
+            }
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-amber-900/80 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 md:w-auto md:px-4"
+          >
+            <ListX className="h-4 w-4 shrink-0" aria-hidden />
+            Clear all lists
+          </button>
+        </div>
+      </>
+    ) : null;
+
+  const navTabClass = (tab: DashboardTab, accent: 'blue' | 'amber', list = false) => {
+    const active = activeTab === tab;
+    const base = list
+      ? 'flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm font-bold uppercase tracking-wide transition-all'
+      : 'flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all';
+    if (active) {
+      return `${base} ${
+        accent === 'amber'
+          ? 'bg-amber-600 text-white shadow-md shadow-amber-900/30'
+          : 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+      }`;
+    }
+    return `${base} text-slate-400 hover:bg-slate-800/80 hover:text-white`;
+  };
+
+  const navRegistrationClass = (list = false) =>
+    list
+      ? 'flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm font-bold uppercase tracking-wide transition-all text-slate-300 hover:bg-slate-800 hover:text-white'
+      : 'flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all text-slate-400 hover:bg-slate-800/80 hover:text-white';
+
   return (
     <div className="min-h-screen text-slate-100 font-sans">
       <header className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md">
-        <div className="max-w-screen-2xl mx-auto px-6 sm:px-8 py-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-4 min-w-0">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-900 p-0.5 ring-1 ring-slate-700 shadow-lg shadow-black/30">
-              <img
-                src="/images/OUTLAST_RO.png"
-                alt="Outlast Guild"
-                className="h-full w-full object-contain"
-                width={48}
-                height={48}
-                decoding="async"
-              />
+        <div className="max-w-screen-2xl mx-auto px-4 sm:px-8 py-3 sm:py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-900 p-0.5 ring-1 ring-slate-700 shadow-lg shadow-black/30 sm:h-12 sm:w-12">
+                <img
+                  src="/images/OUTLAST_RO.png"
+                  alt="Outlast Guild"
+                  className="h-full w-full object-contain"
+                  width={48}
+                  height={48}
+                  decoding="async"
+                />
+              </div>
+              <div className="min-w-0">
+                <h1 className="truncate text-lg font-bold tracking-tight text-white sm:text-2xl">
+                  Outlast Guild Bid
+                </h1>
+                <p className="text-xs font-medium text-slate-400 sm:text-sm">
+                  <span className="md:hidden">{activeTabLabel}</span>
+                  <span className="hidden md:inline">Auction queue</span>
+                </p>
+              </div>
             </div>
-            <div className="min-w-0">
-              <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white truncate">
-                Outlast Guild Bid
-              </h1>
-              <p className="text-slate-400 text-sm font-medium">Auction queue</p>
-            </div>
-          </div>
-          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:justify-end sm:gap-3">
+
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen(true)}
+              className="relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-700 bg-slate-900 text-slate-200 transition-colors hover:border-slate-500 hover:bg-slate-800 md:hidden"
+              aria-label="Open menu"
+            >
+              <Menu className="h-5 w-5" aria-hidden />
+              {pendingBidderCount > 0 ? (
+                <span className="absolute -right-1 -top-1 inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-amber-400 px-1 text-[10px] font-black text-amber-950 ring-2 ring-slate-950">
+                  {pendingBidderCount > 9 ? '9+' : pendingBidderCount}
+                </span>
+              ) : null}
+            </button>
+
             <nav
-              className="flex w-full sm:w-auto rounded-2xl bg-slate-900 p-1 border border-slate-800 gap-1"
+              className="hidden rounded-2xl border border-slate-800 bg-slate-900 p-1 md:flex md:gap-1"
               aria-label="Main"
             >
               <button
                 type="button"
                 onClick={() => setActiveTab('dashboard')}
-                className={`flex flex-1 sm:flex-initial items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all ${
-                  activeTab === 'dashboard'
-                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800/80'
-                }`}
+                className={navTabClass('dashboard', 'blue')}
               >
-                <LayoutDashboard className="w-4 h-4 shrink-0" aria-hidden />
+                <LayoutDashboard className="h-4 w-4 shrink-0" aria-hidden />
                 Queues
               </button>
               <button
                 type="button"
                 onClick={() => setActiveTab('history')}
-                className={`flex flex-1 sm:flex-initial items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all ${
-                  activeTab === 'history'
-                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800/80'
-                }`}
+                className={navTabClass('history', 'blue')}
               >
-                <History className="w-4 h-4 shrink-0" aria-hidden />
+                <History className="h-4 w-4 shrink-0" aria-hidden />
                 Logs
               </button>
               <button
                 type="button"
+                onClick={() => setActiveTab('cardCd')}
+                className={navTabClass('cardCd', 'amber')}
+              >
+                <Clock className="h-4 w-4 shrink-0" aria-hidden />
+                On CD
+              </button>
+              <button
+                type="button"
                 onClick={() => setActiveTab('bidders')}
-                className={`relative flex flex-1 sm:flex-initial items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold uppercase tracking-wide transition-all ${
-                  activeTab === 'bidders'
-                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800/80'
-                }`}
+                className={`relative ${navTabClass('bidders', 'blue')}`}
                 aria-label={
                   pendingBidderCount > 0
                     ? `Bidders (${pendingBidderCount} pending approval)`
                     : 'Bidders'
                 }
               >
-                <UserPlus className="w-4 h-4 shrink-0" aria-hidden />
+                <UserPlus className="h-4 w-4 shrink-0" aria-hidden />
                 Bidders
                 {pendingBidderCount > 0 && (
                   <span
@@ -2540,10 +2769,116 @@ export default function AuctionDashboard() {
                   </span>
                 )}
               </button>
+              <a
+                href={PUBLIC_REGISTRATION_PATH}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={navRegistrationClass()}
+              >
+                <ClipboardList className="h-4 w-4 shrink-0" aria-hidden />
+                Register
+              </a>
             </nav>
           </div>
         </div>
       </header>
+
+      <AnimatePresence>
+        {mobileNavOpen ? (
+          <>
+            <motion.button
+              type="button"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              aria-label="Close menu"
+              className="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm md:hidden"
+              onClick={() => setMobileNavOpen(false)}
+            />
+            <motion.aside
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', stiffness: 380, damping: 36 }}
+              className="fixed inset-y-0 right-0 z-[70] flex w-[min(100vw-3rem,20rem)] flex-col border-l border-slate-800 bg-slate-950 shadow-2xl md:hidden"
+              aria-label="Mobile menu"
+            >
+              <div className="flex items-center justify-between border-b border-slate-800 px-4 py-4">
+                <p className="text-sm font-black uppercase tracking-wide text-white">
+                  Menu
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setMobileNavOpen(false)}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-white"
+                  aria-label="Close menu"
+                >
+                  <X className="h-5 w-5" aria-hidden />
+                </button>
+              </div>
+
+              <nav className="flex flex-col gap-1 overflow-y-auto p-3" aria-label="Main">
+                <button
+                  type="button"
+                  onClick={() => selectTab('dashboard')}
+                  className={navTabClass('dashboard', 'blue', true)}
+                >
+                  <LayoutDashboard className="h-4 w-4 shrink-0" aria-hidden />
+                  Queues
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectTab('history')}
+                  className={navTabClass('history', 'blue', true)}
+                >
+                  <History className="h-4 w-4 shrink-0" aria-hidden />
+                  Logs
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectTab('cardCd')}
+                  className={navTabClass('cardCd', 'amber', true)}
+                >
+                  <Clock className="h-4 w-4 shrink-0" aria-hidden />
+                  On CD
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectTab('bidders')}
+                  className={`relative ${navTabClass('bidders', 'blue', true)}`}
+                >
+                  <UserPlus className="h-4 w-4 shrink-0" aria-hidden />
+                  Bidders
+                  {pendingBidderCount > 0 ? (
+                    <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-amber-400 px-1.5 text-[10px] font-black text-amber-950">
+                      {pendingBidderCount > 99 ? '99+' : pendingBidderCount}
+                    </span>
+                  ) : null}
+                </button>
+                <a
+                  href={PUBLIC_REGISTRATION_PATH}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setMobileNavOpen(false)}
+                  className={navRegistrationClass(true)}
+                >
+                  <ClipboardList className="h-4 w-4 shrink-0" aria-hidden />
+                  Register
+                </a>
+
+                {activeTab === 'dashboard' && queueAdminToolbar ? (
+                  <div className="mt-3 space-y-3 border-t border-slate-800 pt-4">
+                    <p className="px-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                      Queue actions
+                    </p>
+                    {queueAdminToolbar}
+                  </div>
+                ) : null}
+              </nav>
+            </motion.aside>
+          </>
+        ) : null}
+      </AnimatePresence>
 
       <main className="min-h-screen">
         <div className="max-w-screen-2xl mx-auto px-4 sm:px-8 py-6 sm:py-12">
@@ -2553,95 +2888,11 @@ export default function AuctionDashboard() {
               hidden={activeTab !== 'dashboard'}
               className="space-y-8"
             >
-                {visibleActiveAuctions.length > 0 && (
-                  <div className="flex w-full min-w-0 flex-col items-stretch gap-3 sm:items-end">
-                    <div className="w-full">
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                        <div className="grid w-full grid-cols-2 rounded-xl border border-slate-700 bg-slate-900 p-1 sm:inline-flex sm:w-fit">
-                          {(['Guild League', 'Emperium Overrun'] as const).map((mode) => (
-                            <button
-                              key={mode}
-                              type="button"
-                              onClick={() => setEventModeDraft(mode)}
-                              disabled={eventModeSaving}
-                              className={`cursor-pointer rounded-lg px-3 py-1.5 text-center text-[11px] font-black uppercase tracking-wide transition-colors disabled:cursor-not-allowed sm:text-xs ${
-                                eventModeDraft === mode
-                                  ? 'bg-blue-600 text-white'
-                                  : 'text-slate-300 hover:bg-slate-800'
-                              }`}
-                            >
-                              {mode}
-                            </button>
-                          ))}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => void handleSaveEventMode()}
-                          disabled={
-                            eventModeSaving ||
-                            eventModeDraft === eventModeActive
-                          }
-                          className="inline-flex w-full cursor-pointer items-center justify-center rounded-xl bg-blue-600 px-4 py-2 text-xs font-black uppercase tracking-wide text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
-                        >
-                          {eventModeSaving ? 'Saving...' : 'Save Event Mode'}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:justify-end">
-                        <button
-                          type="button"
-                          onClick={() => void handleShuffleAllQueues()}
-                          disabled={shuffleUi.active || state?.shuffleLocked === true}
-                          aria-busy={shuffleUi.active}
-                          title={
-                            state?.shuffleLocked === true
-                              ? 'Already shuffled this round — use Reset shuffle / Unmark all to unlock shuffle again.'
-                              : undefined
-                          }
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-blue-600 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:px-4"
-                        >
-                          <Shuffle className="h-4 w-4 shrink-0" aria-hidden />
-                          {state?.shuffleLocked === true ? 'Shuffle Used' : 'Start Shuffle'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleResetShuffleUnmarkAll()}
-                          disabled={shuffleUi.active}
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-amber-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:px-4"
-                        >
-                          <RotateCcw className="h-4 w-4 shrink-0" aria-hidden />
-                          <span className="sm:hidden">Reset / Unmark</span>
-                          <span className="hidden sm:inline">Reset shuffle / Unmark all</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={openWinnerSetLimitModal}
-                          disabled={shuffleUi.active}
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-blue-700 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:px-4"
-                        >
-                          Winner Settings
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleClearAllQueues()}
-                          disabled={
-                            shuffleUi.active ||
-                            clearQueuesSaving ||
-                            totalActiveQueueEntries === 0
-                          }
-                          title={
-                            totalActiveQueueEntries === 0
-                              ? 'No bidders in any active queue'
-                              : 'Empty every active auction card’s queue (roster unchanged)'
-                          }
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-3 py-2.5 text-center text-[10px] font-black uppercase tracking-wide leading-tight text-white transition-all hover:bg-amber-900/80 active:scale-95 enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:px-4"
-                        >
-                          <ListX className="h-4 w-4 shrink-0" aria-hidden />
-                          Clear all lists
-                        </button>
-                    </div>
+                {queueAdminToolbar ? (
+                  <div className="hidden w-full min-w-0 flex-col items-stretch gap-3 md:flex md:items-end">
+                    {queueAdminToolbar}
                   </div>
-                )}
+                ) : null}
                 <div
                   className={
                     centerFewQueueCards
@@ -2919,13 +3170,98 @@ export default function AuctionDashboard() {
               <BidderRegistration />
             </div>
           )}
+
+          {visitedTabs.has('cardCd') && (
+            <div
+              key="cardCd"
+              hidden={activeTab !== 'cardCd'}
+              className="space-y-8"
+            >
+              <CardCdSection />
+            </div>
+          )}
         </div>
       </main>
 
-      {/* Modals */}
+      {/* Modals — only motion Modals belong in AnimatePresence (needs unique keys). */}
+      <BidderAuthModal
+        key="auth-remove-queue"
+        open={authPromptOpen}
+        title="Sign in to remove from queue"
+        description="Officer, Admin, or Developer access required to remove a bidder from a queue."
+        submitLabel="Sign in & continue"
+        onAuth={handleAuthPromptSuccess}
+        onCancel={handleAuthPromptCancel}
+      />
+
+      <BidderAuthModal
+        key="auth-event-mode"
+        open={eventModeAuthPromptOpen}
+        title="Sign in to change event mode"
+        description="Admin or Developer access required to switch between Guild League and Emperium Overrun."
+        submitLabel="Sign in & save"
+        allowedRoles={['Admin', 'Developer']}
+        onAuth={handleEventModeAuthSuccess}
+        onCancel={handleEventModeAuthCancel}
+      />
+
+      <BidderAuthModal
+        key="auth-shuffle"
+        open={shuffleAuthPromptOpen}
+        title="Sign in to start shuffle"
+        description="Officer, Admin, or Developer access required to start the auction shuffle."
+        submitLabel="Sign in & start shuffle"
+        onAuth={handleShuffleAuthSuccess}
+        onCancel={handleShuffleAuthCancel}
+      />
+
+      <BidderAuthModal
+        key="auth-reset-shuffle"
+        open={resetShuffleAuthPromptOpen}
+        title="Sign in to reset shuffle"
+        description="Admin or Developer access required to reset the shuffle and unmark all winners."
+        submitLabel="Sign in & reset"
+        allowedRoles={['Admin', 'Developer']}
+        onAuth={handleResetShuffleAuthSuccess}
+        onCancel={handleResetShuffleAuthCancel}
+      />
+
+      <BidderAuthModal
+        key="auth-winner-settings"
+        open={winnerSetLimitAuthPromptOpen}
+        title="Sign in to save Winner Settings"
+        description="Officer, Admin, or Developer access required to change Winner Settings."
+        submitLabel="Sign in & save"
+        onAuth={handleWinnerSetLimitAuthSuccess}
+        onCancel={handleWinnerSetLimitAuthCancel}
+      />
+
+      <BidderAuthModal
+        key="auth-mark-winner"
+        open={markWinnerAuthPromptOpen}
+        title="Sign in to adjust winner marks"
+        description="Admin or Developer access required to mark or unmark winners after shuffle results are locked."
+        submitLabel="Sign in & continue"
+        allowedRoles={['Admin', 'Developer']}
+        onAuth={handleMarkWinnerAuthSuccess}
+        onCancel={handleMarkWinnerAuthCancel}
+      />
+
+      <BidderAuthModal
+        key="auth-clear-queues"
+        open={clearQueuesAuthPromptOpen}
+        title="Sign in to clear all lists"
+        description="Admin or Developer access required to clear every active auction queue."
+        submitLabel="Sign in & clear"
+        allowedRoles={['Admin', 'Developer']}
+        onAuth={handleClearQueuesAuthSuccess}
+        onCancel={handleClearQueuesAuthCancel}
+      />
+
       <AnimatePresence>
         {queueNameModalItemId && queueModalItem && (
           <Modal
+            key="join-queue"
             title="Join queue"
             onClose={closeJoinQueueModal}
           >
@@ -3056,6 +3392,7 @@ export default function AuctionDashboard() {
 
         {editMemberId && (
           <Modal
+            key="edit-member"
             title="Edit character name"
             onClose={() => {
               setEditMemberId(null);
@@ -3103,75 +3440,12 @@ export default function AuctionDashboard() {
           </Modal>
         )}
 
-        <BidderAuthModal
-          open={authPromptOpen}
-          title="Sign in to remove from queue"
-          description="Officer, Admin, or Developer access required to remove a bidder from a queue."
-          submitLabel="Sign in & continue"
-          onAuth={handleAuthPromptSuccess}
-          onCancel={handleAuthPromptCancel}
-        />
-
-        <BidderAuthModal
-          open={eventModeAuthPromptOpen}
-          title="Sign in to change event mode"
-          description="Admin or Developer access required to switch between Guild League and Emperium Overrun."
-          submitLabel="Sign in & save"
-          allowedRoles={['Admin', 'Developer']}
-          onAuth={handleEventModeAuthSuccess}
-          onCancel={handleEventModeAuthCancel}
-        />
-
-        <BidderAuthModal
-          open={shuffleAuthPromptOpen}
-          title="Sign in to start shuffle"
-          description="Officer, Admin, or Developer access required to start the auction shuffle."
-          submitLabel="Sign in & start shuffle"
-          onAuth={handleShuffleAuthSuccess}
-          onCancel={handleShuffleAuthCancel}
-        />
-
-        <BidderAuthModal
-          open={resetShuffleAuthPromptOpen}
-          title="Sign in to reset shuffle"
-          description="Admin or Developer access required to reset the shuffle and unmark all winners."
-          submitLabel="Sign in & reset"
-          allowedRoles={['Admin', 'Developer']}
-          onAuth={handleResetShuffleAuthSuccess}
-          onCancel={handleResetShuffleAuthCancel}
-        />
-
-        <BidderAuthModal
-          open={winnerSetLimitAuthPromptOpen}
-          title="Sign in to save Winner Settings"
-          description="Officer, Admin, or Developer access required to change Winner Settings."
-          submitLabel="Sign in & save"
-          onAuth={handleWinnerSetLimitAuthSuccess}
-          onCancel={handleWinnerSetLimitAuthCancel}
-        />
-
-        <BidderAuthModal
-          open={markWinnerAuthPromptOpen}
-          title="Sign in to adjust winner marks"
-          description="Admin or Developer access required to mark or unmark winners after shuffle results are locked."
-          submitLabel="Sign in & continue"
-          allowedRoles={['Admin', 'Developer']}
-          onAuth={handleMarkWinnerAuthSuccess}
-          onCancel={handleMarkWinnerAuthCancel}
-        />
-
-        <BidderAuthModal
-          open={clearQueuesAuthPromptOpen}
-          title="Sign in to clear all lists"
-          description="Admin or Developer access required to clear every active auction queue."
-          submitLabel="Sign in & clear"
-          allowedRoles={['Admin', 'Developer']}
-          onAuth={handleClearQueuesAuthSuccess}
-          onCancel={handleClearQueuesAuthCancel}
-        />
-
         {isAddItemOpen && (
-          <Modal title="New bid item" onClose={() => setIsAddItemOpen(false)}>
+          <Modal
+            key="add-item"
+            title="New bid item"
+            onClose={() => setIsAddItemOpen(false)}
+          >
             <form onSubmit={handleAddItem} className="space-y-8">
               <div className="space-y-2">
                 <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] font-mono ml-1">Item name</label>
@@ -3230,6 +3504,7 @@ export default function AuctionDashboard() {
 
         {winnerSetLimitModalOpen && (
           <Modal
+            key="winner-settings"
             title="Winner Settings"
             onClose={() => setWinnerSetLimitModalOpen(false)}
           >
@@ -3241,7 +3516,7 @@ export default function AuctionDashboard() {
                 <div className="inline-flex w-full rounded-xl border border-slate-700 bg-slate-900 p-1">
                   {GUILD_RANK_OPTIONS
                     // Each event mode pins its rank preset:
-                    //   • Guild League     → Bronze or Silver
+                    //   • Guild League     → Bronze, Silver, Gold, or Platinum
                     //   • Emperium Overrun → Emperium overrun only
                     // The off-mode rank button is hidden so users can't pick
                     // a mismatching preset.
@@ -3256,18 +3531,25 @@ export default function AuctionDashboard() {
                         type="button"
                         onClick={() =>
                           setWinnerSetLimitForm((prev) => {
-                            const preset = rankPresetLimits(rank);
+                            const preset = presetRewardItemCounts(
+                              rank,
+                              state?.items ?? []
+                            );
                             return {
                               ...prev,
                               rank,
                               rankWinnerDouble: false,
-                              feathers: preset.feathers,
-                              feathersItemsPerWinner:
-                                defaultFeathersItemsPerWinner(rank),
-                              fragmentByItemId: Object.fromEntries(
-                                activeFragmentAuctionItems(state?.items ?? []).map(
-                                  (it) => [it.id, preset.fragment]
-                                )
+                              feathers: String(preset.feathers),
+                              feathersItemsPerWinner: String(
+                                preset.feathersItemsPerWinner ??
+                                  defaultFeathersItemsPerWinner(rank)
+                              ),
+                              fragmentByItemId: fragmentLimitsToFormStrings(
+                                preset.fragmentByItemId ??
+                                  buildFragmentLimitsByItemId(
+                                    state?.items ?? [],
+                                    preset
+                                  )
                               ),
                             };
                           })
@@ -3301,7 +3583,7 @@ export default function AuctionDashboard() {
                 />
               ) : null}
               {activeFragmentAuctionItems(state?.items ?? []).map((card, idx) => {
-                const value = winnerSetLimitForm.fragmentByItemId[card.id] ?? 0;
+                const value = winnerSetLimitForm.fragmentByItemId[card.id] ?? '';
                 return (
                   <div key={card.id} className="space-y-2">
                     <label className="text-xs uppercase font-black text-slate-400 tracking-[0.18em] font-mono ml-1">
@@ -3311,8 +3593,7 @@ export default function AuctionDashboard() {
                       autoFocus={idx === 0}
                       type="text"
                       inputMode="numeric"
-                      pattern="[0-9]*"
-                      required
+                      autoComplete="off"
                       className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
                       value={value}
                       onChange={(e) =>
@@ -3320,15 +3601,22 @@ export default function AuctionDashboard() {
                           ...prev,
                           fragmentByItemId: {
                             ...prev.fragmentByItemId,
-                            [card.id]: Math.max(
-                              0,
-                              Math.floor(
-                                Number((e.target.value || '0').replace(/[^\d]/g, '')) ||
-                                  0
-                              )
-                            ),
+                            [card.id]: winnerLimitDigitsOnly(e.target.value),
                           },
                         }))
+                      }
+                      onBlur={() =>
+                        setWinnerSetLimitForm((prev) => {
+                          const raw = prev.fragmentByItemId[card.id] ?? '';
+                          if (raw !== '') return prev;
+                          return {
+                            ...prev,
+                            fragmentByItemId: {
+                              ...prev.fragmentByItemId,
+                              [card.id]: '0',
+                            },
+                          };
+                        })
                       }
                     />
                   </div>
@@ -3341,20 +3629,21 @@ export default function AuctionDashboard() {
                 <input
                   type="text"
                   inputMode="numeric"
-                  pattern="[0-9]*"
-                  required
+                  autoComplete="off"
                   className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
                   value={winnerSetLimitForm.feathers}
                   onChange={(e) =>
                     setWinnerSetLimitForm((prev) => ({
                       ...prev,
-                      feathers: Math.max(
-                        0,
-                        Math.floor(
-                          Number((e.target.value || '0').replace(/[^\d]/g, '')) || 0
-                        )
-                      ),
+                      feathers: winnerLimitDigitsOnly(e.target.value),
                     }))
+                  }
+                  onBlur={() =>
+                    setWinnerSetLimitForm((prev) =>
+                      prev.feathers === ''
+                        ? { ...prev, feathers: '0' }
+                        : prev
+                    )
                   }
                 />
               </div>
@@ -3365,41 +3654,56 @@ export default function AuctionDashboard() {
                 <input
                   type="text"
                   inputMode="numeric"
-                  pattern="[0-9]*"
-                  required
+                  autoComplete="off"
                   className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50"
                   value={winnerSetLimitForm.feathersItemsPerWinner}
                   onChange={(e) =>
                     setWinnerSetLimitForm((prev) => ({
                       ...prev,
-                      feathersItemsPerWinner: Math.max(
-                        1,
-                        Math.floor(
-                          Number((e.target.value || '1').replace(/[^\d]/g, '')) || 1
-                        )
+                      feathersItemsPerWinner: winnerLimitDigitsOnly(
+                        e.target.value
                       ),
                     }))
                   }
+                  onBlur={() =>
+                    setWinnerSetLimitForm((prev) =>
+                      prev.feathersItemsPerWinner === ''
+                        ? { ...prev, feathersItemsPerWinner: '1' }
+                        : prev
+                    )
+                  }
                 />
                 <p className="text-xs text-slate-500 ml-1">
-                  {winnerSetLimitForm.feathers} total items ÷{' '}
-                  {winnerSetLimitForm.feathersItemsPerWinner} per winner ={' '}
+                  {winnerLimitParseInt(winnerSetLimitForm.feathers, 0, 0)} total
+                  items ÷{' '}
+                  {winnerLimitParseInt(
+                    winnerSetLimitForm.feathersItemsPerWinner,
+                    1,
+                    1
+                  )}{' '}
+                  per winner ={' '}
                   <span className="font-semibold text-slate-300">
-                    {winnerSlotsFromItems('Feathers', winnerSetLimitForm.feathers)}
+                    {winnerSlotsFromItems(
+                      'Feathers',
+                      winnerLimitParseInt(winnerSetLimitForm.feathers, 0, 0)
+                    )}
                   </span>{' '}
                   winner slot
-                  {winnerSlotsFromItems('Feathers', winnerSetLimitForm.feathers) === 1
+                  {winnerSlotsFromItems(
+                    'Feathers',
+                    winnerLimitParseInt(winnerSetLimitForm.feathers, 0, 0)
+                  ) === 1
                     ? ''
                     : 's'}
                   {freeItemsFromTotalItems(
                     'Feathers',
-                    winnerSetLimitForm.feathers,
+                    winnerLimitParseInt(winnerSetLimitForm.feathers, 0, 0),
                     winnerSetLimitForm.rank,
                     winnerCountsFromForm()
                   ) > 0
                     ? ` (+${freeItemsFromTotalItems(
                         'Feathers',
-                        winnerSetLimitForm.feathers,
+                        winnerLimitParseInt(winnerSetLimitForm.feathers, 0, 0),
                         winnerSetLimitForm.rank,
                         winnerCountsFromForm()
                       )} free items)`
@@ -3797,7 +4101,11 @@ function QueueCard({
                 return (
                   <motion.div
                     layout
-                    key={isShuffling ? `slot-${item.id}-${idx}` : mid}
+                    key={
+                      isShuffling
+                        ? `slot-${item.id}-${idx}`
+                        : `${item.id}-${idx}-${mid}`
+                    }
                     initial={isShuffling ? false : { opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, scale: 0.9 }}
@@ -4091,12 +4399,17 @@ function QueueCard({
 
 function Modal({ title, children, onClose }: { title: string, children: React.ReactNode, onClose: () => void }) {
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+    <motion.div
+      className="fixed inset-0 z-[100] flex items-center justify-center p-6"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+    >
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-slate-950/80 backdrop-blur-md" />
       <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="relative w-full max-w-xl bg-slate-900 border border-slate-800 rounded-[2.5rem] p-10 overflow-hidden shadow-2xl">
         <h3 className="text-2xl font-black text-white mb-8">{title}</h3>
         {children}
       </motion.div>
-    </div>
+    </motion.div>
   );
 }
