@@ -19,6 +19,7 @@ import {
 import {
   CARD_CD_LIST_CACHE_KEY,
   fetchCardCdList,
+  type CardCdTab,
   type OnCdRow,
 } from './lib/apiCardCd';
 import { puppetCardCdBadgeClass } from './lib/puppetCardCdDisplay';
@@ -29,8 +30,41 @@ type PageSize = 25 | 50 | 100;
 const DEFAULT_PAGE_SIZE: PageSize = 25;
 const REFRESH_MS = 30_000;
 
+const TAB_COPY: Record<
+  CardCdTab,
+  { title: string; noteTitle: string; noteBody: React.ReactNode; empty: string }
+> = {
+  guildLeague: {
+    title: 'Guild League',
+    noteTitle: 'Guild League — Puppet Card CD',
+    noteBody: (
+      <>
+        Nanalo ng <strong className="text-white">Puppet Frag Card</strong> sa{' '}
+        <strong className="text-white">Tuesday</strong> Guild League? Hindi
+        makakabid sa <strong className="text-white">Thursday</strong> round ng
+        parehong linggo.
+      </>
+    ),
+    empty: 'No Guild League Puppet CD right now.',
+  },
+  emperium: {
+    title: 'Emperium Overrun',
+    noteTitle: 'Emperium Overrun — Puppet Card CD',
+    noteBody: (
+      <>
+        Nanalo ng <strong className="text-white">Puppet Frag Card</strong>? Hindi
+        makakabid sa susunod na{' '}
+        <strong className="text-white">Emperium Sunday</strong>.
+      </>
+    ),
+    empty: 'No Emperium Overrun Puppet CD right now.',
+  },
+};
+
 export default function CardCdSection() {
-  const [rows, setRows] = useState<OnCdRow[]>([]);
+  const [guildRows, setGuildRows] = useState<OnCdRow[]>([]);
+  const [emperiumRows, setEmperiumRows] = useState<OnCdRow[]>([]);
+  const [activeTab, setActiveTab] = useState<CardCdTab>('guildLeague');
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,8 +72,13 @@ export default function CardCdSection() {
   const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
   const [page, setPage] = useState(1);
 
+  const rows = activeTab === 'guildLeague' ? guildRows : emperiumRows;
+  const tabCopy = TAB_COPY[activeTab];
+
   const load = async (opts: { silent?: boolean } = {}) => {
-    if (!opts.silent && rows.length === 0) setInitialLoading(true);
+    if (!opts.silent && guildRows.length === 0 && emperiumRows.length === 0) {
+      setInitialLoading(true);
+    }
     if (opts.silent) setRefreshing(true);
     try {
       const { data, fromCache } = await fetchWithCache(
@@ -47,9 +86,10 @@ export default function CardCdSection() {
         fetchCardCdList,
         { ttlMs: REFRESH_MS }
       );
-      setRows(data.rows);
+      setGuildRows(data.guildLeague);
+      setEmperiumRows(data.emperium);
       setError(null);
-      if (!fromCache || data.rows.length > 0) {
+      if (!fromCache || data.guildLeague.length > 0 || data.emperium.length > 0) {
         setInitialLoading(false);
       }
     } catch (e) {
@@ -85,7 +125,7 @@ export default function CardCdSection() {
 
   useEffect(() => {
     setPage(1);
-  }, [searchTerm, pageSize]);
+  }, [searchTerm, pageSize, activeTab]);
 
   useEffect(() => {
     setPage((p) => Math.min(Math.max(1, p), totalPages));
@@ -98,11 +138,33 @@ export default function CardCdSection() {
           On CD — Puppet Card
         </h2>
         <p className="mt-1 text-sm text-slate-400">
-          Bidders on Puppet Frag Card cooldown.
+          Bidders on Puppet Frag Card cooldown by event mode.
           {refreshing ? (
             <span className="ml-2 text-xs text-slate-500">Refreshing…</span>
           ) : null}
         </p>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {(['guildLeague', 'emperium'] as const).map((tab) => {
+          const count = tab === 'guildLeague' ? guildRows.length : emperiumRows.length;
+          const active = activeTab === tab;
+          return (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setActiveTab(tab)}
+              className={`rounded-xl border px-4 py-2 text-sm font-bold transition-colors ${
+                active
+                  ? 'border-amber-500 bg-amber-950/50 text-amber-100'
+                  : 'border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-600 hover:text-slate-200'
+              }`}
+            >
+              {TAB_COPY[tab].title}
+              <span className="ml-2 text-xs font-semibold opacity-80">({count})</span>
+            </button>
+          );
+        })}
       </div>
 
       <div
@@ -110,30 +172,26 @@ export default function CardCdSection() {
         role="note"
       >
         <p className="text-[11px] font-black uppercase tracking-widest text-amber-300">
-          Emperium Overrun only
+          {tabCopy.noteTitle}
         </p>
         <p className="mt-1.5 text-sm leading-relaxed text-amber-50/95">
-          Ang listahan na ito ay para sa{' '}
-          <strong className="text-white">Emperium Overrun</strong> lang — walang
-          Puppet Card CD sa <strong className="text-white">Guild League</strong>.
-          Nanalo ng Puppet Frag Card? Hindi makakabid sa susunod na Emperium
-          Sunday.
+          {tabCopy.noteBody}
         </p>
       </div>
 
       <div className="relative w-full sm:max-w-sm">
-          <Search
-            className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
-            aria-hidden
-          />
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Search by IGN…"
-            className="w-full rounded-xl border border-slate-700 bg-slate-900 px-9 py-2.5 text-sm text-slate-100 outline-none transition-colors placeholder:text-slate-500 focus:border-amber-500"
-          />
-        </div>
+        <Search
+          className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+          aria-hidden
+        />
+        <input
+          type="text"
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          placeholder="Search by IGN…"
+          className="w-full rounded-xl border border-slate-700 bg-slate-900 px-9 py-2.5 text-sm text-slate-100 outline-none transition-colors placeholder:text-slate-500 focus:border-amber-500"
+        />
+      </div>
 
       {error ? (
         <div className="rounded-xl border border-rose-800 bg-rose-950/50 px-4 py-3 text-sm text-rose-200">
@@ -170,14 +228,14 @@ export default function CardCdSection() {
                     className="px-4 py-10 text-center text-sm text-slate-500"
                   >
                     {rows.length === 0
-                      ? 'No bidders on CD right now.'
+                      ? tabCopy.empty
                       : 'No on-CD bidders match your search.'}
                   </td>
                 </tr>
               ) : (
                 pageRows.map((row) => (
                   <tr
-                    key={`${row.id}-${row.name}`}
+                    key={`${activeTab}-${row.id}-${row.name}`}
                     className="border-b border-slate-800/70 last:border-0 transition-colors hover:bg-slate-800/40"
                   >
                     <td className="px-4 py-3 font-medium text-white">

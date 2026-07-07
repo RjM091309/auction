@@ -153,6 +153,38 @@ export function swal2EmperiumWinCooldown(args: {
   }).then(() => undefined);
 }
 
+/** Guild League: skip Thursday Puppet bid after winning Tuesday round. */
+export function swal2GuildLeagueWinCooldown(args: {
+  ign: string;
+  itemName: string;
+  expiresAt: number;
+}): Promise<void> {
+  const { ign, itemName, expiresAt } = args;
+  const i = escapeHtml(ign);
+  const n = escapeHtml(itemName);
+  const until = new Date(expiresAt).toLocaleString(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
+  return Swal.fire({
+    ...darkShell,
+    icon: 'info',
+    title: 'Winner cooldown (Guild League)',
+    width: 'min(28rem, calc(100vw - 2rem))',
+    customClass: { htmlContainer: 'swal-queue-html' },
+    html: `<div style="text-align:center;margin:0;padding:0">
+<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Under <strong>Guild League</strong>, you already won <strong>Puppet Frag Card</strong> on <strong>Tuesday</strong>. You cannot bid on Puppet during the <strong>Thursday</strong> round this week.</p>
+<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> — eligible again from:</p>
+<div style="margin-top:1rem;display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
+<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
+<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word;margin-bottom:0.5rem">${n}</div>
+<div style="font-size:13px;color:#94a3b8">${until}</div>
+</div>
+</div>`,
+    confirmButtonText: 'OK',
+  }).then(() => undefined);
+}
+
 /** @deprecated Use swal2EmperiumWinCooldown — kept for older call sites. */
 export function swal2AlreadyWonTypeThisWeek(args: {
   ign: string;

@@ -4,7 +4,7 @@ import { ignMatchesForQueueIdentity } from './ignQueueIdentity';
 import {
   findOtherActiveQueueBlocking,
 } from './queueEligibility';
-import { findEmperiumWinCooldown } from './emperiumWinCooldown';
+import { findPuppetWinCooldown } from './puppetCardCdDisplay';
 
 export const QUEUE_DRAG_MIME = 'application/x-rooc-queue';
 
@@ -21,7 +21,8 @@ export type QueueMoveError =
   | 'name_conflict'
   | 'no_change'
   | 'weekly_type_win'
-  | 'emperium_win_cooldown';
+  | 'emperium_win_cooldown'
+  | 'guild_league_win_cooldown';
 
 export type QueueMoveFailure = {
   error: QueueMoveError;
@@ -94,15 +95,19 @@ export function applyQueueMemberMove(
   }
 
   if (fromItemId !== toItemId) {
-    const cooldown = findEmperiumWinCooldown(
+    const cooldown = findPuppetWinCooldown(
       s.eventMode,
       toItem,
       s.weeklyTypeWins,
       member.name
     );
     if (cooldown) {
+      const code =
+        s.eventMode === 'Guild League'
+          ? 'guild_league_win_cooldown'
+          : 'emperium_win_cooldown';
       return {
-        error: 'emperium_win_cooldown',
+        error: code,
         toItemName: toItem.name,
         expiresAt: cooldown.expiresAt,
       };

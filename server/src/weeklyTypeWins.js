@@ -1,11 +1,16 @@
 import { getAuctionWeekMondayKey, getAuctionWeekTimezone } from './auctionWeek.js';
 import { isEmperiumCooldownItem, pruneExpiredEmperiumWins } from './emperiumWinCooldown.js';
 import { isEmperiumWinStillOnCooldown } from './overrunWeek.js';
+import {
+  GUILD_LEAGUE_WIN_MODE,
+  pruneWeeklyTypeWins,
+} from './guildLeagueWinCooldown.js';
+import { isGuildLeagueWinStillOnCooldown } from './guildLeagueWeek.js';
 
 export const META_AUCTION_WEEK_MONDAY = 'auction_week_monday';
 export const META_WEEKLY_TYPE_WINS = 'weekly_type_wins';
 
-/** @typedef {{ ign: string, t: string, itemId?: string, at?: number }} WeeklyTypeWin — ign is trim + lowercase */
+/** @typedef {{ ign: string, t: string, itemId?: string, at?: number, mode?: string }} WeeklyTypeWin — ign is trim + lowercase */
 
 /** @param {unknown} name */
 export function normalizeIgn(name) {
@@ -53,6 +58,7 @@ export function parseWeeklyTypeWins(raw) {
       const entry = { ign, t };
       if (itemId) entry.itemId = itemId;
       if (at != null) entry.at = at;
+      if (row.mode === 'Guild League') entry.mode = GUILD_LEAGUE_WIN_MODE;
       out.push(entry);
     }
     return out;
@@ -96,7 +102,7 @@ export async function rolloverWeeklyWinsIfNewWeek(q) {
   if (stored === mondayKey) return;
 
   const currentWins = await loadWeeklyTypeWins(q);
-  const pruned = pruneExpiredEmperiumWins(currentWins);
+  const pruned = pruneWeeklyTypeWins(currentWins);
 
   const [[{ winnerMarkLogRows }]] = await q.query(
     'SELECT COUNT(*) AS winnerMarkLogRows FROM winner_mark_log'
@@ -134,19 +140,20 @@ export async function loadWeeklyTypeWins(q) {
   return parseWeeklyTypeWins(metaText(rows[0]?.value));
 }
 
-/** Dedupe by normalized ign + type + itemId. */
+/** Dedupe by normalized ign + type + itemId + mode. */
 export function dedupeWeeklyWinsList(wins) {
-  const winKey = (ign, t, itemId) => `${ign}\0${t}\0${itemId ?? ''}`;
+  const winKey = (ign, t, itemId, mode) => `${ign}\0${t}\0${itemId ?? ''}\0${mode ?? ''}`;
   const seen = new Set();
   const out = [];
   for (const w of wins) {
     if (!w || typeof w.ign !== 'string' || typeof w.t !== 'string') continue;
-    const k = winKey(w.ign, w.t, w.itemId);
+    const k = winKey(w.ign, w.t, w.itemId, w.mode);
     if (seen.has(k)) continue;
     seen.add(k);
     const row = { ign: w.ign, t: w.t };
     if (w.itemId) row.itemId = w.itemId;
     if (typeof w.at === 'number' && Number.isFinite(w.at) && w.at > 0) row.at = w.at;
+    if (w.mode === GUILD_LEAGUE_WIN_MODE) row.mode = GUILD_LEAGUE_WIN_MODE;
     out.push(row);
   }
   return out;
@@ -163,10 +170,10 @@ export function dedupeWeeklyWinsList(wins) {
  * @param {Array<{ id: string, type: string, name?: string, recordedWinnerNames?: string[] }>} items
  * @param {WeeklyTypeWin[]} wins
  */
-export async function backfillWeeklyWinsFromRecordedWinners(q, items, wins) {
+export async function backfillWeeklyWinsFromRecordedWinners(q, items, wins, winMode = undefined) {
   const out = dedupeWeeklyWinsList(wins);
-  const winKey = (ign, t, itemId) => `${ign}\0${t}\0${itemId ?? ''}`;
-  const seen = new Set(out.map((w) => winKey(w.ign, w.t, w.itemId)));
+  const winKeyLocal = (ign, t, itemId, mode) => `${ign}\0${t}\0${itemId ?? ''}\0${mode ?? ''}`;
+  const seen = new Set(out.map((w) => winKeyLocal(w.ign, w.t, w.itemId, w.mode)));
 
   for (const it of items) {
     if (!isEmperiumCooldownItem(it)) continue;
@@ -176,7 +183,7 @@ export async function backfillWeeklyWinsFromRecordedWinners(q, items, wins) {
       if (raw == null || typeof raw !== 'string') continue;
       const ign = normalizeIgn(raw);
       if (!ign) continue;
-      const k = winKey(ign, it.type, it.id);
+      const k = winKeyLocal(ign, it.type, it.id, winMode);
       if (seen.has(k)) continue;
 
       const [rows] = await q.query(
@@ -189,14 +196,40 @@ export async function backfillWeeklyWinsFromRecordedWinners(q, items, wins) {
       const at = atRaw != null ? Number(atRaw) : NaN;
       if (!Number.isFinite(at) || at <= 0) continue;
       seen.add(k);
-      out.push({ ign, t: it.type, itemId: it.id, at });
+      const row = { ign, t: it.type, itemId: it.id, at };
+      if (winMode === GUILD_LEAGUE_WIN_MODE) row.mode = GUILD_LEAGUE_WIN_MODE;
+      out.push(row);
     }
   }
   return out;
 }
 
-function winKey(ign, t, itemId) {
-  return `${ign}\0${t}\0${itemId ?? ''}`;
+function winKey(ign, t, itemId, mode) {
+  return `${ign}\0${t}\0${itemId ?? ''}\0${mode ?? ''}`;
+}
+
+function cooldownStillActive(at, winMode, nowMs) {
+  if (!Number.isFinite(at) || at <= 0) return false;
+  if (winMode === GUILD_LEAGUE_WIN_MODE) {
+    return isGuildLeagueWinStillOnCooldown(at, nowMs);
+  }
+  return isEmperiumWinStillOnCooldown(at, nowMs);
+}
+
+/** Keep the newest `at` per IGN when multiple log sources backfill the same row. */
+function upsertPuppetCooldownWin(out, ign, t, itemId, at, winMode, nowMs = Date.now()) {
+  if (!Number.isFinite(at) || at <= 0) return;
+  if (!cooldownStillActive(at, winMode, nowMs)) return;
+  const k = winKey(ign, t, itemId, winMode);
+  const idx = out.findIndex((w) => winKey(w.ign, w.t, w.itemId, w.mode) === k);
+  const row = { ign, t, itemId, at };
+  if (winMode === GUILD_LEAGUE_WIN_MODE) row.mode = GUILD_LEAGUE_WIN_MODE;
+  if (idx >= 0) {
+    const prevAt = out[idx].at ?? 0;
+    if (at > prevAt) out[idx] = row;
+    return;
+  }
+  out.push(row);
 }
 
 /** Admin green-check list (`recordedWinnerNames`) — only these IGNs get Puppet CD. */
@@ -212,22 +245,16 @@ function recordedIgnsForItem(it) {
   return set.size > 0 ? set : null;
 }
 
-/** Keep the newest `at` per IGN when multiple log sources backfill the same row. */
-function upsertEmperiumCooldownWin(out, ign, t, itemId, at, nowMs = Date.now()) {
-  if (!Number.isFinite(at) || at <= 0) return;
-  if (!isEmperiumWinStillOnCooldown(at, nowMs)) return;
-  const k = winKey(ign, t, itemId);
-  const idx = out.findIndex((w) => winKey(w.ign, w.t, w.itemId) === k);
-  if (idx >= 0) {
-    const prevAt = out[idx].at ?? 0;
-    if (at > prevAt) out[idx] = { ign, t, itemId, at };
-    return;
-  }
-  out.push({ ign, t, itemId, at });
-}
-
-async function backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs = Date.now()) {
+async function backfillWeeklyWinsFromIgnAtRows(
+  items,
+  wins,
+  rows,
+  nowMs = Date.now(),
+  allowNewEntries = true,
+  winMode = undefined
+) {
   const out = dedupeWeeklyWinsList(wins);
+  const existingKeys = new Set(out.map((w) => winKey(w.ign, w.t, w.itemId, w.mode)));
   for (const it of items) {
     if (!isEmperiumCooldownItem(it)) continue;
     const allowed = recordedIgnsForItem(it);
@@ -240,7 +267,9 @@ async function backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs = Date.n
       latestByIgn.set(ign, Number(row.atMs));
     }
     for (const [ign, at] of latestByIgn) {
-      upsertEmperiumCooldownWin(out, ign, it.type, it.id, at, nowMs);
+      const k = winKey(ign, it.type, it.id, winMode);
+      if (!allowNewEntries && !existingKeys.has(k)) continue;
+      upsertPuppetCooldownWin(out, ign, it.type, it.id, at, winMode, nowMs);
     }
   }
   return out;
@@ -254,7 +283,7 @@ async function backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs = Date.n
  * @param {WeeklyTypeWin[]} wins
  * @param {number} [nowMs]
  */
-export async function backfillWeeklyWinsFromWinnerMarkLog(q, items, wins, nowMs = Date.now()) {
+export async function backfillWeeklyWinsFromWinnerMarkLog(q, items, wins, nowMs = Date.now(), winMode = undefined) {
   const puppetIds = items.filter(isEmperiumCooldownItem).map((it) => it.id);
   if (puppetIds.length === 0) return dedupeWeeklyWinsList(wins);
   const placeholders = puppetIds.map(() => '?').join(', ');
@@ -264,7 +293,7 @@ export async function backfillWeeklyWinsFromWinnerMarkLog(q, items, wins, nowMs 
      ORDER BY at_ms DESC, id DESC`,
     puppetIds
   );
-  return backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs);
+  return backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs, true, winMode);
 }
 
 /**
@@ -274,8 +303,9 @@ export async function backfillWeeklyWinsFromWinnerMarkLog(q, items, wins, nowMs 
  * @param {Array<{ id: string, type: string, name?: string, recordedWinnerNames?: string[] }>} items
  * @param {WeeklyTypeWin[]} wins
  * @param {number} [nowMs]
+ * @param {string} [winMode]
  */
-export async function backfillWeeklyWinsFromBidderStateLog(q, items, wins, nowMs = Date.now()) {
+export async function backfillWeeklyWinsFromBidderStateLog(q, items, wins, nowMs = Date.now(), winMode = undefined) {
   const puppetIds = items.filter(isEmperiumCooldownItem).map((it) => it.id);
   if (puppetIds.length === 0) return dedupeWeeklyWinsList(wins);
   const placeholders = puppetIds.map(() => '?').join(', ');
@@ -285,7 +315,8 @@ export async function backfillWeeklyWinsFromBidderStateLog(q, items, wins, nowMs
      ORDER BY at_ms DESC, id DESC`,
     puppetIds
   );
-  return backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs);
+  // Refresh timestamps only — never mint CD from GL shuffle rows without winner_mark_log.
+  return backfillWeeklyWinsFromIgnAtRows(items, wins, rows, nowMs, false, winMode);
 }
 
 /**

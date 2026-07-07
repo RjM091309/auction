@@ -16,6 +16,7 @@ import {
 } from './ignQueueIdentity';
 import { isItemExemptFromBidLimit } from './bidLimitExempt';
 import { emperiumWinCooldownBlocksQueueJoin, isEmperiumWinCooldownEnabled } from './emperiumWinCooldown';
+import { guildLeagueWinCooldownBlocksQueueJoin, isGuildLeagueWinCooldownEnabled } from './guildLeagueWinCooldown';
 
 export function defaultEventModeForQueues(m?: WeeklyEventType): WeeklyEventType {
   return m ?? 'Emperium Overrun';
@@ -30,13 +31,16 @@ export function shuffleLockClosesPublicSignup(
   return defaultEventModeForQueues(eventMode) !== 'Emperium Overrun';
 }
 
-/** Emperium Overrun only — Guild League never blocks queue join for winner CD. */
+/** Guild League or Emperium Overrun — blocks Puppet queue join when winner CD is active. */
 export function weeklyTypeWinBlocksQueueJoin(
   eventMode: WeeklyEventType | undefined,
   item: Pick<AuctionItem, 'id' | 'name' | 'type'>,
   wins: WeeklyTypeWin[] | undefined,
   ignRaw: string
 ): boolean {
+  if (isGuildLeagueWinCooldownEnabled(eventMode)) {
+    return guildLeagueWinCooldownBlocksQueueJoin(eventMode, item, wins, ignRaw);
+  }
   if (!isEmperiumWinCooldownEnabled(eventMode)) return false;
   return emperiumWinCooldownBlocksQueueJoin(eventMode, item, wins, ignRaw);
 }

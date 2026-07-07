@@ -30,14 +30,18 @@ export interface GuildMember {
   role: 'Officer' | 'Member' | 'Developer' | 'Admin';
 }
 
-/** Emperium Overrun win cooldown: normalized IGN + item type (+ optional item id + win time). */
+export type WeeklyEventType = 'Guild League' | 'Emperium Overrun';
+
+/** Emperium Overrun / Guild League win cooldown row. */
 export interface WeeklyTypeWin {
   ign: string;
   t: string;
   /** Auction item id (e.g. m1 Puppet); used to scope Fragment Card cooldowns. */
   itemId?: string;
-  /** Admin green-check timestamp (ms); Puppet-only 1-week Sunday-event cooldown. */
+  /** Admin green-check timestamp (ms); Puppet CD anchor. */
   at?: number;
+  /** `Guild League` rows use Tue→Thu skip; legacy / Emperium rows omit this field. */
+  mode?: WeeklyEventType;
 }
 
 /** One admin green-check (recorded winner) on an active card; shown on Logs. */
@@ -69,7 +73,6 @@ export interface BidderStateLogEntry {
   shuffleBatchAtMs?: number | null;
 }
 
-export type WeeklyEventType = 'Guild League' | 'Emperium Overrun';
 export type GuildRank =
   | 'Bronze'
   | 'Silver'

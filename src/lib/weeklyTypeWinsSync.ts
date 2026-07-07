@@ -3,56 +3,74 @@ import {
   isEmperiumCooldownItem,
   isEmperiumWinCooldownEnabled,
 } from './emperiumWinCooldown';
-import { normalizeIgn, pruneExpiredEmperiumWins } from './weeklyTypeWins';
+import {
+  GUILD_LEAGUE_WIN_MODE,
+  isGuildLeagueWinCooldownEnabled,
+  pruneWeeklyTypeWins,
+} from './guildLeagueWinCooldown';
+import { normalizeIgn } from './weeklyTypeWins';
 
-function winKey(ign: string, t: string, itemId?: string): string {
-  return `${normalizeIgn(ign)}\0${t}\0${itemId ?? ''}`;
+export type WinnerCooldownScope = 'emperium' | 'guild';
+
+function winKey(
+  ign: string,
+  t: string,
+  itemId?: string,
+  mode?: WeeklyEventType
+): string {
+  return `${normalizeIgn(ign)}\0${t}\0${itemId ?? ''}\0${mode ?? ''}`;
 }
 
 function removePuppetCd(
   wins: WeeklyTypeWin[],
   ign: string,
-  item: Pick<AuctionItem, 'id' | 'type'>
+  item: Pick<AuctionItem, 'id' | 'type'>,
+  mode: WinnerCooldownScope
 ): WeeklyTypeWin[] {
   const nl = normalizeIgn(ign);
   if (!nl) return wins;
-  return wins.filter(
-    (w) =>
-      !(
-        w.ign === nl &&
-        w.t === item.type &&
-        (w.itemId == null || w.itemId === item.id)
-      )
-  );
+  const targetMode =
+    mode === 'guild' ? GUILD_LEAGUE_WIN_MODE : undefined;
+  return wins.filter((w) => {
+    if (w.ign !== nl) return true;
+    if (w.t !== item.type) return true;
+    if (w.itemId != null && w.itemId !== item.id) return true;
+    if (mode === 'guild') return w.mode !== GUILD_LEAGUE_WIN_MODE;
+    return w.mode === GUILD_LEAGUE_WIN_MODE;
+  });
 }
 
 function addPuppetCd(
   wins: WeeklyTypeWin[],
   ign: string,
   item: Pick<AuctionItem, 'id' | 'type'>,
-  at: number
+  at: number,
+  mode: WinnerCooldownScope
 ): WeeklyTypeWin[] {
   const nl = normalizeIgn(ign);
   if (!nl) return wins;
-  const k = winKey(nl, item.type, item.id);
+  const winMode = mode === 'guild' ? GUILD_LEAGUE_WIN_MODE : undefined;
+  const k = winKey(nl, item.type, item.id, winMode);
   if (
     wins.some(
       (w) =>
-        winKey(w.ign, w.t, w.itemId) === k &&
+        winKey(w.ign, w.t, w.itemId, w.mode) === k &&
         typeof w.at === 'number' &&
         w.at > 0
     )
   ) {
     return wins;
   }
-  return [...wins, { ign: nl, t: item.type, itemId: item.id, at }];
+  const row: WeeklyTypeWin = { ign: nl, t: item.type, itemId: item.id, at };
+  if (winMode) row.mode = winMode;
+  return [...wins, row];
 }
 
 function dedupeWeeklyWins(wins: WeeklyTypeWin[]): WeeklyTypeWin[] {
   const seen = new Set<string>();
   const out: WeeklyTypeWin[] = [];
   for (const w of wins) {
-    const k = winKey(w.ign, w.t, w.itemId);
+    const k = winKey(w.ign, w.t, w.itemId, w.mode);
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(w);
@@ -61,13 +79,13 @@ function dedupeWeeklyWins(wins: WeeklyTypeWin[]): WeeklyTypeWin[] {
 }
 
 /**
- * Manual winner marks affect Puppet CD only when saved event mode is Emperium
- * Overrun and the admin UI is not mid-edit on a different mode (unsaved draft).
+ * Which Puppet winner CD applies for manual marks — never both at once.
+ * Unsaved event-mode draft that differs from saved mode disables CD sync.
  */
-export function winnerMarkCooldownApplies(
+export function winnerMarkCooldownScope(
   savedEventMode: WeeklyEventType | undefined,
   draftEventMode?: WeeklyEventType | undefined
-): boolean {
+): WinnerCooldownScope | false {
   if (
     draftEventMode != null &&
     savedEventMode != null &&
@@ -75,15 +93,24 @@ export function winnerMarkCooldownApplies(
   ) {
     return false;
   }
-  return isEmperiumWinCooldownEnabled(savedEventMode);
+  const mode = draftEventMode ?? savedEventMode;
+  if (mode === 'Guild League') return 'guild';
+  if (isEmperiumWinCooldownEnabled(mode)) return 'emperium';
+  return false;
+}
+
+export function winnerMarkCooldownApplies(
+  savedEventMode: WeeklyEventType | undefined,
+  draftEventMode?: WeeklyEventType | undefined
+): boolean {
+  return winnerMarkCooldownScope(savedEventMode, draftEventMode) !== false;
 }
 
 /**
- * Emperium Overrun + Puppet only: keep weekly_type_wins in sync when admin
- * manually marks/unmarks winners after shuffle lock.
+ * Keep weekly_type_wins in sync when admin manually marks/unmarks Puppet winners.
  */
-export function syncEmperiumWeeklyWinsForWinnerMarkChange(
-  eventMode: WeeklyEventType | undefined,
+export function syncWeeklyWinsForWinnerMarkChange(
+  scope: WinnerCooldownScope,
   item: Pick<AuctionItem, 'id' | 'name' | 'type'>,
   prevRecorded: readonly string[],
   nextRecorded: readonly string[],
@@ -92,10 +119,17 @@ export function syncEmperiumWeeklyWinsForWinnerMarkChange(
   weeklyTypeWins: WeeklyTypeWin[] | undefined,
   atMs = Date.now()
 ): WeeklyTypeWin[] | undefined {
-  if (!isEmperiumWinCooldownEnabled(eventMode)) return undefined;
+  const eventMode =
+    scope === 'guild' ? ('Guild League' as const) : ('Emperium Overrun' as const);
+  if (scope === 'emperium' && !isEmperiumWinCooldownEnabled(eventMode)) {
+    return undefined;
+  }
+  if (scope === 'guild' && !isGuildLeagueWinCooldownEnabled(eventMode)) {
+    return undefined;
+  }
   if (!isEmperiumCooldownItem(item)) return undefined;
 
-  let wins = pruneExpiredEmperiumWins(weeklyTypeWins ?? []);
+  let wins = pruneWeeklyTypeWins(weeklyTypeWins ?? []);
 
   const prevRecLower = new Set(
     prevRecorded.map((n) => n.trim().toLowerCase()).filter(Boolean)
@@ -113,23 +147,47 @@ export function syncEmperiumWeeklyWinsForWinnerMarkChange(
   for (const name of nextRecorded) {
     const nl = name.trim().toLowerCase();
     if (!nl || prevRecLower.has(nl)) continue;
-    wins = addPuppetCd(wins, name, item, atMs);
+    wins = addPuppetCd(wins, name, item, atMs, scope);
   }
   for (const name of prevRecorded) {
     const nl = name.trim().toLowerCase();
     if (!nl || nextRecLower.has(nl)) continue;
-    wins = removePuppetCd(wins, name, item);
+    wins = removePuppetCd(wins, name, item, scope);
   }
   for (const name of nextRevoked) {
     const nl = name.trim().toLowerCase();
     if (!nl || prevRevLower.has(nl)) continue;
-    wins = removePuppetCd(wins, name, item);
+    wins = removePuppetCd(wins, name, item, scope);
   }
   for (const name of prevRevoked) {
     const nl = name.trim().toLowerCase();
     if (!nl || nextRevLower.has(nl)) continue;
-    wins = addPuppetCd(wins, name, item, atMs);
+    wins = addPuppetCd(wins, name, item, atMs, scope);
   }
 
   return dedupeWeeklyWins(wins);
+}
+
+/** @deprecated Use syncWeeklyWinsForWinnerMarkChange */
+export function syncEmperiumWeeklyWinsForWinnerMarkChange(
+  eventMode: WeeklyEventType | undefined,
+  item: Pick<AuctionItem, 'id' | 'name' | 'type'>,
+  prevRecorded: readonly string[],
+  nextRecorded: readonly string[],
+  prevRevoked: readonly string[],
+  nextRevoked: readonly string[],
+  weeklyTypeWins: WeeklyTypeWin[] | undefined,
+  atMs = Date.now()
+): WeeklyTypeWin[] | undefined {
+  if (!isEmperiumWinCooldownEnabled(eventMode)) return undefined;
+  return syncWeeklyWinsForWinnerMarkChange(
+    'emperium',
+    item,
+    prevRecorded,
+    nextRecorded,
+    prevRevoked,
+    nextRevoked,
+    weeklyTypeWins,
+    atMs
+  );
 }

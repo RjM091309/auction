@@ -23,8 +23,9 @@ export function isEmperiumCooldownItem(item: {
   return isPuppetFragmentItem(item);
 }
 
-/** Stored weekly win rows that still participate in Puppet CD (drops legacy Feathers rows). */
+/** Stored weekly win rows that still participate in Emperium Puppet CD. */
 export function isEmperiumCooldownWinRecord(win: WeeklyTypeWin): boolean {
+  if (win.mode === 'Guild League') return false;
   if (isFeatherItemType(win.t)) return false;
   if (win.t !== 'Fragment Card') return false;
   if (win.itemId && win.itemId !== 'm1') return false;
@@ -47,13 +48,13 @@ export function pruneExpiredEmperiumWins(
 ): WeeklyTypeWin[] {
   if (!wins?.length) return [];
   return wins.filter((w) => {
-    if (!isEmperiumCooldownWinRecord(w)) return false;
+    if (!isEmperiumCooldownWinRecord(w)) return true;
     const at = typeof w.at === 'number' && Number.isFinite(w.at) ? w.at : 0;
     return at > 0 && isEmperiumWinStillOnCooldown(at, nowMs);
   });
 }
 
-/** True only under Emperium Overrun — Guild League never applies winner CD. */
+/** True only under Emperium Overrun — Guild League has its own Tue→Thu CD. */
 export function isEmperiumWinCooldownEnabled(
   eventMode?: WeeklyEventType
 ): boolean {

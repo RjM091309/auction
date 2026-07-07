@@ -56,9 +56,10 @@ import {
 } from './lib/queueEligibility';
 import { findEmperiumWinCooldown } from './lib/emperiumWinCooldown';
 import { emperiumWinCooldownExpiresAt } from './lib/overrunWeek';
+import { guildLeagueWinCooldownExpiresAt } from './lib/guildLeagueWeek';
 import {
-  syncEmperiumWeeklyWinsForWinnerMarkChange,
-  winnerMarkCooldownApplies,
+  syncWeeklyWinsForWinnerMarkChange,
+  winnerMarkCooldownScope,
 } from './lib/weeklyTypeWinsSync';
 import {
   deactivateMemberOnServer,
@@ -95,6 +96,7 @@ import {
   swal2WinnerUnmarked,
   swal2WinnerPoolFull,
   swal2EmperiumWinCooldown,
+  swal2GuildLeagueWinCooldown,
   swal2WinnerLimitsUpdated,
   swal2ConfirmSaveEventMode,
   swal2EventModeSaved,
@@ -129,6 +131,13 @@ import {
 } from './lib/auctionItemDisplayOrder';
 import { isAuctionItemHidden } from './lib/hiddenAuctionItems';
 import { resolveEffectiveRewardContext, displayWinnerPoolCapForItem, totalItemsForAuctionItem, presetRewardItemCounts } from './lib/rewardContext';
+import {
+  countActiveShuffleWinners,
+  countExtraRecordedWinners,
+  countTotalWinnersForItem,
+  pruneOrphanRecordedWinnersInState,
+  queueIndexForIgnName,
+} from './lib/winnerPoolValidation';
 import { isIllusionFragmentItem } from './lib/hiddenAuctionItems';
 import SettingsToggle from './components/SettingsToggle';
 import { formatAuctionLogTime } from './lib/formatAuctionLogTime';
@@ -1539,45 +1548,13 @@ export default function AuctionDashboard() {
     const ignLower = trimmed.toLowerCase();
     const shuffleDrawSlots =
       state.shuffleWinnerSlotsByItemId?.[action.itemId] ?? pool;
-    const queueIndexForName = (name: string, queueIds: number[], roster: GuildMember[]) => {
-      const lower = name.trim().toLowerCase();
-      return queueIds.findIndex((mid) => {
-        const member = roster.find((m) => m.id === mid);
-        return member?.name.trim().toLowerCase() === lower;
-      });
-    };
-    const countExtraMarked = (
-      names: string[],
-      queueIds: number[],
-      roster: GuildMember[],
-      drawSlots: number
-    ) =>
-      names.filter((name) => {
-        const qIdx = queueIndexForName(name, queueIds, roster);
-        return qIdx < 0 || qIdx >= drawSlots;
-      }).length;
-
-    const countActiveShuffleWinners = (
-      queueIds: number[],
-      roster: GuildMember[],
-      drawSlots: number,
-      revokedNames: string[]
-    ) => {
-      const revokedLower = new Set(
-        revokedNames.map((n) => n.trim().toLowerCase()).filter(Boolean)
-      );
-      let n = 0;
-      for (let i = 0; i < drawSlots && i < queueIds.length; i += 1) {
-        const member = roster.find((mem) => mem.id === queueIds[i]);
-        const nl = member?.name?.trim().toLowerCase() ?? '';
-        if (nl && !revokedLower.has(nl)) n += 1;
-      }
-      return n;
-    };
-
     if (action.kind === 'mark') {
       if (existing.some((n) => n.trim().toLowerCase() === ignLower)) return;
-      const qIdx = queueIndexForName(trimmed, item.interestedMemberIds, state.members);
+      const qIdx = queueIndexForIgnName(
+        trimmed,
+        item.interestedMemberIds,
+        state.members
+      );
       const isRevokedShuffleSlot =
         qIdx >= 0 &&
         qIdx < shuffleDrawSlots &&
@@ -1586,29 +1563,31 @@ export default function AuctionDashboard() {
         );
       if (qIdx >= 0 && qIdx < shuffleDrawSlots && !isRevokedShuffleSlot) return;
       if (!isRevokedShuffleSlot) {
-        const extraCount = countExtraMarked(
-          existing,
-          item.interestedMemberIds,
+        const totalWinners = countTotalWinnersForItem(
+          item,
           state.members,
           shuffleDrawSlots
         );
-        const activeShuffle = countActiveShuffleWinners(
-          item.interestedMemberIds,
-          state.members,
-          shuffleDrawSlots,
-          item.revokedWinnerNames ?? []
-        );
-        if (activeShuffle + extraCount >= pool) {
+        if (totalWinners >= pool) {
           void swal2WinnerPoolFull({
             itemType: item.type,
             pool,
-            shuffleDrawSlots: activeShuffle,
+            shuffleDrawSlots: countActiveShuffleWinners(
+              item.interestedMemberIds,
+              state.members,
+              shuffleDrawSlots,
+              item.revokedWinnerNames
+            ),
           });
           return;
         }
       }
     } else {
-      const qIdx = queueIndexForName(trimmed, item.interestedMemberIds, state.members);
+      const qIdx = queueIndexForIgnName(
+        trimmed,
+        item.interestedMemberIds,
+        state.members
+      );
       const inRecorded = existing.some((n) => n.trim().toLowerCase() === ignLower);
       const isShuffleSlotWinner = qIdx >= 0 && qIdx < shuffleDrawSlots;
       const alreadyRevoked = (item.revokedWinnerNames ?? []).some(
@@ -1622,14 +1601,18 @@ export default function AuctionDashboard() {
     skipPersistAfterPollRef.current = false;
 
     try {
-      let base: AuctionState = normalizeWinnerPoolCapsForLimits(
-        dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(state))
+      let base: AuctionState = pruneOrphanRecordedWinnersInState(
+        normalizeWinnerPoolCapsForLimits(
+          dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(state))
+        )
       );
       try {
         const remote = await fetchAuctionState();
         if (remote) {
-          base = normalizeWinnerPoolCapsForLimits(
-            dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote))
+          base = pruneOrphanRecordedWinnersInState(
+            normalizeWinnerPoolCapsForLimits(
+              dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(remote))
+            )
           );
         }
       } catch {
@@ -1655,7 +1638,7 @@ export default function AuctionDashboard() {
       let nextRevoked: string[];
       if (action.kind === 'mark') {
         if (ex.some((n) => n.trim().toLowerCase() === ignLower)) return;
-        const qIdx = queueIndexForName(
+        const qIdx = queueIndexForIgnName(
           trimmed,
           target.interestedMemberIds,
           base.members
@@ -1672,26 +1655,19 @@ export default function AuctionDashboard() {
             (n) => n.trim().toLowerCase() !== ignLower
           );
         } else {
-          const extraCount = countExtraMarked(
-            ex,
-            target.interestedMemberIds,
-            base.members,
-            drawSlots
-          );
-          const activeShuffle = countActiveShuffleWinners(
-            target.interestedMemberIds,
-            base.members,
-            drawSlots,
-            exRevoked
-          );
-          if (activeShuffle + extraCount >= poolFromLimits) return;
+          if (
+            countTotalWinnersForItem(target, base.members, drawSlots) >=
+            poolFromLimits
+          ) {
+            return;
+          }
           nextNames = [...ex, trimmed];
           nextRevoked = [...exRevoked];
         }
       } else {
         nextNames = ex.filter((n) => n.trim().toLowerCase() !== ignLower);
         nextRevoked = [...(target.revokedWinnerNames ?? [])];
-        const qIdx = queueIndexForName(
+        const qIdx = queueIndexForIgnName(
           trimmed,
           target.interestedMemberIds,
           base.members
@@ -1705,17 +1681,23 @@ export default function AuctionDashboard() {
         }
       }
 
-      const syncedWins = winnerMarkCooldownApplies(base.eventMode, eventModeDraft)
-        ? syncEmperiumWeeklyWinsForWinnerMarkChange(
-            base.eventMode,
-            target,
-            prevRecorded,
-            nextNames,
-            prevRevoked,
-            nextRevoked,
-            base.weeklyTypeWins
-          )
-        : undefined;
+      const cooldownScope = winnerMarkCooldownScope(
+        base.eventMode,
+        eventModeDraft
+      );
+      const applyWinnerCooldown = cooldownScope !== false;
+      const syncedWins =
+        cooldownScope !== false
+          ? syncWeeklyWinsForWinnerMarkChange(
+              cooldownScope,
+              target,
+              prevRecorded,
+              nextNames,
+              prevRevoked,
+              nextRevoked,
+              base.weeklyTypeWins
+            )
+          : undefined;
 
       const next: AuctionState = {
         ...base,
@@ -1737,6 +1719,7 @@ export default function AuctionDashboard() {
       const server = await persistAuctionState(next, {
         bearerToken,
         includeWeeklyTypeWins: syncedWins !== undefined,
+        applyWinnerCooldown,
       });
       if (server) {
         queueBaselineRef.current = buildQueueBaselineFromState(server);
@@ -1874,10 +1857,18 @@ export default function AuctionDashboard() {
       const next = applyQueueMemberMove(base, payload);
       if ('error' in next) {
         setState(base);
-        if (next.error === 'emperium_win_cooldown' && next.toItemName) {
+        if (
+          (next.error === 'emperium_win_cooldown' ||
+            next.error === 'guild_league_win_cooldown') &&
+          next.toItemName
+        ) {
           const ign =
             base.members.find((m) => m.id === payload.memberId)?.name ?? '';
-          void swal2EmperiumWinCooldown({
+          const swal =
+            next.error === 'guild_league_win_cooldown'
+              ? swal2GuildLeagueWinCooldown
+              : swal2EmperiumWinCooldown;
+          void swal({
             ign,
             itemName: displayAuctionItemName(next.toItemName),
             expiresAt: next.expiresAt ?? Date.now(),
@@ -1929,10 +1920,17 @@ export default function AuctionDashboard() {
           });
           return;
         }
-        if (e.code === 'emperium_win_cooldown') {
+        if (
+          e.code === 'emperium_win_cooldown' ||
+          e.code === 'guild_league_win_cooldown'
+        ) {
           const ign =
             state.members.find((m) => m.id === payload.memberId)?.name ?? '';
-          void swal2EmperiumWinCooldown({
+          const swal =
+            e.code === 'guild_league_win_cooldown'
+              ? swal2GuildLeagueWinCooldown
+              : swal2EmperiumWinCooldown;
+          void swal({
             ign,
             itemName: displayAuctionItemName(
               e.extra?.itemName ?? 'this item'
@@ -2509,14 +2507,24 @@ export default function AuctionDashboard() {
           closeJoinQueueModal();
           return;
         }
-        if (e.code === 'emperium_win_cooldown') {
-          void swal2EmperiumWinCooldown({
+        if (
+          e.code === 'emperium_win_cooldown' ||
+          e.code === 'guild_league_win_cooldown'
+        ) {
+          const swal =
+            e.code === 'guild_league_win_cooldown'
+              ? swal2GuildLeagueWinCooldown
+              : swal2EmperiumWinCooldown;
+          const fallbackExpires =
+            eventModeActive === 'Guild League'
+              ? guildLeagueWinCooldownExpiresAt(Date.now())
+              : emperiumWinCooldownExpiresAt(Date.now());
+          void swal({
             ign: raw,
             itemName: displayAuctionItemName(
               e.extra?.itemName ?? queueModalItem?.name ?? 'this item'
             ),
-            expiresAt:
-              e.extra?.expiresAt ?? emperiumWinCooldownExpiresAt(Date.now()),
+            expiresAt: e.extra?.expiresAt ?? fallbackExpires,
           });
           closeJoinQueueModal();
           return;
@@ -3855,28 +3863,27 @@ function QueueCard({
     revoked.some((n) => n.trim().toLowerCase() === name.trim().toLowerCase());
   const isRecordedWinner = (name: string) =>
     recorded.some((n) => n.trim().toLowerCase() === name.trim().toLowerCase());
-  const queueIndexForName = (name: string) => {
-    const lower = name.trim().toLowerCase();
-    return displayIds.findIndex((mid) => {
-      const member = members.find((m) => m.id === mid);
-      return member?.name.trim().toLowerCase() === lower;
-    });
-  };
+  const queueIndexForName = (name: string) =>
+    queueIndexForIgnName(name, displayIds, members);
   const isExtraRecordedWinner = (name: string) => {
     if (!isRecordedWinner(name) || isRevokedWinner(name)) return false;
     const qIdx = queueIndexForName(name);
-    return qIdx < 0 || qIdx >= shuffleDrawSlots;
+    return qIdx >= shuffleDrawSlots;
   };
-  const countActiveShuffleWinners = () => {
-    let n = 0;
-    for (let i = 0; i < shuffleDrawSlots && i < displayIds.length; i += 1) {
-      const member = members.find((mem) => mem.id === displayIds[i]);
-      if (member && !isRevokedWinner(member.name)) n += 1;
-    }
-    return n;
-  };
-  const extraMarkedCount = recorded.filter((name) => isExtraRecordedWinner(name)).length;
-  const totalWinnersNow = countActiveShuffleWinners() + extraMarkedCount;
+  const activeShuffleWinnerCount = countActiveShuffleWinners(
+    displayIds,
+    members,
+    shuffleDrawSlots,
+    revoked
+  );
+  const extraMarkedCount = countExtraRecordedWinners(
+    recorded,
+    displayIds,
+    members,
+    shuffleDrawSlots,
+    revoked
+  );
+  const totalWinnersNow = activeShuffleWinnerCount + extraMarkedCount;
   const canMarkMoreExtras = totalWinnersNow < poolCap;
 
   const freeItems =

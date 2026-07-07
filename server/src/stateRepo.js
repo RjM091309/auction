@@ -12,11 +12,15 @@ import {
   stripEmperiumCardQueuesAfterFragmentWeeklyWin,
 } from './queueEligibility.js';
 import {
-  findEmperiumWinCooldown,
   isEmperiumCooldownItem,
   isEmperiumWinCooldownEnabled,
   pruneExpiredEmperiumWins,
 } from './emperiumWinCooldown.js';
+import {
+  GUILD_LEAGUE_WIN_MODE,
+  pruneWeeklyTypeWins,
+} from './guildLeagueWinCooldown.js';
+import { findPuppetWinCooldown } from './puppetCardCdDisplay.js';
 import { maxWinnersForItemInState } from './winnerPoolCaps.js';
 import {
   backfillWeeklyWinsFromRecordedWinners,
@@ -231,6 +235,110 @@ function parseWinnerNamesJson(raw) {
   }
 }
 
+/**
+ * Unique winner count: non-revoked shuffle-slot winners + manual marks outside
+ * those slots (same model as pool-cap validation).
+ */
+function queueIndexForIgnOnItem(name, interestedMemberIds, membersById) {
+  const nl = typeof name === 'string' ? name.trim().toLowerCase() : '';
+  if (!nl) return -1;
+  const ids = Array.isArray(interestedMemberIds) ? interestedMemberIds : [];
+  for (let i = 0; i < ids.length; i += 1) {
+    const mid = coerceMemberId(ids[i]);
+    const member = mid != null ? membersById.get(mid) : null;
+    if (member?.name && String(member.name).trim().toLowerCase() === nl) return i;
+  }
+  return -1;
+}
+
+/** Drop recorded winner names that are no longer on this item's queue. */
+function pruneOrphanRecordedWinnerNames(it, membersById) {
+  const recorded = Array.isArray(it.recordedWinnerNames) ? it.recordedWinnerNames : [];
+  if (recorded.length === 0) return it;
+  const ids = Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : [];
+  const next = recorded.filter(
+    (name) => queueIndexForIgnOnItem(name, ids, membersById) >= 0
+  );
+  if (next.length === recorded.length) return it;
+  return {
+    ...it,
+    recordedWinnerNames: next.length > 0 ? next : undefined,
+  };
+}
+
+function countTotalWinnersForItem(
+  interestedMemberIds,
+  recordedWinnerNames,
+  revokedWinnerNames,
+  drawSlots,
+  membersById
+) {
+  const ids = Array.isArray(interestedMemberIds) ? interestedMemberIds : [];
+  const revokedLower = new Set(
+    (Array.isArray(revokedWinnerNames) ? revokedWinnerNames : [])
+      .filter((x) => typeof x === 'string')
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  let activeShuffle = 0;
+  for (let i = 0; i < drawSlots && i < ids.length; i += 1) {
+    const mid = coerceMemberId(ids[i]);
+    const member = mid != null ? membersById.get(mid) : null;
+    const nl = member?.name ? String(member.name).trim().toLowerCase() : '';
+    if (nl && !revokedLower.has(nl)) activeShuffle += 1;
+  }
+  const rec = Array.isArray(recordedWinnerNames) ? recordedWinnerNames : [];
+  let extraCount = 0;
+  for (const name of rec) {
+    if (typeof name !== 'string') continue;
+    const nl = name.trim().toLowerCase();
+    if (!nl || revokedLower.has(nl)) continue;
+    let qIdx = -1;
+    for (let i = 0; i < ids.length; i += 1) {
+      const mid = coerceMemberId(ids[i]);
+      const member = mid != null ? membersById.get(mid) : null;
+      if (member?.name && String(member.name).trim().toLowerCase() === nl) {
+        qIdx = i;
+        break;
+      }
+    }
+    // Stale marks for IGNs no longer on this queue must not block new winners.
+    if (qIdx >= drawSlots) extraCount += 1;
+  }
+  return activeShuffle + extraCount;
+}
+
+/** Guild League + explicit client opt-out never add Emperium CD from manual winner marks. */
+function shouldApplyEmperiumWinnerCooldown(body, saveEventMode) {
+  if (body?.applyWinnerCooldown === false) return false;
+  return isEmperiumWinCooldownEnabled(saveEventMode);
+}
+
+function shouldApplyGuildLeagueWinnerCooldown(body, saveEventMode) {
+  if (body?.applyWinnerCooldown === false) return false;
+  return saveEventMode === 'Guild League';
+}
+
+function shouldApplyWinnerCooldown(body, saveEventMode) {
+  return (
+    shouldApplyEmperiumWinnerCooldown(body, saveEventMode) ||
+    shouldApplyGuildLeagueWinnerCooldown(body, saveEventMode)
+  );
+}
+
+function puppetCooldownErrorForMode(eventMode, itemName, expiresAt) {
+  if (eventMode === 'Guild League') {
+    return clientError(400, 'Winner cooldown active (skip Thursday Guild League)', {
+      code: 'guild_league_win_cooldown',
+      extra: { itemName, expiresAt },
+    });
+  }
+  return clientError(400, 'Winner cooldown active (skip next Emperium Sunday)', {
+    code: 'emperium_win_cooldown',
+    extra: { itemName, expiresAt },
+  });
+}
+
 function serializeWinnerNamesJson(arr) {
   if (!Array.isArray(arr) || arr.length === 0) return null;
   const cleaned = arr
@@ -391,7 +499,7 @@ export async function getFullState(pool) {
   );
   const eventMode = parseEventMode(eventRows[0]?.value);
 
-  let weeklyTypeWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
+  let weeklyTypeWins = pruneWeeklyTypeWins(await loadWeeklyTypeWins(pool));
   if (isEmperiumWinCooldownEnabled(eventMode)) {
     weeklyTypeWins = await backfillWeeklyWinsFromRecordedWinners(
       pool,
@@ -409,6 +517,21 @@ export async function getFullState(pool) {
       weeklyTypeWins
     );
     weeklyTypeWins = pruneExpiredEmperiumWins(weeklyTypeWins);
+  } else if (eventMode === 'Guild League') {
+    weeklyTypeWins = await backfillWeeklyWinsFromRecordedWinners(
+      pool,
+      items,
+      weeklyTypeWins,
+      GUILD_LEAGUE_WIN_MODE
+    );
+    weeklyTypeWins = await backfillWeeklyWinsFromWinnerMarkLog(
+      pool,
+      items,
+      weeklyTypeWins,
+      Date.now(),
+      GUILD_LEAGUE_WIN_MODE
+    );
+    weeklyTypeWins = pruneWeeklyTypeWins(weeklyTypeWins);
   }
   const winnerMarkLog = await loadWinnerMarkLog(pool);
   const bidderStateLog = await loadBidderStateLog(pool);
@@ -615,20 +738,18 @@ export async function publicAddBidToQueue(pool, body) {
     });
   }
 
-  const cooldown = findEmperiumWinCooldown(
+  const cooldown = findPuppetWinCooldown(
     eventMode,
     card,
     state.weeklyTypeWins,
     raw
   );
   if (cooldown) {
-    throw clientError(400, 'Winner cooldown active (skip next Emperium Sunday)', {
-      code: 'emperium_win_cooldown',
-      extra: {
-        itemName: card.name,
-        expiresAt: cooldown.expiresAt,
-      },
-    });
+    throw puppetCooldownErrorForMode(
+      eventMode,
+      card.name,
+      cooldown.expiresAt
+    );
   }
 
   const otherBlock = findOtherActiveQueueBlockingWithMatch(
@@ -752,7 +873,7 @@ function applyQueueMemberMoveInMemory(state, p) {
 
   if (fromItemId !== toItemId) {
     const eventMode = state.eventMode ?? defaultEventMode();
-    const cooldown = findEmperiumWinCooldown(
+    const cooldown = findPuppetWinCooldown(
       eventMode,
       toItem,
       state.weeklyTypeWins,
@@ -760,7 +881,10 @@ function applyQueueMemberMoveInMemory(state, p) {
     );
     if (cooldown) {
       return {
-        error: 'emperium_win_cooldown',
+        error:
+          eventMode === 'Guild League'
+            ? 'guild_league_win_cooldown'
+            : 'emperium_win_cooldown',
         toItemName: toItem.name,
         expiresAt: cooldown.expiresAt,
       };
@@ -881,6 +1005,15 @@ export async function publicMoveQueueMember(pool, body) {
     if (moved.error === 'emperium_win_cooldown') {
       throw clientError(400, 'Winner cooldown active (skip next Emperium Sunday)', {
         code: 'emperium_win_cooldown',
+        extra: {
+          itemName: moved.toItemName ?? '',
+          expiresAt: moved.expiresAt,
+        },
+      });
+    }
+    if (moved.error === 'guild_league_win_cooldown') {
+      throw clientError(400, 'Winner cooldown active (skip Thursday Guild League)', {
+        code: 'guild_league_win_cooldown',
         extra: {
           itemName: moved.toItemName ?? '',
           expiresAt: moved.expiresAt,
@@ -1027,14 +1160,19 @@ export async function replaceFullState(pool, body) {
   );
 
   const [oldQueueRows] = await pool.query(
-    'SELECT item_id AS itemId, member_id AS memberId FROM item_queue'
+    'SELECT item_id AS itemId, member_id AS memberId FROM item_queue ORDER BY item_id, position'
   );
   const oldQueueByItem = new Map();
+  const oldQueueOrderedByItem = new Map();
   for (const q of oldQueueRows) {
     const itemId = q.itemId;
     if (!oldQueueByItem.has(itemId)) oldQueueByItem.set(itemId, new Set());
     oldQueueByItem.get(itemId).add(Number(q.memberId));
+    if (!oldQueueOrderedByItem.has(itemId)) oldQueueOrderedByItem.set(itemId, []);
+    oldQueueOrderedByItem.get(itemId).push(Number(q.memberId));
   }
+
+  const prevItemRowById = new Map(oldItemRows.map((r) => [r.id, r]));
 
   const [eventMetaRows] = await pool.query(
     'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
@@ -1058,51 +1196,87 @@ export async function replaceFullState(pool, body) {
     if (mid != null && mid > 0) membersByIdForValidation.set(mid, m);
   }
 
-  for (const it of body.items) {
-    const cap = maxWinnersForItemInState(it, body);
-    const drawSlots =
-      shuffleWinnerSlotsByItemId[it.id] != null
-        ? shuffleWinnerSlotsByItemId[it.id]
-        : prevShuffleLocked && body.shuffleLocked !== false
-          ? cap
-          : 0;
-    const ids = Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : [];
-    const revokedLower = new Set(
-      (Array.isArray(it.revokedWinnerNames) ? it.revokedWinnerNames : [])
-        .filter((x) => typeof x === 'string')
-        .map((x) => x.trim().toLowerCase())
-        .filter(Boolean)
+  if (Array.isArray(body.items)) {
+    body.items = body.items.map((it) =>
+      pruneOrphanRecordedWinnerNames(it, membersByIdForValidation)
     );
-    let activeShuffle = 0;
-    for (let i = 0; i < drawSlots && i < ids.length; i += 1) {
-      const mid = coerceMemberId(ids[i]);
-      const member = mid != null ? membersByIdForValidation.get(mid) : null;
-      const nl = member?.name ? String(member.name).trim().toLowerCase() : '';
-      if (nl && !revokedLower.has(nl)) activeShuffle += 1;
-    }
-    const rec = Array.isArray(it.recordedWinnerNames) ? it.recordedWinnerNames : [];
-    let extraCount = 0;
-    for (const name of rec) {
-      if (typeof name !== 'string') continue;
-      const nl = name.trim().toLowerCase();
-      if (!nl) continue;
-      let qIdx = -1;
-      for (let i = 0; i < ids.length; i++) {
-        const mid = coerceMemberId(ids[i]);
-        const member = mid != null ? membersByIdForValidation.get(mid) : null;
-        if (member?.name && String(member.name).trim().toLowerCase() === nl) {
-          qIdx = i;
-          break;
-        }
-      }
-      if (qIdx < 0 || qIdx >= drawSlots) extraCount += 1;
-    }
-    if (activeShuffle + extraCount > cap) {
-      const err = new Error(
-        `Too many winners on "${it.name}" (${it.type}): max ${cap} total (${activeShuffle} shuffle + ${extraCount} added)`
+  }
+
+  // Shuffle lock only reorders queues — it does not add manual winner marks.
+  // Skip pool-cap validation here so an existing mark count above the saved
+  // cap (e.g. 20 marks vs cap 15) does not block the shuffle from saving.
+  const willLockShuffle =
+    !prevShuffleLocked && body.shuffleLocked === true;
+
+  if (!willLockShuffle) {
+    for (const it of body.items) {
+      const cap = maxWinnersForItemInState(it, body);
+      const drawSlots =
+        shuffleWinnerSlotsByItemId[it.id] != null
+          ? shuffleWinnerSlotsByItemId[it.id]
+          : prevShuffleLocked && body.shuffleLocked !== false
+            ? cap
+            : 0;
+      const ids = Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : [];
+      const revoked = Array.isArray(it.revokedWinnerNames) ? it.revokedWinnerNames : [];
+      const recorded = Array.isArray(it.recordedWinnerNames) ? it.recordedWinnerNames : [];
+
+      const nextTotal = countTotalWinnersForItem(
+        ids,
+        recorded,
+        revoked,
+        drawSlots,
+        membersByIdForValidation
       );
-      err.statusCode = 400;
-      throw err;
+
+      const prevRow = prevItemRowById.get(it.id) ?? prevItemRowById.get(String(it.id));
+      const prevQueue = oldQueueOrderedByItem.get(it.id) ?? [];
+      const prevTotal = countTotalWinnersForItem(
+        prevQueue,
+        parseWinnerNamesJson(prevRow?.winnerNamesJson),
+        parseWinnerNamesJson(prevRow?.revokedWinnerNamesJson),
+        drawSlots,
+        membersByIdForValidation
+      );
+
+      // Block only when winner count increases above cap — allow unmark/revoke
+      // even if the saved state is already above cap (e.g. legacy manual marks).
+      if (nextTotal > cap && nextTotal > prevTotal) {
+        const revokedLower = new Set(
+          revoked
+            .filter((x) => typeof x === 'string')
+            .map((x) => x.trim().toLowerCase())
+            .filter(Boolean)
+        );
+        let activeShuffle = 0;
+        for (let i = 0; i < drawSlots && i < ids.length; i += 1) {
+          const mid = coerceMemberId(ids[i]);
+          const member = mid != null ? membersByIdForValidation.get(mid) : null;
+          const nl = member?.name ? String(member.name).trim().toLowerCase() : '';
+          if (nl && !revokedLower.has(nl)) activeShuffle += 1;
+        }
+        let extraCount = 0;
+        for (const name of recorded) {
+          if (typeof name !== 'string') continue;
+          const nl = name.trim().toLowerCase();
+          if (!nl) continue;
+          let qIdx = -1;
+          for (let i = 0; i < ids.length; i += 1) {
+            const mid = coerceMemberId(ids[i]);
+            const member = mid != null ? membersByIdForValidation.get(mid) : null;
+            if (member?.name && String(member.name).trim().toLowerCase() === nl) {
+              qIdx = i;
+              break;
+            }
+          }
+          if (qIdx < 0 || qIdx >= drawSlots) extraCount += 1;
+        }
+        const err = new Error(
+          `Too many winners on "${it.name}" (${it.type}): max ${cap} total (${activeShuffle} shuffle + ${extraCount} added)`
+        );
+        err.statusCode = 400;
+        throw err;
+      }
     }
   }
 
@@ -1136,51 +1310,73 @@ export async function replaceFullState(pool, body) {
     }
   }
 
-  /** Emperium Overrun only: 1-week (skip next Sunday) Puppet CD. Feathers = no CD. Guild League = no CD entries. */
+  /** Puppet CD: Emperium = skip next Sunday; Guild League = skip Thursday after Tuesday win. */
   let nextWeeklyWins;
-  if (
-    isEmperiumWinCooldownEnabled(saveEventMode) &&
-    Array.isArray(body.weeklyTypeWins)
-  ) {
-    nextWeeklyWins = pruneExpiredEmperiumWins(
+  const emperiumCd = shouldApplyEmperiumWinnerCooldown(body, saveEventMode);
+  const guildCd = shouldApplyGuildLeagueWinnerCooldown(body, saveEventMode);
+  const puppetWinMode = guildCd ? GUILD_LEAGUE_WIN_MODE : undefined;
+  const puppetRowKey = (ign, t, itemId, mode) =>
+    `${ign}\0${t}\0${itemId ?? ''}\0${mode ?? ''}`;
+
+  if ((emperiumCd || guildCd) && Array.isArray(body.weeklyTypeWins)) {
+    nextWeeklyWins = pruneWeeklyTypeWins(
       dedupeWeeklyWinsList(parseWeeklyTypeWinsArray(body.weeklyTypeWins))
     );
-  } else if (isEmperiumWinCooldownEnabled(saveEventMode)) {
-    nextWeeklyWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
-    nextWeeklyWins = await backfillWeeklyWinsFromRecordedWinners(
-      pool,
-      body.items,
-      nextWeeklyWins
-    );
-    nextWeeklyWins = await backfillWeeklyWinsFromWinnerMarkLog(
-      pool,
-      body.items,
-      nextWeeklyWins
-    );
-    nextWeeklyWins = await backfillWeeklyWinsFromBidderStateLog(
-      pool,
-      body.items,
-      nextWeeklyWins
-    );
+  } else if (emperiumCd || guildCd) {
+    nextWeeklyWins = pruneWeeklyTypeWins(await loadWeeklyTypeWins(pool));
+    if (emperiumCd) {
+      nextWeeklyWins = await backfillWeeklyWinsFromRecordedWinners(
+        pool,
+        body.items,
+        nextWeeklyWins
+      );
+      nextWeeklyWins = await backfillWeeklyWinsFromWinnerMarkLog(
+        pool,
+        body.items,
+        nextWeeklyWins
+      );
+      nextWeeklyWins = await backfillWeeklyWinsFromBidderStateLog(
+        pool,
+        body.items,
+        nextWeeklyWins
+      );
+    } else {
+      nextWeeklyWins = await backfillWeeklyWinsFromRecordedWinners(
+        pool,
+        body.items,
+        nextWeeklyWins,
+        GUILD_LEAGUE_WIN_MODE
+      );
+      nextWeeklyWins = await backfillWeeklyWinsFromWinnerMarkLog(
+        pool,
+        body.items,
+        nextWeeklyWins,
+        Date.now(),
+        GUILD_LEAGUE_WIN_MODE
+      );
+    }
+
     for (const entry of newWinnerMarkEntries) {
       const card = body.items.find((i) => i.id === entry.itemId);
       if (!card || !isEmperiumCooldownItem(card)) continue;
       const ign = String(entry.ign ?? '').trim().toLowerCase();
       if (!ign) continue;
-      const k = `${ign}\0${entry.itemType}\0${entry.itemId ?? ''}`;
+      const k = puppetRowKey(ign, entry.itemType, entry.itemId, puppetWinMode);
       const exists = nextWeeklyWins.some(
         (w) =>
-          `${w.ign}\0${w.t}\0${w.itemId ?? ''}` === k &&
+          puppetRowKey(w.ign, w.t, w.itemId, w.mode) === k &&
           typeof w.at === 'number' &&
           w.at > 0
       );
       if (exists) continue;
-      nextWeeklyWins.push({
+      const row = {
         ign,
         t: entry.itemType,
         itemId: entry.itemId,
         at: entry.at ?? markNow,
-      });
+      };
+      if (puppetWinMode) row.mode = puppetWinMode;
+      nextWeeklyWins.push(row);
     }
 
     for (const it of body.items) {
@@ -1199,14 +1395,14 @@ export async function replaceFullState(pool, body) {
         const nl = String(prevName).trim().toLowerCase();
         if (!nl || nextLower.has(nl)) continue;
         if (!isEmperiumCooldownItem(it)) continue;
-        nextWeeklyWins = nextWeeklyWins.filter(
-          (w) =>
-            !(
-              w.ign === nl &&
-              w.t === it.type &&
-              (w.itemId == null || w.itemId === it.id)
-            )
-        );
+        nextWeeklyWins = nextWeeklyWins.filter((w) => {
+          if (w.ign !== nl || w.t !== it.type) return true;
+          if (w.itemId != null && w.itemId !== it.id) return true;
+          if (puppetWinMode === GUILD_LEAGUE_WIN_MODE) {
+            return w.mode !== GUILD_LEAGUE_WIN_MODE;
+          }
+          return w.mode === GUILD_LEAGUE_WIN_MODE;
+        });
       }
     }
 
@@ -1224,14 +1420,14 @@ export async function replaceFullState(pool, body) {
         const nl = name.trim().toLowerCase();
         if (!nl || prevRevokedLower.has(nl)) continue;
         if (!isEmperiumCooldownItem(it)) continue;
-        nextWeeklyWins = nextWeeklyWins.filter(
-          (w) =>
-            !(
-              w.ign === nl &&
-              w.t === it.type &&
-              (w.itemId == null || w.itemId === it.id)
-            )
-        );
+        nextWeeklyWins = nextWeeklyWins.filter((w) => {
+          if (w.ign !== nl || w.t !== it.type) return true;
+          if (w.itemId != null && w.itemId !== it.id) return true;
+          if (puppetWinMode === GUILD_LEAGUE_WIN_MODE) {
+            return w.mode !== GUILD_LEAGUE_WIN_MODE;
+          }
+          return w.mode === GUILD_LEAGUE_WIN_MODE;
+        });
       }
       const nextRevokedLower = new Set(
         nextRevoked
@@ -1243,26 +1439,27 @@ export async function replaceFullState(pool, body) {
         const nl = String(prevName).trim().toLowerCase();
         if (!nl || nextRevokedLower.has(nl)) continue;
         if (!isEmperiumCooldownItem(it)) continue;
-        const k = `${nl}\0${it.type}\0${it.id ?? ''}`;
+        const k = puppetRowKey(nl, it.type, it.id, puppetWinMode);
         const exists = nextWeeklyWins.some(
           (w) =>
-            `${w.ign}\0${w.t}\0${w.itemId ?? ''}` === k &&
+            puppetRowKey(w.ign, w.t, w.itemId, w.mode) === k &&
             typeof w.at === 'number' &&
             w.at > 0
         );
         if (exists) continue;
-        nextWeeklyWins.push({
+        const row = {
           ign: nl,
           t: it.type,
           itemId: it.id,
           at: markNow,
-        });
+        };
+        if (puppetWinMode) row.mode = puppetWinMode;
+        nextWeeklyWins.push(row);
       }
     }
-    nextWeeklyWins = pruneExpiredEmperiumWins(dedupeWeeklyWinsList(nextWeeklyWins));
+    nextWeeklyWins = pruneWeeklyTypeWins(dedupeWeeklyWinsList(nextWeeklyWins));
   } else {
-    // Guild League: keep existing Emperium CD rows in DB; do not add new ones here.
-    nextWeeklyWins = pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
+    nextWeeklyWins = pruneWeeklyTypeWins(await loadWeeklyTypeWins(pool));
   }
 
   const membersById = new Map();
@@ -1282,20 +1479,18 @@ export async function replaceFullState(pool, body) {
       const member = membersById.get(mid);
       const ign = member?.name;
       if (!ign) continue;
-      const cooldown = findEmperiumWinCooldown(
+      const cooldown = findPuppetWinCooldown(
         saveEventMode,
         it,
         nextWeeklyWins,
         ign
       );
       if (cooldown) {
-        throw clientError(400, 'Winner cooldown active (skip next Emperium Sunday)', {
-          code: 'emperium_win_cooldown',
-          extra: {
-            itemName: typeof it.name === 'string' ? it.name : '',
-            expiresAt: cooldown.expiresAt,
-          },
-        });
+        throw puppetCooldownErrorForMode(
+          saveEventMode,
+          typeof it.name === 'string' ? it.name : '',
+          cooldown.expiresAt
+        );
       }
     }
   }
@@ -1469,9 +1664,14 @@ export async function replaceFullState(pool, body) {
       ? sanitizeEventName(body.eventMode)
       : saveEventMode;
 
-    /** Puppet shortlist at shuffle lock → weekly_type_wins (1-week CD). Feathers excluded. */
-    if (shuffleLockNow && isEmperiumWinCooldownEnabled(saveEventMode)) {
+    /** Puppet shortlist at shuffle lock → weekly_type_wins. Feathers excluded. */
+    if (
+      shuffleLockNow &&
+      (isEmperiumWinCooldownEnabled(saveEventMode) || saveEventMode === 'Guild League')
+    ) {
       const batchAt = Date.now();
+      const shuffleWinMode =
+        saveEventMode === 'Guild League' ? GUILD_LEAGUE_WIN_MODE : undefined;
       for (const it of body.items) {
         if (it.status !== 'active') continue;
         if (isAuctionItemHiddenForPublic(it, shuffleEventMode)) continue;
@@ -1489,32 +1689,34 @@ export async function replaceFullState(pool, body) {
             const ignRaw = ignForRemappedMember(body, idRemap, resolved);
             const ign = ignRaw ? String(ignRaw).trim().toLowerCase() : '';
             if (ign) {
-              const k = `${ign}\0${it.type}\0${it.id ?? ''}`;
+              const k = `${ign}\0${it.type}\0${it.id ?? ''}\0${shuffleWinMode ?? ''}`;
               const exists = nextWeeklyWins.some(
                 (w) =>
-                  `${w.ign}\0${w.t}\0${w.itemId ?? ''}` === k &&
+                  `${w.ign}\0${w.t}\0${w.itemId ?? ''}\0${w.mode ?? ''}` === k &&
                   typeof w.at === 'number' &&
                   w.at > 0
               );
               if (!exists) {
-                nextWeeklyWins.push({
+                const row = {
                   ign,
                   t: it.type,
                   itemId: it.id,
                   at: batchAt,
-                });
+                };
+                if (shuffleWinMode) row.mode = shuffleWinMode;
+                nextWeeklyWins.push(row);
               }
             }
           }
           idx += 1;
         }
       }
-      nextWeeklyWins = pruneExpiredEmperiumWins(dedupeWeeklyWinsList(nextWeeklyWins));
+      nextWeeklyWins = pruneWeeklyTypeWins(dedupeWeeklyWinsList(nextWeeklyWins));
     }
 
     await saveWeeklyTypeWins(conn, nextWeeklyWins);
 
-    const winnerMarkEntriesForLog = isEmperiumWinCooldownEnabled(saveEventMode)
+    const winnerMarkEntriesForLog = shouldApplyWinnerCooldown(body, saveEventMode)
       ? newWinnerMarkEntries.filter((entry) => {
           const card = body.items.find((i) => i.id === entry.itemId);
           return card && isEmperiumCooldownItem(card);

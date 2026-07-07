@@ -24,8 +24,9 @@ export function isEmperiumCooldownItem(item) {
   return isPuppetFragmentItem(item);
 }
 
-/** @param {{ ign: string, t: string, itemId?: string, at?: number }} win */
+/** @param {{ ign: string, t: string, itemId?: string, at?: number, mode?: string }} win */
 export function isEmperiumCooldownWinRecord(win) {
+  if (win.mode === 'Guild League') return false;
   if (isFeatherItemType(win.t)) return false;
   if (win.t !== 'Fragment Card') return false;
   if (win.itemId && win.itemId !== 'm1') return false;
@@ -44,13 +45,13 @@ function winMatchesCooldownItem(win, item) {
 export function pruneExpiredEmperiumWins(wins, nowMs = Date.now()) {
   if (!Array.isArray(wins) || wins.length === 0) return [];
   return wins.filter((w) => {
-    if (!isEmperiumCooldownWinRecord(w)) return false;
+    if (!isEmperiumCooldownWinRecord(w)) return true;
     const at = typeof w.at === 'number' && Number.isFinite(w.at) ? w.at : 0;
     return at > 0 && isEmperiumWinStillOnCooldown(at, nowMs);
   });
 }
 
-/** True only under Emperium Overrun — Guild League never applies winner CD. */
+/** True only under Emperium Overrun — Guild League has its own Tue→Thu CD. */
 export function isEmperiumWinCooldownEnabled(eventMode) {
   if (eventMode === 'Guild League') return false;
   return defaultEventModeForQueues(eventMode) === 'Emperium Overrun';

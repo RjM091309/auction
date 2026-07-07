@@ -2,33 +2,23 @@
  * Lightweight Puppet Card CD reads — avoids full `getFullState` for list UIs.
  */
 
-import { pruneExpiredEmperiumWins } from './emperiumWinCooldown.js';
 import { puppetCardCdDisplayForIgn } from './puppetCardCdDisplay.js';
 import { loadWeeklyTypeWins } from './weeklyTypeWins.js';
+import { pruneWeeklyTypeWins } from './guildLeagueWinCooldown.js';
 
-const EVENT_MODE_META_KEY = 'event_mode';
 const EMPERIUM_CD_MODE = 'Emperium Overrun';
-
-/** @param {import('mysql2/promise').Pool} pool */
-async function loadEventMode(pool) {
-  const [rows] = await pool.query(
-    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
-    [EVENT_MODE_META_KEY]
-  );
-  const raw = rows[0]?.value;
-  return raw === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
-}
+const GUILD_LEAGUE_CD_MODE = 'Guild League';
 
 /** @param {import('mysql2/promise').Pool} pool */
 async function loadPrunedWeeklyWins(pool) {
-  return pruneExpiredEmperiumWins(await loadWeeklyTypeWins(pool));
+  return pruneWeeklyTypeWins(await loadWeeklyTypeWins(pool));
 }
 
 /**
- * On CD tab: rows pre-filtered to bidders currently on Puppet Card CD.
  * @param {import('mysql2/promise').Pool} pool
+ * @param {string} eventMode
  */
-export async function getOnCdList(pool) {
+async function getOnCdRowsForMode(pool, eventMode) {
   const nowMs = Date.now();
   const [memberRows] = await pool.query(
     'SELECT id, name FROM members WHERE active = 1 ORDER BY name ASC'
@@ -41,7 +31,7 @@ export async function getOnCdList(pool) {
     const display = puppetCardCdDisplayForIgn(
       name,
       weeklyTypeWins,
-      EMPERIUM_CD_MODE,
+      eventMode,
       nowMs
     );
     if (display.tone !== 'cd') continue;
@@ -51,9 +41,23 @@ export async function getOnCdList(pool) {
       label: display.label,
       title: display.title,
       expiresAt: display.expiresAt ?? null,
+      mode: eventMode,
     });
   }
-  return { rows, fetchedAt: nowMs };
+  return rows;
+}
+
+/**
+ * On CD tab: Guild League + Emperium Overrun lists (server-computed).
+ * @param {import('mysql2/promise').Pool} pool
+ */
+export async function getOnCdList(pool) {
+  const nowMs = Date.now();
+  const [guildLeague, emperium] = await Promise.all([
+    getOnCdRowsForMode(pool, GUILD_LEAGUE_CD_MODE),
+    getOnCdRowsForMode(pool, EMPERIUM_CD_MODE),
+  ]);
+  return { guildLeague, emperium, fetchedAt: nowMs };
 }
 
 /**
@@ -64,11 +68,16 @@ export async function getOnCdList(pool) {
  */
 export async function listBiddersWithCardCd(pool, listBidders, actor) {
   const nowMs = Date.now();
-  const [bidders, eventMode, weeklyTypeWins] = await Promise.all([
+  const EVENT_MODE_META_KEY = 'event_mode';
+  const [bidders, eventRows, weeklyTypeWins] = await Promise.all([
     listBidders(pool, actor),
-    loadEventMode(pool),
+    pool.query('SELECT value FROM app_meta WHERE `key` = ? LIMIT 1', [
+      EVENT_MODE_META_KEY,
+    ]),
     loadPrunedWeeklyWins(pool),
   ]);
+  const rawMode = eventRows[0]?.[0]?.value;
+  const eventMode = rawMode === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
   const enriched = bidders.map((b) => ({
     ...b,
     cardCd: puppetCardCdDisplayForIgn(

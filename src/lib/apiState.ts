@@ -15,6 +15,7 @@ import { normalizeQueuesForEventMode } from './dedupeIgnAcrossQueues';
 import { upgradeLegacyRankWinnerCounts } from './rewardContext';
 import { stripEmperiumCardQueuesAfterFragmentWeeklyWin } from './queueEligibility';
 import { pruneExpiredEmperiumWins } from './emperiumWinCooldown';
+import { pruneWeeklyTypeWins } from './guildLeagueWinCooldown';
 import {
   migrateFeatherItems,
   parseRewardItemCounts,
@@ -138,9 +139,10 @@ export function parseAuctionState(json: unknown): AuctionState | null {
       const at =
         typeof r.at === 'number' ? r.at : r.at != null ? Number(r.at) : NaN;
       if (Number.isFinite(at) && at > 0) entry.at = at;
+      if (r.mode === 'Guild League') entry.mode = 'Guild League';
       weeklyTypeWins.push(entry);
     }
-    weeklyTypeWins = pruneExpiredEmperiumWins(weeklyTypeWins);
+    weeklyTypeWins = pruneWeeklyTypeWins(weeklyTypeWins);
   }
 
   let winnerMarkLog: WinnerMarkLogEntry[] | undefined;
@@ -453,7 +455,12 @@ export async function publicMoveQueueMember(
  */
 export async function persistAuctionState(
   state: AuctionState,
-  opts: { bearerToken?: string; includeWeeklyTypeWins?: boolean } = {}
+  opts: {
+    bearerToken?: string;
+    includeWeeklyTypeWins?: boolean;
+    /** When false, server must not add Puppet CD from manual winner marks this save. */
+    applyWinnerCooldown?: boolean;
+  } = {}
 ): Promise<AuctionState | null> {
   const body: Record<string, unknown> = {
     items: state.items,
@@ -469,6 +476,9 @@ export async function persistAuctionState(
   };
   if (opts.includeWeeklyTypeWins && Array.isArray(state.weeklyTypeWins)) {
     body.weeklyTypeWins = state.weeklyTypeWins;
+  }
+  if (opts.applyWinnerCooldown === false) {
+    body.applyWinnerCooldown = false;
   }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts.bearerToken) headers.Authorization = `Bearer ${opts.bearerToken}`;
