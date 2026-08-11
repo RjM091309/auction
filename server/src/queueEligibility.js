@@ -119,8 +119,11 @@ export function findOtherActiveQueueBlockingWithMatch(
     const matchedIgn = findMatchingIgnName(ignRaw, queuedNames);
     if (!matchedIgn) continue;
 
-    if (mode !== 'Emperium Overrun') {
-      return { item: it, matchedIgn };
+    if (mode === 'Guild League') {
+      // Temporarily disabled per request: Guild League no longer limits an
+      // IGN to one active queue — a Puppet Frag Card bid no longer blocks a
+      // Feathers bid (or any other item) at the same time.
+      continue;
     }
     if (emperiumSecondQueueBlocks(targetType, it.type)) {
       return { item: it, matchedIgn };

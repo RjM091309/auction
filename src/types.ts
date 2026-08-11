@@ -78,6 +78,7 @@ export type GuildRank =
   | 'Silver'
   | 'Gold'
   | 'Platinum'
+  | 'The Chosen One'
   | 'Emperium overrun';
 
 export interface RewardItemCounts {

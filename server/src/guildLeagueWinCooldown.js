@@ -2,7 +2,6 @@
  * Keep in sync with `src/lib/guildLeagueWinCooldown.ts`.
  */
 
-import { defaultEventModeForQueues } from './queueEligibility.js';
 import {
   isEmperiumCooldownItem,
   isPuppetFragmentItem,
@@ -48,9 +47,15 @@ export function pruneWeeklyTypeWins(wins, nowMs = Date.now()) {
   return pruneExpiredGuildLeagueWins(pruneExpiredEmperiumWins(wins, nowMs), nowMs);
 }
 
-/** @param {string | undefined} eventMode */
+/**
+ * Temporarily disabled per request (2026-08-10): Guild League no longer
+ * blocks re-queueing on a Puppet Frag Card win. Kept as a single toggle
+ * point — flip back to `defaultEventModeForQueues(eventMode) === 'Guild
+ * League'` to re-enable the Tue→Thu cooldown.
+ * @param {string | undefined} eventMode
+ */
 export function isGuildLeagueWinCooldownEnabled(eventMode) {
-  return defaultEventModeForQueues(eventMode) === 'Guild League';
+  return false;
 }
 
 /**

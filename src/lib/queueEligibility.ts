@@ -19,7 +19,7 @@ import { emperiumWinCooldownBlocksQueueJoin, isEmperiumWinCooldownEnabled } from
 import { guildLeagueWinCooldownBlocksQueueJoin, isGuildLeagueWinCooldownEnabled } from './guildLeagueWinCooldown';
 
 export function defaultEventModeForQueues(m?: WeeklyEventType): WeeklyEventType {
-  return m ?? 'Emperium Overrun';
+  return m === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
 }
 
 /** Guild League: main shuffle lock closes public signup. Emperium Overrun: signup stays open (card + Feathers queue rules). */
@@ -131,9 +131,11 @@ export function computeKeptQueueMemberKeys(
     }
     const nonExempt = group.filter((e) => !isItemExemptFromBidLimit(e.itemId));
 
-    if (mode !== 'Emperium Overrun') {
-      const first = nonExempt[0];
-      if (first) keep.add(queueMemberKey(first.itemId, first.mid));
+    if (mode === 'Guild League') {
+      // Temporarily disabled per request: keep every active queue entry
+      // instead of collapsing down to the first one — see the matching
+      // note in `findOtherActiveQueueBlockingWithMatch` above.
+      for (const e of nonExempt) keep.add(queueMemberKey(e.itemId, e.mid));
       continue;
     }
     const others = nonExempt.filter((e) => !isEmperiumCenterType(e.type));
@@ -225,8 +227,11 @@ export function findOtherActiveQueueBlockingWithMatch(
     const matchedIgn = findMatchingIgnName(ignRaw, queuedNames);
     if (!matchedIgn) continue;
 
-    if (mode !== 'Emperium Overrun') {
-      return { item: it, matchedIgn };
+    if (mode === 'Guild League') {
+      // Temporarily disabled per request: Guild League no longer limits an
+      // IGN to one active queue — a Puppet Frag Card bid no longer blocks a
+      // Feathers bid (or any other item) at the same time.
+      continue;
     }
     if (emperiumSecondQueueBlocks(targetType, it.type)) {
       return { item: it, matchedIgn };

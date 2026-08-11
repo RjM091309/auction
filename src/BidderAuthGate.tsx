@@ -88,7 +88,7 @@ interface NameDropdownProps {
  *
  * Exported so the auction-dashboard "Join queue" modal can reuse it.
  */
-export function NameDropdown({
+function NameDropdownBase({
   options,
   value,
   onChange,
@@ -336,6 +336,9 @@ export function NameDropdown({
     </div>
   );
 }
+
+/** Memoized so parent re-renders (e.g. background state polling) skip re-rendering the option list unless `options`/`value`/etc. actually changed. */
+export const NameDropdown = React.memo(NameDropdownBase);
 
 /**
  * The reusable IGN + password form. Used by both the full-page `BidderAuthGate`

@@ -23,6 +23,7 @@ import {
 } from './db.js';
 import {
   getFullState,
+  getFullStateCached,
   replaceFullState,
   deactivateMember,
   removeMemberFromItemQueue,
@@ -68,6 +69,7 @@ import {
 import { getOverrunSundayKey } from './overrunWeek.js';
 import { getAuctionWeekTimezone } from './auctionWeek.js';
 import { pinShuffleQueueItems } from './sureWinPin.js';
+import { shuffleIds } from './shuffleRandom.js';
 import { getOnCdList, listBiddersWithCardCd } from './cardCdApi.js';
 
 const PORT = Number(process.env.PORT ?? 3333);
@@ -97,10 +99,15 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-/** Public read — bid board at `/`. Writes still require auth. */
+/**
+ * Public read — bid board at `/`. Writes still require auth.
+ * Every open tab polls this every 2s; `getFullStateCached` shares one DB
+ * round trip across whatever polls land within the same short window
+ * instead of each running the full ~14-query state build on its own.
+ */
 app.get('/api/state', async (_req, res) => {
   try {
-    const state = await getFullState(pool);
+    const state = await getFullStateCached(pool);
     res.json(state);
   } catch (e) {
     console.error(e);
@@ -363,7 +370,13 @@ app.post('/api/state/clear-queues', requireAuth, async (req, res) => {
   }
 });
 
-/** Officer+ only: apply server-side sure-win pins to shuffled preview rows (no config in response). */
+/**
+ * Officer+ only: authoritative "Start Shuffle" order. Ignores whatever
+ * `interestedMemberIds` the client sends — re-derives queue membership from
+ * the live DB snapshot and shuffles it here, then applies server-side
+ * sure-win pins (no config in response). This keeps the random order out of
+ * the client's hands entirely, so a tampered request can't pick winners.
+ */
 app.post('/api/shuffle/pin-queues', requireAuth, async (req, res) => {
   try {
     const actor = await getFreshActor(pool, bearerToken(req));
@@ -376,7 +389,21 @@ app.post('/api/shuffle/pin-queues', requireAuth, async (req, res) => {
     if (!Array.isArray(items)) {
       return res.status(400).json({ error: 'Expected { items: [...] }' });
     }
-    res.json({ queueByItemId: pinShuffleQueueItems(items) });
+    const state = await getFullState(pool);
+    const itemsById = new Map(state.items.map((it) => [it.id, it]));
+    const shuffledItems = items
+      .map((reqItem) => {
+        const id = reqItem?.id == null ? '' : String(reqItem.id).trim();
+        const live = id ? itemsById.get(id) : undefined;
+        if (!live) return null;
+        return {
+          id: live.id,
+          name: live.name,
+          interestedMemberIds: shuffleIds(live.interestedMemberIds),
+        };
+      })
+      .filter((it) => it != null);
+    res.json({ queueByItemId: pinShuffleQueueItems(shuffledItems) });
   } catch (e) {
     const code = e.statusCode ?? 500;
     if (code >= 500) console.error(e);

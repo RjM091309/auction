@@ -13,6 +13,7 @@ export const GUILD_RANK_OPTIONS: GuildRank[] = [
   'Silver',
   'Gold',
   'Platinum',
+  'The Chosen One',
   'Emperium overrun',
 ];
 
@@ -22,6 +23,7 @@ export const GUILD_LEAGUE_RANKS: GuildRank[] = [
   'Silver',
   'Gold',
   'Platinum',
+  'The Chosen One',
 ];
 
 export function isGuildLeagueRank(rank: GuildRank): boolean {
@@ -29,7 +31,8 @@ export function isGuildLeagueRank(rank: GuildRank): boolean {
     rank === 'Bronze' ||
     rank === 'Silver' ||
     rank === 'Gold' ||
-    rank === 'Platinum'
+    rank === 'Platinum' ||
+    rank === 'The Chosen One'
   );
 }
 
@@ -58,6 +61,12 @@ const TOTAL_ITEMS_BY_RANK_AND_TYPE: Record<GuildRank, Record<ItemType, number>> 
     'Ancient Item': 1,
     Other: 1,
   },
+  'The Chosen One': {
+    'Fragment Card': 19,
+    Feathers: 180,
+    'Ancient Item': 1,
+    Other: 1,
+  },
   'Emperium overrun': {
     'Fragment Card': 20,
     Feathers: 320,
@@ -69,6 +78,7 @@ const TOTAL_ITEMS_BY_RANK_AND_TYPE: Record<GuildRank, Record<ItemType, number>> 
 /** Normalize persisted / API rank strings. */
 export function parseGuildRank(v: unknown): GuildRank {
   if (v === 'Emperium overrun') return 'Emperium overrun';
+  if (v === 'The Chosen One') return 'The Chosen One';
   if (v === 'Platinum') return 'Platinum';
   if (v === 'Gold') return 'Gold';
   if (v === 'Silver') return 'Silver';
@@ -83,10 +93,12 @@ export function defaultFragmentCountForItem(
 ): number {
   if (isIllusionFragmentItem(item)) {
     if (rank === 'Gold' || rank === 'Platinum') return 2;
+    if (rank === 'The Chosen One') return 5;
     return totalItemsForTypeByRank('Fragment Card', rank);
   }
   if (rank === 'Gold') return 4;
   if (rank === 'Platinum') return 5;
+  if (rank === 'The Chosen One') return 19;
   return totalItemsForTypeByRank('Fragment Card', rank);
 }
 
@@ -97,6 +109,7 @@ export function totalItemsForTypeByRank(type: ItemType, rank: GuildRank = 'Bronz
 /** Feathers: default items per winning bidder by rank preset. */
 export function defaultFeathersItemsPerWinner(rank: GuildRank): number {
   if (rank === 'Emperium overrun') return 13;
+  if (rank === 'The Chosen One') return 18;
   if (rank === 'Platinum') return 12;
   if (rank === 'Gold') return 10;
   if (rank === 'Silver') return 9;

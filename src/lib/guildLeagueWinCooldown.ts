@@ -4,7 +4,6 @@ import {
   isPuppetFragmentItem,
   pruneExpiredEmperiumWins,
 } from './emperiumWinCooldown';
-import { defaultEventModeForQueues } from './queueEligibility';
 import {
   guildLeagueWinCooldownExpiresAt,
   isGuildLeagueWinStillOnCooldown,
@@ -53,11 +52,16 @@ export function pruneWeeklyTypeWins(
   );
 }
 
-/** True only under Guild League — Emperium Overrun uses Sunday-event CD instead. */
+/**
+ * Temporarily disabled per request (2026-08-10): Guild League no longer
+ * blocks re-queueing on a Puppet Frag Card win. Kept as a single toggle
+ * point — flip back to `defaultEventModeForQueues(eventMode) === 'Guild
+ * League'` to re-enable the Tue→Thu cooldown.
+ */
 export function isGuildLeagueWinCooldownEnabled(
-  eventMode?: WeeklyEventType
+  _eventMode?: WeeklyEventType
 ): boolean {
-  return defaultEventModeForQueues(eventMode) === 'Guild League';
+  return false;
 }
 
 export function findGuildLeagueWinCooldown(

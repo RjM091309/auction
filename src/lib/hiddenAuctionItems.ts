@@ -13,8 +13,12 @@ export function isIllusionFragmentItem(
   return item.id === 'm4' || /illusion/i.test(item.name);
 }
 
+// Matches `defaultEventModeForQueues` (queueEligibility.ts) and the server's
+// `defaultEventMode` in hiddenAuctionItems.js — coerce anything that isn't
+// exactly 'Guild League' to 'Emperium Overrun', not just null/undefined, so
+// an unexpected eventMode value can't diverge between client and server.
 function defaultEventMode(m?: WeeklyEventType): WeeklyEventType {
-  return m ?? 'Emperium Overrun';
+  return m === 'Guild League' ? 'Guild League' : 'Emperium Overrun';
 }
 
 /** When non-empty, matching items are hidden from the public view and admin grid. */

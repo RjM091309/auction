@@ -88,7 +88,6 @@ export default function RegistrationPage() {
     kind: 'idle',
   });
   const debounceRef = useRef<number | null>(null);
-  const lastCheckedRef = useRef<string>('');
 
   // Debounced live IGN availability check. Each keystroke schedules a probe
   // 400ms later; previous probes are cancelled. Server enforces uniqueness
@@ -125,7 +124,6 @@ export default function RegistrationPage() {
         const out: PublicIgnCheck = await publicCheckIgn(trimmed);
         // Drop responses for a probe that's no longer the active query.
         if (out.ign.trim().toLowerCase() !== trimmed.toLowerCase()) return;
-        lastCheckedRef.current = trimmed.toLowerCase();
         setAvailability(
           out.available
             ? { kind: 'available', ign: trimmed }
@@ -228,7 +226,7 @@ export default function RegistrationPage() {
             <div className="flex items-center gap-3">
               <div className="inline-flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-slate-900 p-0.5 ring-1 ring-slate-700 shadow-lg shadow-black/30">
                 <img
-                  src="/images/OUTLAST_RO.png"
+                  src="/images/outlast.jpg"
                   alt="Outlast Guild"
                   className="h-full w-full object-contain"
                   width={48}

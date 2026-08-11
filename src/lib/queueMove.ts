@@ -30,34 +30,6 @@ export type QueueMoveFailure = {
   expiresAt?: number;
 };
 
-/** Remove one member from a single item queue (other queues unchanged). */
-export function applyRemoveMemberFromQueue(
-  s: AuctionState,
-  itemId: string,
-  memberId: number
-): AuctionState | { error: 'not_found' } {
-  const item = s.items.find((i) => i.id === itemId);
-  if (!item || !item.interestedMemberIds.includes(memberId)) {
-    return { error: 'not_found' };
-  }
-
-  const items = s.items.map((it) =>
-    it.id === itemId
-      ? {
-          ...it,
-          interestedMemberIds: it.interestedMemberIds.filter((id) => id !== memberId),
-        }
-      : it
-  );
-
-  const freeDrawChosenByItemId = { ...(s.freeDrawChosenByItemId ?? {}) };
-  if (freeDrawChosenByItemId[itemId] === memberId) {
-    delete freeDrawChosenByItemId[itemId];
-  }
-
-  return { ...s, items, freeDrawChosenByItemId };
-}
-
 export function applyQueueMemberMove(
   s: AuctionState,
   p: QueueMovePayload

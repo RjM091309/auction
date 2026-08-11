@@ -167,27 +167,3 @@ export function syncWeeklyWinsForWinnerMarkChange(
 
   return dedupeWeeklyWins(wins);
 }
-
-/** @deprecated Use syncWeeklyWinsForWinnerMarkChange */
-export function syncEmperiumWeeklyWinsForWinnerMarkChange(
-  eventMode: WeeklyEventType | undefined,
-  item: Pick<AuctionItem, 'id' | 'name' | 'type'>,
-  prevRecorded: readonly string[],
-  nextRecorded: readonly string[],
-  prevRevoked: readonly string[],
-  nextRevoked: readonly string[],
-  weeklyTypeWins: WeeklyTypeWin[] | undefined,
-  atMs = Date.now()
-): WeeklyTypeWin[] | undefined {
-  if (!isEmperiumWinCooldownEnabled(eventMode)) return undefined;
-  return syncWeeklyWinsForWinnerMarkChange(
-    'emperium',
-    item,
-    prevRecorded,
-    nextRecorded,
-    prevRevoked,
-    nextRevoked,
-    weeklyTypeWins,
-    atMs
-  );
-}

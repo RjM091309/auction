@@ -53,11 +53,6 @@ export function isRegistrationPath(pathname: string): boolean {
   return normalizePath(pathname) === PUBLIC_REGISTRATION_PATH;
 }
 
-/** True when the URL is the public Puppet Card CD tab. */
-export function isCardCdPath(pathname: string): boolean {
-  return normalizePath(pathname) === PUBLIC_CARD_CD_PATH;
-}
-
 /** True when the URL is a standalone public page (not the admin dashboard). */
 export function isPublicStandalonePath(pathname: string): boolean {
   return isRegistrationPath(pathname);

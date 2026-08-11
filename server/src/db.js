@@ -20,7 +20,13 @@ export function createPool() {
     password: process.env.MYSQL_PASSWORD ?? '',
     database: process.env.MYSQL_DATABASE ?? 'rooc',
     waitForConnections: true,
-    connectionLimit: 10,
+    // `getFullState()` alone fans out ~14 parallel queries per call, so the
+    // old limit of 10 meant a single poll could saturate the whole pool —
+    // every additional concurrent user just queued behind it. Raised with
+    // headroom now that `/api/state` polling shares reads via
+    // `getFullStateCached` (stateRepo.js), so this mainly covers writes and
+    // cache-miss bursts, not one connection per polling tab.
+    connectionLimit: 25,
     enableKeepAlive: true,
   });
 }

@@ -8,6 +8,7 @@ const DEFAULTS = {
 
 function defaultFeathersItemsPerWinner(rank) {
   if (rank === 'Emperium overrun') return 13;
+  if (rank === 'The Chosen One') return 18;
   if (rank === 'Platinum') return 12;
   if (rank === 'Gold') return 10;
   if (rank === 'Silver') return 9;
@@ -18,6 +19,7 @@ function parseRewardRank(raw) {
   if (raw == null || raw === '') return 'Bronze';
   const s = typeof raw === 'string' ? raw : String(raw);
   if (s === 'Emperium overrun') return 'Emperium overrun';
+  if (s === 'The Chosen One') return 'The Chosen One';
   if (s === 'Platinum') return 'Platinum';
   if (s === 'Gold') return 'Gold';
   if (s === 'Silver') return 'Silver';

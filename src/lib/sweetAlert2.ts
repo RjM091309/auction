@@ -185,41 +185,6 @@ export function swal2GuildLeagueWinCooldown(args: {
   }).then(() => undefined);
 }
 
-/** @deprecated Use swal2EmperiumWinCooldown — kept for older call sites. */
-export function swal2AlreadyWonTypeThisWeek(args: {
-  ign: string;
-  itemName: string;
-  emperiumFragmentCardWinner?: boolean;
-  expiresAt?: number;
-}): Promise<void> {
-  if (args.expiresAt != null && Number.isFinite(args.expiresAt)) {
-    return swal2EmperiumWinCooldown({
-      ign: args.ign,
-      itemName: args.itemName,
-      expiresAt: args.expiresAt,
-    });
-  }
-  const { ign, itemName } = args;
-  const i = escapeHtml(ign);
-  const n = escapeHtml(itemName);
-  return Swal.fire({
-    ...darkShell,
-    icon: 'info',
-    title: 'Already a winner for this item',
-    width: 'min(28rem, calc(100vw - 2rem))',
-    customClass: { htmlContainer: 'swal-queue-html' },
-    html: `<div style="text-align:center;margin:0;padding:0">
-<p style="margin:0 0 1rem;line-height:1.55;font-size:15px;color:#e2e8f0">Only <strong>Puppet Frag Card</strong> winners (admin green check) are blocked from bidding again for <strong>1 week</strong> (skip the next Emperium Sunday). Feathers winners may bid again next Sunday.</p>
-<p style="margin:0;line-height:1.55;font-size:15px;color:#e2e8f0"><strong>${i}</strong> is recorded as a winner for:</p>
-<div style="margin-top:1rem;display:inline-block;vertical-align:top;text-align:center;max-width:100%;padding:0.75rem 1rem;border-radius:0.75rem;background:#0f172a;border:1px solid #334155">
-<div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.35rem">Item</div>
-<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;word-break:break-word">${n}</div>
-</div>
-</div>`,
-    confirmButtonText: 'OK',
-  }).then(() => undefined);
-}
-
 /** Same character already listed on this card */
 export function swal2QueueAlreadyListed(args: {
   ign: string;

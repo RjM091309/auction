@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   ClipboardList,
   History,
@@ -91,7 +91,6 @@ import {
   swal2ConfirmShuffleDrawFree,
   swal2ConfirmResetShuffleUnmark,
   swal2ConfirmUnmarkWinner,
-  swal2ConfirmUnmarkAddedWinner,
   swal2WinnerMarked,
   swal2WinnerUnmarked,
   swal2WinnerPoolFull,
@@ -191,9 +190,30 @@ import {
 } from './lib/apiBidders';
 import { notifyBidderAuditChanged } from './lib/apiBidderAudit';
 import { DashboardTab, pathForTab, tabFromPath, PUBLIC_REGISTRATION_PATH } from './lib/tabRoute';
+import { fetchWithCache } from './lib/fetchCache';
 
 /** How often the admin dashboard pulls server state so public joins show up without manual refresh. */
 const ADMIN_STATE_POLL_MS = 2000;
+
+/** Roster rarely changes mid-session — stale-while-revalidate avoids a blocking "Loading IGNs…" on every re-open of the Join-queue modal. */
+const ACTIVE_MEMBERS_CACHE_KEY = 'active-members';
+const ACTIVE_MEMBERS_CACHE_TTL_MS = 30_000;
+
+/**
+ * Cheap change-fingerprint for an append-only, newest-first, capped log
+ * (`winnerMarkLog` / `bidderStateLog` — up to 500-3000 rows). Serializing the
+ * whole array on every 2s poll tick cost several ms of main-thread JSON.stringify
+ * work (300+ KB of JSON) for no benefit: a new row always lands at index 0
+ * (`ORDER BY at_ms DESC, id DESC`), so length + the newest row's id/at is
+ * enough to detect "did this log change" without walking every row. Old rows
+ * falling off the tail (once the cap is hit) won't flip this fingerprint,
+ * which is fine — that's a low-urgency cosmetic trim, not new data to show.
+ */
+function logFingerprint(rows: { id?: number; at: number }[] | undefined): string {
+  if (!rows || rows.length === 0) return '0';
+  const head = rows[0];
+  return `${rows.length}:${head?.id ?? ''}:${head?.at ?? ''}`;
+}
 
 /** Compare server vs local view so idle polls do not re-trigger persist. */
 function auctionPollSnapshot(s: AuctionState): string {
@@ -211,8 +231,8 @@ function auctionPollSnapshot(s: AuctionState): string {
       createdAt: it.createdAt,
     })),
     weeklyTypeWins: s.weeklyTypeWins,
-    winnerMarkLog: s.winnerMarkLog,
-    bidderStateLog: s.bidderStateLog,
+    winnerMarkLog: logFingerprint(s.winnerMarkLog),
+    bidderStateLog: logFingerprint(s.bidderStateLog),
     shuffleLocked: s.shuffleLocked,
     winnerShortlistUiEnabled: s.winnerShortlistUiEnabled,
     eventMode: s.eventMode,
@@ -446,23 +466,30 @@ export default function AuctionDashboard() {
   useEffect(() => {
     if (!queueNameModalItemId) return;
     let cancelled = false;
-    setActiveMembersLoading(true);
     setActiveMembersError(null);
-    fetchActiveMembers()
-      .then((list) => {
-        if (!cancelled) setActiveMembersForJoin(list);
+    fetchWithCache(ACTIVE_MEMBERS_CACHE_KEY, fetchActiveMembers, {
+      ttlMs: ACTIVE_MEMBERS_CACHE_TTL_MS,
+    })
+      .then(({ data, fromCache }) => {
+        if (cancelled) return;
+        setActiveMembersForJoin(data);
+        // Only show the loading placeholder on a true cold start — a cache
+        // hit (even while silently revalidating) already has a full list to
+        // render, so blocking the dropdown on it made every re-open feel
+        // slow for no reason.
+        if (!fromCache) setActiveMembersLoading(false);
       })
       .catch((e) => {
         if (!cancelled) {
           setActiveMembersError(e instanceof Error ? e.message : String(e));
+          setActiveMembersLoading(false);
         }
-      })
-      .finally(() => {
-        if (!cancelled) setActiveMembersLoading(false);
       });
+    setActiveMembersLoading(activeMembersForJoin.length === 0);
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queueNameModalItemId]);
 
   /** Reset every piece of state that backs the Join-queue modal. */
@@ -565,6 +592,43 @@ export default function AuctionDashboard() {
     () => state?.items.find((i) => i.id === queueNameModalItemId) ?? null,
     [state, queueNameModalItemId]
   );
+
+  // Hide IGNs that are already disqualified from joining this queue — either
+  // they are on this card's queue already, or they have a bid on another
+  // card that the current event mode considers blocking (Guild League = any
+  // other card; Emperium Overrun = same center type / cross-alt rules).
+  // Memoized (rather than recomputed inline in JSX on every render) so the
+  // array reference stays stable across unrelated re-renders — e.g. the 2s
+  // background state poll — letting `NameDropdown` skip re-filtering and
+  // re-rendering its option list while the user is mid-search.
+  const filteredJoinQueueMembers = useMemo(() => {
+    if (!state || !queueModalItem) return activeMembersForJoin;
+    return activeMembersForJoin.filter((opt) => {
+      const ignRaw = opt.name;
+      if (matchingIgnOnQueueItem(queueModalItem, state.members, ignRaw)) {
+        return false;
+      }
+      if (
+        weeklyTypeWinBlocksQueueJoin(
+          state.eventMode,
+          queueModalItem,
+          state.weeklyTypeWins,
+          ignRaw
+        )
+      ) {
+        return false;
+      }
+      const blocker = findOtherActiveQueueBlockingWithMatch(
+        state.eventMode,
+        state.items,
+        state.members,
+        ignRaw,
+        queueModalItem.id,
+        queueModalItem.type
+      );
+      return blocker == null;
+    });
+  }, [state, queueModalItem, activeMembersForJoin]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1093,25 +1157,19 @@ export default function AuctionDashboard() {
     shuffleBearerRef.current = bearerToken;
     shuffleRunningRef.current = true;
 
-    const randomQueueByItemId: Record<string, number[]> = {};
-    for (const it of activeItemsForShuffle) {
-      randomQueueByItemId[it.id] = shuffleQueueIdsForType(
-        it.interestedMemberIds,
-        it.type
-      );
-    }
-
     let previewQueueByItemId: Record<string, number[]>;
     try {
-      const pinned = await fetchPinnedShuffleQueues(
+      // Server is now the source of truth for the random order: it re-derives
+      // queue membership from its own DB snapshot and shuffles it there, so
+      // we no longer compute (or need to trust) a client-side shuffle here.
+      previewQueueByItemId = await fetchPinnedShuffleQueues(
         activeItemsForShuffle.map((it) => ({
           id: it.id,
           name: it.name,
-          interestedMemberIds: randomQueueByItemId[it.id] ?? [],
+          interestedMemberIds: it.interestedMemberIds,
         })),
         bearerToken
       );
-      previewQueueByItemId = { ...randomQueueByItemId, ...pinned };
     } catch (e) {
       shuffleRunningRef.current = false;
       const msg = e instanceof Error ? e.message : String(e);
@@ -1132,6 +1190,15 @@ export default function AuctionDashboard() {
     let lastFrameAt = t0;
     const activeItemIds = activeItemsForShuffle.map((it) => it.id);
     const spinPhaseByItemIdLocal: Record<string, number> = {};
+    // React state commits (not the phase math) are what's expensive here —
+    // this re-renders the whole dashboard tree every time it fires. A raw
+    // requestAnimationFrame loop fires at the display's refresh rate (up to
+    // 120-144Hz on modern monitors), so committing on every tick was driving
+    // way more re-renders than the reel visuals need, causing the jank.
+    // Capping commits to ~24/sec keeps the spin looking smooth while cutting
+    // render volume by 2-6x depending on the display.
+    const COMMIT_INTERVAL_MS = 1000 / 24;
+    let lastCommitAt = -Infinity;
     const tick = (now: number) => {
       if (shuffleUnmountRef.current) {
         shuffleRunningRef.current = false;
@@ -1209,13 +1276,18 @@ export default function AuctionDashboard() {
         }
       }
 
-      setShuffleUi({
-        active: true,
-        spinOffsetByItemId,
-        spinPhaseByItemId,
-        revealCountByItemId,
-        previewQueueByItemId,
-      });
+      // Always commit the final frame (raw >= 1) so the reveal lands on the
+      // exact end state; otherwise throttle to COMMIT_INTERVAL_MS.
+      if (raw >= 1 || now - lastCommitAt >= COMMIT_INTERVAL_MS) {
+        lastCommitAt = now;
+        setShuffleUi({
+          active: true,
+          spinOffsetByItemId,
+          spinPhaseByItemId,
+          revealCountByItemId,
+          previewQueueByItemId,
+        });
+      }
 
       if (raw < 1) {
         shuffleRafRef.current = requestAnimationFrame(tick);
@@ -1362,7 +1434,7 @@ export default function AuctionDashboard() {
   };
 
   /** Re-randomize order below winner shortlist only (Feathers with partial free page). */
-  const handleShuffleDrawFree = async (itemId: string) => {
+  const handleShuffleDrawFree = useCallback(async (itemId: string) => {
     if (!state || state.shuffleLocked !== true || shuffleUi.active) return;
     const item = state.items.find((i) => i.id === itemId);
     if (!item || item.status !== 'active') return;
@@ -1408,7 +1480,8 @@ export default function AuctionDashboard() {
         dedupeIgnAcrossActiveQueues(pruneOrphanQueueMembers(nextState))
       )
     );
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, shuffleUi.active]);
 
   // Reset shuffle is stricter than Start shuffle: Admin / Developer only.
   // Same session-token flow — if the stored Bidders-tab actor already
@@ -1768,39 +1841,47 @@ export default function AuctionDashboard() {
     }
   };
 
-  const requestMarkWinner = (itemId: string, winnerName: string | null) => {
-    const trimmed = winnerName?.trim();
-    if (!trimmed || !state) return;
-    const action: WinnerMarkAction = { kind: 'mark', itemId, winnerName: trimmed };
-    const stored = loadStoredActor();
-    if (stored && (stored.role === 'Admin' || stored.role === 'Developer')) {
-      void performWinnerMarkChange(action, stored.token);
-      return;
-    }
-    pendingWinnerMarkRef.current = action;
-    setMarkWinnerAuthPromptOpen(true);
-  };
+  const requestMarkWinner = useCallback(
+    (itemId: string, winnerName: string | null) => {
+      const trimmed = winnerName?.trim();
+      if (!trimmed || !state) return;
+      const action: WinnerMarkAction = { kind: 'mark', itemId, winnerName: trimmed };
+      const stored = loadStoredActor();
+      if (stored && (stored.role === 'Admin' || stored.role === 'Developer')) {
+        void performWinnerMarkChange(action, stored.token);
+        return;
+      }
+      pendingWinnerMarkRef.current = action;
+      setMarkWinnerAuthPromptOpen(true);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state]
+  );
 
-  const requestUnmarkWinner = async (itemId: string, winnerName: string) => {
-    const trimmed = winnerName?.trim();
-    if (!trimmed || !state) return;
-    const item = state.items.find((i) => i.id === itemId);
-    const ok = await swal2ConfirmUnmarkWinner({
-      ign: trimmed,
-      itemName: item
-        ? displayAuctionItemName(item.name)
-        : 'this item',
-    });
-    if (!ok) return;
-    const action: WinnerMarkAction = { kind: 'unmark', itemId, winnerName: trimmed };
-    const stored = loadStoredActor();
-    if (stored && (stored.role === 'Admin' || stored.role === 'Developer')) {
-      void performWinnerMarkChange(action, stored.token);
-      return;
-    }
-    pendingWinnerMarkRef.current = action;
-    setMarkWinnerAuthPromptOpen(true);
-  };
+  const requestUnmarkWinner = useCallback(
+    async (itemId: string, winnerName: string) => {
+      const trimmed = winnerName?.trim();
+      if (!trimmed || !state) return;
+      const item = state.items.find((i) => i.id === itemId);
+      const ok = await swal2ConfirmUnmarkWinner({
+        ign: trimmed,
+        itemName: item
+          ? displayAuctionItemName(item.name)
+          : 'this item',
+      });
+      if (!ok) return;
+      const action: WinnerMarkAction = { kind: 'unmark', itemId, winnerName: trimmed };
+      const stored = loadStoredActor();
+      if (stored && (stored.role === 'Admin' || stored.role === 'Developer')) {
+        void performWinnerMarkChange(action, stored.token);
+        return;
+      }
+      pendingWinnerMarkRef.current = action;
+      setMarkWinnerAuthPromptOpen(true);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state]
+  );
 
   const handleMarkWinnerAuthSuccess = (actor: BidderActor) => {
     storeActor(actor);
@@ -1828,7 +1909,7 @@ export default function AuctionDashboard() {
    * the move locally for instant UI feedback, then synchronously persist
    * and adopt the server's response.
    */
-  const handleQueueMove = async (payload: QueueMovePayload) => {
+  const handleQueueMove = useCallback(async (payload: QueueMovePayload) => {
     if (!state) return;
 
     // Cancel any debounced save that was pending — we're going to do an
@@ -1959,7 +2040,8 @@ export default function AuctionDashboard() {
     } finally {
       persistInFlightRef.current = false;
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
 
   const handleCompleteAuction = requestMarkWinner;
 
@@ -2119,35 +2201,39 @@ export default function AuctionDashboard() {
     }
   };
 
-  const handleRemoveFromQueue = async (itemId: string, memberId: number) => {
-    if (!state) return;
-    if (state.shuffleLocked === true || shuffleUi.active) return;
-    const item = state.items.find((i) => i.id === itemId);
-    const m = state.members.find((x) => x.id === memberId);
-    if (!item || !m) return;
-    const memberName = m.name;
-    const itemDisplayName = displayAuctionItemName(item.name);
+  const handleRemoveFromQueue = useCallback(
+    async (itemId: string, memberId: number) => {
+      if (!state) return;
+      if (state.shuffleLocked === true || shuffleUi.active) return;
+      const item = state.items.find((i) => i.id === itemId);
+      const m = state.members.find((x) => x.id === memberId);
+      if (!item || !m) return;
+      const memberName = m.name;
+      const itemDisplayName = displayAuctionItemName(item.name);
 
-    const stored = loadStoredActor();
-    if (stored) {
-      await performQueueRemove(
+      const stored = loadStoredActor();
+      if (stored) {
+        await performQueueRemove(
+          itemId,
+          memberId,
+          memberName,
+          itemDisplayName,
+          stored.token
+        );
+        return;
+      }
+      // Defer until the user authenticates via the modal.
+      pendingRemoveRef.current = {
         itemId,
         memberId,
         memberName,
         itemDisplayName,
-        stored.token
-      );
-      return;
-    }
-    // Defer until the user authenticates via the modal.
-    pendingRemoveRef.current = {
-      itemId,
-      memberId,
-      memberName,
-      itemDisplayName,
-    };
-    setAuthPromptOpen(true);
-  };
+      };
+      setAuthPromptOpen(true);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state, shuffleUi.active]
+  );
 
   const handleAuthPromptSuccess = (actor: BidderActor) => {
     storeActor(actor);
@@ -2191,12 +2277,12 @@ export default function AuctionDashboard() {
     }
   };
 
-  const openQueueNameModal = (itemId: string) => {
+  const openQueueNameModal = useCallback((itemId: string) => {
     setEditMemberId(null);
     setEditMemberNameInput('');
     setQueueNameModalItemId(itemId);
     setQueueNameInput('');
-  };
+  }, []);
 
   const openWinnerSetLimitModal = () => {
     if (!state) return;
@@ -2691,7 +2777,7 @@ export default function AuctionDashboard() {
             <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-900 p-0.5 ring-1 ring-slate-700 shadow-lg shadow-black/30 sm:h-12 sm:w-12">
                 <img
-                  src="/images/OUTLAST_RO.png"
+                  src="/images/outlast.jpg"
                   alt="Outlast Guild"
                   className="h-full w-full object-contain"
                   width={48}
@@ -2938,9 +3024,7 @@ export default function AuctionDashboard() {
                             state.winnerShortlistUiEnabled === true
                           }
                           onOpenAddName={openQueueNameModal}
-                          onRemoveFromQueue={(memberId) =>
-                            void handleRemoveFromQueue(item.id, memberId)
-                          }
+                          onRemoveFromQueue={handleRemoveFromQueue}
                           onMoveQueueMember={handleQueueMove}
                           onComplete={handleCompleteAuction}
                           showAddedWinnerUi={
@@ -3284,72 +3368,26 @@ export default function AuctionDashboard() {
                 <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] font-mono ml-1">
                   Character name (IGN)
                 </label>
-                {(() => {
-                  // Hide IGNs that are already disqualified from joining this
-                  // queue — either they are on this card's queue already, or
-                  // they have a bid on another card that the current event
-                  // mode considers blocking (Guild League = any other card;
-                  // Emperium Overrun = same center type / cross-alt rules).
-                  const filteredMembers = (() => {
-                    if (!state || !queueModalItem) return activeMembersForJoin;
-                    return activeMembersForJoin.filter((opt) => {
-                      const ignRaw = opt.name;
-                      if (
-                        matchingIgnOnQueueItem(
-                          queueModalItem,
-                          state.members,
-                          ignRaw
-                        )
-                      ) {
-                        return false;
-                      }
-                      if (
-                        weeklyTypeWinBlocksQueueJoin(
-                          state.eventMode,
-                          queueModalItem,
-                          state.weeklyTypeWins,
-                          ignRaw
-                        )
-                      ) {
-                        return false;
-                      }
-                      const blocker = findOtherActiveQueueBlockingWithMatch(
-                        state.eventMode,
-                        state.items,
-                        state.members,
-                        ignRaw,
-                        queueModalItem.id,
-                        queueModalItem.type
-                      );
-                      return blocker == null;
-                    });
-                  })();
-                  const hiddenCount =
-                    activeMembersForJoin.length - filteredMembers.length;
-                  return (
-                    <>
-                      <NameDropdown
-                        options={filteredMembers}
-                        value={queueNameInput}
-                        onChange={setQueueNameInput}
-                        disabled={activeMembersLoading || queueAdminSubmitting}
-                        placeholder={
-                          activeMembersLoading ? 'Loading IGNs…' : '— Select your IGN —'
-                        }
-                        emptyMessage={
-                          hiddenCount > 0 && activeMembersForJoin.length > 0
-                            ? 'Every registered IGN is already in this or another active queue.'
-                            : 'No registered IGNs. Please register on the Bidders page first.'
-                        }
-                      />
-                      {activeMembersError && (
-                        <p className="text-[11px] font-bold text-rose-300">
-                          {activeMembersError}
-                        </p>
-                      )}
-                    </>
-                  );
-                })()}
+                <NameDropdown
+                  options={filteredJoinQueueMembers}
+                  value={queueNameInput}
+                  onChange={setQueueNameInput}
+                  disabled={activeMembersLoading || queueAdminSubmitting}
+                  placeholder={
+                    activeMembersLoading ? 'Loading IGNs…' : '— Select your IGN —'
+                  }
+                  emptyMessage={
+                    activeMembersForJoin.length - filteredJoinQueueMembers.length > 0 &&
+                    activeMembersForJoin.length > 0
+                      ? 'Every registered IGN is already in this or another active queue.'
+                      : 'No registered IGNs. Please register on the Bidders page first.'
+                  }
+                />
+                {activeMembersError && (
+                  <p className="text-[11px] font-bold text-rose-300">
+                    {activeMembersError}
+                  </p>
+                )}
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] font-mono ml-1">
@@ -3757,7 +3795,7 @@ function ShuffleNameReel({
   );
 }
 
-function QueueCard({
+function QueueCardBase({
   item,
   members,
   rewardRank,
@@ -3807,7 +3845,7 @@ function QueueCard({
   /** Member highlighted as the free-draw pick (set only after “Shuffle draw free”). */
   freeDrawChosenMemberId?: number | null;
   onOpenAddName: (itemId: string) => void;
-  onRemoveFromQueue: (memberId: number) => void | Promise<void>;
+  onRemoveFromQueue: (itemId: string, memberId: number) => void | Promise<void>;
   onMoveQueueMember: (p: QueueMovePayload) => void;
   onComplete: (id: string, winner: string | null) => void;
   /** Show mark/unmark controls on loser rows after shuffle (login on click). */
@@ -4274,7 +4312,7 @@ function QueueCard({
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            void onRemoveFromQueue(mid);
+                            void onRemoveFromQueue(item.id, mid);
                           }}
                           title="Remove from this queue only (Officer/Admin/Developer)"
                           aria-label={`Remove ${m.name} from ${displayAuctionItemName(item.name)}`}
@@ -4403,6 +4441,15 @@ function QueueCard({
     </motion.div>
   );
 }
+
+/**
+ * Memoized so the 20s shuffle-reveal animation loop — which commits a state
+ * update on the parent every ~42ms — doesn't force every card to re-render
+ * every tick; only cards whose actual shuffle/queue props changed do. The
+ * caller passes stable (`useCallback`-wrapped) handlers so this bails
+ * correctly instead of always seeing new function props.
+ */
+const QueueCard = React.memo(QueueCardBase);
 
 function Modal({ title, children, onClose }: { title: string, children: React.ReactNode, onClose: () => void }) {
   return (

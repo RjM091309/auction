@@ -175,6 +175,13 @@ export async function backfillWeeklyWinsFromRecordedWinners(q, items, wins, winM
   const winKeyLocal = (ign, t, itemId, mode) => `${ign}\0${t}\0${itemId ?? ''}\0${mode ?? ''}`;
   const seen = new Set(out.map((w) => winKeyLocal(w.ign, w.t, w.itemId, w.mode)));
 
+  // Collect the (item, ign) pairs that actually need a lookup first, instead
+  // of querying `winner_mark_log` once per recorded-winner name — this ran
+  // inside `getFullState()`, on every 2s poll, for every not-yet-backfilled
+  // winner (the result isn't persisted by a plain GET), so a burst of newly
+  // marked winners turned into that many sequential queries on every tick
+  // until the next save.
+  const pending = [];
   for (const it of items) {
     if (!isEmperiumCooldownItem(it)) continue;
     const arr = it.recordedWinnerNames;
@@ -185,21 +192,33 @@ export async function backfillWeeklyWinsFromRecordedWinners(q, items, wins, winM
       if (!ign) continue;
       const k = winKeyLocal(ign, it.type, it.id, winMode);
       if (seen.has(k)) continue;
-
-      const [rows] = await q.query(
-        `SELECT at_ms FROM winner_mark_log
-         WHERE item_id = ? AND LOWER(TRIM(ign)) = ?
-         ORDER BY at_ms DESC LIMIT 1`,
-        [it.id, ign]
-      );
-      const atRaw = rows[0]?.at_ms;
-      const at = atRaw != null ? Number(atRaw) : NaN;
-      if (!Number.isFinite(at) || at <= 0) continue;
-      seen.add(k);
-      const row = { ign, t: it.type, itemId: it.id, at };
-      if (winMode === GUILD_LEAGUE_WIN_MODE) row.mode = GUILD_LEAGUE_WIN_MODE;
-      out.push(row);
+      pending.push({ itemId: it.id, type: it.type, ign, key: k });
     }
+  }
+  if (pending.length === 0) return out;
+
+  const itemIds = [...new Set(pending.map((p) => p.itemId))];
+  const placeholders = itemIds.map(() => '?').join(', ');
+  const [rows] = await q.query(
+    `SELECT item_id AS itemId, ign, at_ms AS atMs FROM winner_mark_log
+     WHERE item_id IN (${placeholders})
+     ORDER BY at_ms DESC, id DESC`,
+    itemIds
+  );
+  const latestByItemIgn = new Map();
+  for (const row of rows) {
+    const rowKey = `${row.itemId}\0${normalizeIgn(row.ign)}`;
+    if (!latestByItemIgn.has(rowKey)) latestByItemIgn.set(rowKey, row.atMs);
+  }
+
+  for (const p of pending) {
+    const atRaw = latestByItemIgn.get(`${p.itemId}\0${p.ign}`);
+    const at = atRaw != null ? Number(atRaw) : NaN;
+    if (!Number.isFinite(at) || at <= 0) continue;
+    seen.add(p.key);
+    const row = { ign: p.ign, t: p.type, itemId: p.itemId, at };
+    if (winMode === GUILD_LEAGUE_WIN_MODE) row.mode = GUILD_LEAGUE_WIN_MODE;
+    out.push(row);
   }
   return out;
 }

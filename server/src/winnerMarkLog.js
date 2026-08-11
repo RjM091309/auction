@@ -68,13 +68,15 @@ export async function loadWinnerMarkLog(q) {
  */
 export async function appendWinnerMarkLog(conn, newEntries) {
   if (!Array.isArray(newEntries) || newEntries.length === 0) return;
-  for (const e of newEntries) {
-    await conn.query(
-      `INSERT INTO winner_mark_log (at_ms, logged_at, ign, item_id, item_name, item_type)
-       VALUES (?, FROM_UNIXTIME(? / 1000.0), ?, ?, ?, ?)`,
-      [e.at, e.at, e.ign, e.itemId, e.itemName, e.itemType]
-    );
-  }
+  // Batched into one INSERT — see appendBidderStateLog for why (same
+  // per-row-query pattern, same shuffle-lock hot path).
+  const rowSql = newEntries.map(() => '(?, FROM_UNIXTIME(? / 1000.0), ?, ?, ?, ?)').join(', ');
+  const params = newEntries.flatMap((e) => [e.at, e.at, e.ign, e.itemId, e.itemName, e.itemType]);
+  await conn.query(
+    `INSERT INTO winner_mark_log (at_ms, logged_at, ign, item_id, item_name, item_type)
+     VALUES ${rowSql}`,
+    params
+  );
   await trimWinnerMarkLog(conn);
 }
 

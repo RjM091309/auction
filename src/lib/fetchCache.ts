@@ -5,11 +5,6 @@ type CacheEntry<T> = {
 
 const store = new Map<string, CacheEntry<unknown>>();
 
-export function readFetchCache<T>(key: string): T | null {
-  const hit = store.get(key);
-  return hit ? (hit.data as T) : null;
-}
-
 export function writeFetchCache<T>(key: string, data: T): void {
   store.set(key, { data, fetchedAt: Date.now() });
 }

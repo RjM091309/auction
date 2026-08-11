@@ -18,6 +18,7 @@ import {
 } from './emperiumWinCooldown.js';
 import {
   GUILD_LEAGUE_WIN_MODE,
+  isGuildLeagueWinCooldownEnabled,
   pruneWeeklyTypeWins,
 } from './guildLeagueWinCooldown.js';
 import { findPuppetWinCooldown } from './puppetCardCdDisplay.js';
@@ -83,6 +84,7 @@ function parseEventMode(raw) {
 function sanitizeRewardRank(v) {
   const s = typeof v === 'string' ? v : String(v ?? '');
   if (s === 'Emperium overrun') return 'Emperium overrun';
+  if (s === 'The Chosen One') return 'The Chosen One';
   if (s === 'Platinum') return 'Platinum';
   if (s === 'Gold') return 'Gold';
   if (s === 'Silver') return 'Silver';
@@ -109,6 +111,7 @@ function parseRewardItemCounts(raw, rankHint) {
         : toInt(j.lnd, 30) + toInt(j.tns, 50);
     const inferredRank =
       rankHint === 'Emperium overrun' ||
+      rankHint === 'The Chosen One' ||
       rankHint === 'Bronze' ||
       rankHint === 'Silver' ||
       rankHint === 'Gold' ||
@@ -116,24 +119,28 @@ function parseRewardItemCounts(raw, rankHint) {
         ? rankHint
         : feathersTotal >= 200
           ? 'Emperium overrun'
-          : feathersTotal >= 120
-            ? 'Platinum'
-            : feathersTotal >= 105
-              ? 'Gold'
-              : feathersTotal >= 90
-                ? 'Silver'
-                : 'Bronze';
+          : feathersTotal >= 150
+            ? 'The Chosen One'
+            : feathersTotal >= 120
+              ? 'Platinum'
+              : feathersTotal >= 105
+                ? 'Gold'
+                : feathersTotal >= 90
+                  ? 'Silver'
+                  : 'Bronze';
     const feathersItemsPerWinner = toInt(
       j.feathersItemsPerWinner,
       inferredRank === 'Emperium overrun'
         ? 13
-        : inferredRank === 'Platinum'
-          ? 12
-          : inferredRank === 'Gold'
-            ? 10
-            : inferredRank === 'Silver'
-              ? 9
-              : 8
+        : inferredRank === 'The Chosen One'
+          ? 18
+          : inferredRank === 'Platinum'
+            ? 12
+            : inferredRank === 'Gold'
+              ? 10
+              : inferredRank === 'Silver'
+                ? 9
+                : 8
     );
     let fragmentByItemId;
     if (j.fragmentByItemId && typeof j.fragmentByItemId === 'object' && !Array.isArray(j.fragmentByItemId)) {
@@ -316,7 +323,7 @@ function shouldApplyEmperiumWinnerCooldown(body, saveEventMode) {
 
 function shouldApplyGuildLeagueWinnerCooldown(body, saveEventMode) {
   if (body?.applyWinnerCooldown === false) return false;
-  return saveEventMode === 'Guild League';
+  return isGuildLeagueWinCooldownEnabled(saveEventMode);
 }
 
 function shouldApplyWinnerCooldown(body, saveEventMode) {
@@ -423,27 +430,86 @@ export async function setWinnerLimits(pool, { rewardRank, rewardItemCounts }) {
   return getFullState(pool);
 }
 
+// In-memory cache for the read-only polling path (`GET /api/state`). Every
+// open dashboard tab polls that endpoint every 2s with no server-side
+// sharing, so N concurrent users used to mean N independent ~14-query
+// `getFullState()` runs fighting over the small MySQL pool every tick —
+// the actual source of "laggy pag maraming gumagamit". `getFullState`
+// itself stays uncached (every write path calls it and must see its own
+// write immediately); `getFullStateCached` sits in front of it just for
+// polling and coalesces concurrent misses into a single DB round trip.
+const STATE_CACHE_TTL_MS = 1200;
+let stateCache = null; // { data, at }
+let stateCacheInFlight = null;
+
+export async function getFullStateCached(pool) {
+  const now = Date.now();
+  if (stateCache && now - stateCache.at < STATE_CACHE_TTL_MS) {
+    return stateCache.data;
+  }
+  if (stateCacheInFlight) return stateCacheInFlight;
+  stateCacheInFlight = getFullState(pool)
+    .then((data) => {
+      stateCacheInFlight = null;
+      return data;
+    })
+    .catch((e) => {
+      stateCacheInFlight = null;
+      throw e;
+    });
+  return stateCacheInFlight;
+}
+
 export async function getFullState(pool) {
   await rolloverWeeklyWinsIfNewWeek(pool);
 
-  const [members] = await pool.query(
-    'SELECT id, name, role FROM members WHERE active = 1 ORDER BY name'
-  );
-
-  const [itemRows] = await pool.query(
-    `SELECT id, name, type, winner_pool_cap AS winnerPoolCap, winner_name AS winnerName, winner_names_json AS winnerNamesJson, revoked_winner_names_json AS revokedWinnerNamesJson, status, created_at AS createdAt
-     FROM auction_items
-     ORDER BY created_at ASC`
-  );
-
-  // Only queue rows whose member is active (avoids invisible UI rows when
-  // item_queue still references inactive or missing roster rows).
-  const [queueRows] = await pool.query(
-    `SELECT iq.item_id AS itemId, iq.member_id AS memberId, iq.position
-     FROM item_queue iq
-     INNER JOIN members m ON m.id = iq.member_id AND m.active = 1
-     ORDER BY iq.item_id, iq.position`
-  );
+  // All of these reads are independent of one another (none depends on the
+  // result of another query below) so they run concurrently instead of
+  // paying one network round trip each in series — this is the dominant
+  // cost of building full state and was the main source of "join queue"
+  // lag, since it happens twice per join (validate + return).
+  const [
+    [members],
+    [itemRows],
+    [queueRows],
+    [metaRows],
+    [shortlistMeta],
+    [shuffleLockRows],
+    [eventRows],
+    weeklyTypeWinsRaw,
+    winnerMarkLog,
+    bidderStateLog,
+    [rankRows],
+    [countRows],
+    [freeDrawMeta],
+    [shuffleSlotsMeta],
+  ] = await Promise.all([
+    pool.query('SELECT id, name, role FROM members WHERE active = 1 ORDER BY name'),
+    pool.query(
+      `SELECT id, name, type, winner_pool_cap AS winnerPoolCap, winner_name AS winnerName, winner_names_json AS winnerNamesJson, revoked_winner_names_json AS revokedWinnerNamesJson, status, created_at AS createdAt
+       FROM auction_items
+       ORDER BY created_at ASC`
+    ),
+    // Only queue rows whose member is active (avoids invisible UI rows when
+    // item_queue still references inactive or missing roster rows).
+    pool.query(
+      `SELECT iq.item_id AS itemId, iq.member_id AS memberId, iq.position
+       FROM item_queue iq
+       INNER JOIN members m ON m.id = iq.member_id AND m.active = 1
+       ORDER BY iq.item_id, iq.position`
+    ),
+    pool.query("SELECT value FROM app_meta WHERE `key` = 'data_version' LIMIT 1"),
+    pool.query("SELECT value FROM app_meta WHERE `key` = 'winner_shortlist_ui' LIMIT 1"),
+    pool.query("SELECT value FROM app_meta WHERE `key` = 'shuffle_locked' LIMIT 1"),
+    pool.query('SELECT value FROM app_meta WHERE `key` = ? LIMIT 1', [EVENT_MODE_META_KEY]),
+    loadWeeklyTypeWins(pool),
+    loadWinnerMarkLog(pool),
+    loadBidderStateLog(pool),
+    pool.query('SELECT value FROM app_meta WHERE `key` = ? LIMIT 1', [REWARD_RANK_META_KEY]),
+    pool.query('SELECT value FROM app_meta WHERE `key` = ? LIMIT 1', [REWARD_ITEM_COUNTS_META_KEY]),
+    pool.query('SELECT value FROM app_meta WHERE `key` = ? LIMIT 1', [FREE_DRAW_CHOSEN_META_KEY]),
+    pool.query('SELECT value FROM app_meta WHERE `key` = ? LIMIT 1', [SHUFFLE_WINNER_SLOTS_META_KEY]),
+  ]);
 
   const queueByItem = new Map();
   for (const q of queueRows) {
@@ -472,9 +538,6 @@ export async function getFullState(pool) {
   });
 
   let dataVersion = DATA_VERSION;
-  const [metaRows] = await pool.query(
-    "SELECT value FROM app_meta WHERE `key` = 'data_version' LIMIT 1"
-  );
   if (metaRows[0]?.value != null) {
     const v = parseInt(String(metaRows[0].value), 10);
     if (!Number.isNaN(v)) dataVersion = v;
@@ -482,24 +545,14 @@ export async function getFullState(pool) {
 
   /** Walang row = bagong / na-reset na DB — walang shortlist chrome hanggang mag-Shuffle (nagsusulat ng '1'). */
   let winnerShortlistUiEnabled = false;
-  const [shortlistMeta] = await pool.query(
-    "SELECT value FROM app_meta WHERE `key` = 'winner_shortlist_ui' LIMIT 1"
-  );
   if (shortlistMeta[0]?.value === '1') winnerShortlistUiEnabled = true;
 
   let shuffleLocked = false;
-  const [shuffleLockRows] = await pool.query(
-    "SELECT value FROM app_meta WHERE `key` = 'shuffle_locked' LIMIT 1"
-  );
   if (shuffleLockRows[0]?.value === '1') shuffleLocked = true;
 
-  const [eventRows] = await pool.query(
-    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
-    [EVENT_MODE_META_KEY]
-  );
   const eventMode = parseEventMode(eventRows[0]?.value);
 
-  let weeklyTypeWins = pruneWeeklyTypeWins(await loadWeeklyTypeWins(pool));
+  let weeklyTypeWins = pruneWeeklyTypeWins(weeklyTypeWinsRaw);
   if (isEmperiumWinCooldownEnabled(eventMode)) {
     weeklyTypeWins = await backfillWeeklyWinsFromRecordedWinners(
       pool,
@@ -533,29 +586,10 @@ export async function getFullState(pool) {
     );
     weeklyTypeWins = pruneWeeklyTypeWins(weeklyTypeWins);
   }
-  const winnerMarkLog = await loadWinnerMarkLog(pool);
-  const bidderStateLog = await loadBidderStateLog(pool);
-  const [rankRows] = await pool.query(
-    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
-    [REWARD_RANK_META_KEY]
-  );
   const rewardRank = parseRewardRank(rankRows[0]?.value);
-  const [countRows] = await pool.query(
-    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
-    [REWARD_ITEM_COUNTS_META_KEY]
-  );
   const rewardItemCounts = parseRewardItemCounts(countRows[0]?.value, rewardRank);
-
-  const [freeDrawMeta] = await pool.query(
-    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
-    [FREE_DRAW_CHOSEN_META_KEY]
-  );
   const freeDrawChosenByItemId = parseFreeDrawChosenByItemJson(freeDrawMeta[0]?.value);
 
-  const [shuffleSlotsMeta] = await pool.query(
-    'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',
-    [SHUFFLE_WINNER_SLOTS_META_KEY]
-  );
   let shuffleWinnerSlotsByItemId = parseShuffleWinnerSlotsByItemJson(
     shuffleSlotsMeta[0]?.value
   );
@@ -578,7 +612,7 @@ export async function getFullState(pool) {
     }
   }
 
-  return stripEmperiumCardQueuesAfterFragmentWeeklyWin({
+  const result = stripEmperiumCardQueuesAfterFragmentWeeklyWin({
     items,
     members: members.map((m) => ({
       id: Number(m.id),
@@ -599,6 +633,11 @@ export async function getFullState(pool) {
       ? { shuffleWinnerSlotsByItemId }
       : {}),
   });
+  // Prime the polling cache with every fresh read, including the ones taken
+  // right after a write — so other users' next poll picks up the change
+  // immediately instead of waiting out the full cache TTL.
+  stateCache = { data: result, at: Date.now() };
+  return result;
 }
 
 /** Find active roster row by IGN (fuzzy) or create one. */
@@ -1580,24 +1619,34 @@ export async function replaceFullState(pool, body) {
     // used to silently flip `active=0` for any member it had not yet seen
     // (e.g. an admin just created from the Bidders tab) — that race is gone.
 
-    for (const it of body.items) {
+    // Bulk-insert both tables (one round trip each) instead of one query per
+    // item / per queue row — this block runs unconditionally on every save
+    // (the tables were just wiped above), so with N items and busy queues
+    // the old per-row loop meant N + total-queue-length sequential round
+    // trips on every single PUT /api/state.
+    if (body.items.length > 0) {
+      const itemRows = body.items.map((it) => [
+        it.id,
+        it.name,
+        it.type,
+        it.winnerPoolCap != null && Number.isFinite(Number(it.winnerPoolCap))
+          ? Math.max(0, Math.floor(Number(it.winnerPoolCap)))
+          : null,
+        it.winnerName ?? null,
+        serializeWinnerNamesJson(it.recordedWinnerNames),
+        serializeWinnerNamesJson(it.revokedWinnerNames),
+        it.status,
+        Number(it.createdAt) || Date.now(),
+      ]);
       await conn.query(
         `INSERT INTO auction_items (id, name, type, winner_pool_cap, winner_name, winner_names_json, revoked_winner_names_json, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          it.id,
-          it.name,
-          it.type,
-          it.winnerPoolCap != null && Number.isFinite(Number(it.winnerPoolCap))
-            ? Math.max(0, Math.floor(Number(it.winnerPoolCap)))
-            : null,
-          it.winnerName ?? null,
-          serializeWinnerNamesJson(it.recordedWinnerNames),
-          serializeWinnerNamesJson(it.revokedWinnerNames),
-          it.status,
-          Number(it.createdAt) || Date.now(),
-        ]
+         VALUES ?`,
+        [itemRows]
       );
+    }
+
+    const queueRows = [];
+    for (const it of body.items) {
       const ids = Array.isArray(it.interestedMemberIds)
         ? it.interestedMemberIds
         : [];
@@ -1605,12 +1654,15 @@ export async function replaceFullState(pool, body) {
       for (const memberId of ids) {
         const resolved = resolveQueueMemberId(memberId, idRemap, existingMemberIds);
         if (resolved == null || resolved <= 0) continue;
-        await conn.query(
-          'INSERT INTO item_queue (item_id, member_id, position) VALUES (?, ?, ?)',
-          [it.id, resolved, pos]
-        );
+        queueRows.push([it.id, resolved, pos]);
         pos += 1;
       }
+    }
+    if (queueRows.length > 0) {
+      await conn.query(
+        'INSERT INTO item_queue (item_id, member_id, position) VALUES ?',
+        [queueRows]
+      );
     }
 
     await conn.query(

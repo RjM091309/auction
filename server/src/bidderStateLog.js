@@ -76,27 +76,35 @@ export async function loadBidderStateLog(q) {
  */
 export async function appendBidderStateLog(conn, entries) {
   if (!Array.isArray(entries) || entries.length === 0) return;
-  for (const e of entries) {
-    await conn.query(
-      `INSERT INTO bidder_state_log (
-         at_ms, logged_at, member_id, ign, item_id, item_name, item_type, state,
-         pool_cap, queue_position, shuffle_batch_at_ms
-       ) VALUES (?, FROM_UNIXTIME(? / 1000.0), ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        e.at,
-        e.at,
-        e.memberId != null && e.memberId > 0 ? e.memberId : null,
-        e.ign,
-        e.itemId,
-        e.itemName,
-        e.itemType,
-        e.state,
-        e.poolCap != null ? e.poolCap : null,
-        e.queuePosition != null ? e.queuePosition : null,
-        e.shuffleBatchAtMs != null ? e.shuffleBatchAtMs : null,
-      ]
-    );
-  }
+  // One INSERT for the whole batch instead of one per row — a shuffle lock
+  // writes one row per queued member across every active item (easily 30-100+
+  // rows), and this used to be that many sequential round trips right at the
+  // moment the 20s shuffle animation finishes and the result gets saved.
+  // `VALUES ?` bulk syntax can't carry a raw FROM_UNIXTIME(...) expression
+  // per row, so the row groups are built by hand instead.
+  const rowSql = entries
+    .map(() => '(?, FROM_UNIXTIME(? / 1000.0), ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .join(', ');
+  const params = entries.flatMap((e) => [
+    e.at,
+    e.at,
+    e.memberId != null && e.memberId > 0 ? e.memberId : null,
+    e.ign,
+    e.itemId,
+    e.itemName,
+    e.itemType,
+    e.state,
+    e.poolCap != null ? e.poolCap : null,
+    e.queuePosition != null ? e.queuePosition : null,
+    e.shuffleBatchAtMs != null ? e.shuffleBatchAtMs : null,
+  ]);
+  await conn.query(
+    `INSERT INTO bidder_state_log (
+       at_ms, logged_at, member_id, ign, item_id, item_name, item_type, state,
+       pool_cap, queue_position, shuffle_batch_at_ms
+     ) VALUES ${rowSql}`,
+    params
+  );
   await trimBidderStateLog(conn);
 }
 
