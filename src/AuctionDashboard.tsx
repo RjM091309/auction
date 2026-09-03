@@ -1177,6 +1177,35 @@ export default function AuctionDashboard() {
       return;
     }
 
+    // Build the exact state the lock will persist, normalized the SAME way the
+    // post-save and idle-poll paths normalize it (orphan prune + winner-cap /
+    // reward recompute), then drive the reel, the winner-slot counts, and the
+    // optimistic render all from this one object. Without this the animation
+    // shows the raw server preview while the saved / re-fetched state is
+    // normalized, so the result visibly "jumps" a moment after it lands.
+    const lockedBaseState = normalizeWinnerPoolCapsForLimits(
+      dedupeIgnAcrossActiveQueues(
+        pruneOrphanQueueMembers({
+          ...snapshot,
+          shuffleLocked: true,
+          items: snapshot.items.map((item) => {
+            if (item.status !== 'active') return item;
+            if (isAuctionItemHidden(item, snapshot.eventMode)) return item;
+            const preview = previewQueueByItemId[item.id];
+            return preview ? { ...item, interestedMemberIds: preview } : item;
+          }),
+        })
+      )
+    );
+    const normalizedPreviewByItemId: Record<string, number[]> = {};
+    for (const it of lockedBaseState.items) {
+      if (it.status !== 'active') continue;
+      if (isAuctionItemHidden(it, lockedBaseState.eventMode)) continue;
+      normalizedPreviewByItemId[it.id] = it.interestedMemberIds;
+    }
+    previewQueueByItemId = normalizedPreviewByItemId;
+    const shuffleRewardEffective = resolveEffectiveRewardContext(lockedBaseState);
+
     setShuffleUi({
       active: true,
       spinOffsetByItemId: {},
@@ -1220,7 +1249,7 @@ export default function AuctionDashboard() {
       const spinPhaseByItemId: Record<string, number> = {};
       const revealCountByItemId: Record<string, number> = {};
       for (const itemId of activeItemIds) {
-        const item = snapshot.items.find((it) => it.id === itemId);
+        const item = lockedBaseState.items.find((it) => it.id === itemId);
         const previewIds = previewQueueByItemId[itemId] ?? [];
         const len = previewIds.length;
         if (len <= 0) continue;
@@ -1229,8 +1258,8 @@ export default function AuctionDashboard() {
           item
             ? displayWinnerPoolCapForItem(
                 item,
-                shuffleReward.rank,
-                shuffleReward.counts
+                shuffleRewardEffective.rank,
+                shuffleRewardEffective.counts
               )
             : 0
         );
@@ -1311,22 +1340,28 @@ export default function AuctionDashboard() {
         return;
       }
       const shuffleWinnerSlotsByItemId: Record<string, number> = {};
-      for (const it of activeItemsForShuffle) {
+      for (const it of lockedBaseState.items) {
+        if (it.status !== 'active') continue;
+        if (isAuctionItemHidden(it, lockedBaseState.eventMode)) continue;
         shuffleWinnerSlotsByItemId[it.id] = displayWinnerPoolCapForItem(
           it,
-          shuffleReward.rank,
-          shuffleReward.counts
+          shuffleRewardEffective.rank,
+          shuffleRewardEffective.counts
         );
       }
+      // Persist (and render) the SAME normalized state the reel just showed —
+      // `lockedBaseState` already ran through the prune + cap-normalize
+      // pipeline, so the first on-screen result and the re-fetched state match.
       const nextOptimistic: AuctionState = {
         ...prevState,
+        ...lockedBaseState,
         shuffleLocked: true,
         winnerShortlistUiEnabled: true,
         freeDrawChosenByItemId: {},
         shuffleWinnerSlotsByItemId,
-        items: prevState.items.map((item) => {
+        items: lockedBaseState.items.map((item) => {
           if (item.status !== 'active') return item;
-          if (isAuctionItemHidden(item, prevState.eventMode)) return item;
+          if (isAuctionItemHidden(item, lockedBaseState.eventMode)) return item;
           const preview = previewQueueByItemId[item.id];
           return {
             ...item,
