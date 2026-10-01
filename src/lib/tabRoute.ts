@@ -2,20 +2,22 @@
  * Map between the dashboard tab and the browser URL pathname.
  *
  *   /              → 'dashboard'    (Queues)
- *   /logs          → 'history'      (Logs)
  *   /bidders       → 'bidders'      (Bidder Registration — admin)
- *   /card-cd       → 'cardCd'       (On CD list — public, no login)
+ *   (Logs `/logs` and On CD `/card-cd` are hidden for now; those paths
+ *    redirect to `/`. Their sections/components are kept for re-enabling.)
+ *   /tournament    → 'tournament'   (3v3 double-elim brackets — public view)
  *   GET /api/card-cd → lightweight on-CD rows (server-computed)
  *   /registration  → public sign-up page (separate top-level route)
  */
 
-export type DashboardTab = 'dashboard' | 'history' | 'bidders' | 'cardCd';
+export type DashboardTab = 'dashboard' | 'history' | 'bidders' | 'cardCd' | 'tournament';
 
 const PATH_BY_TAB: Record<DashboardTab, string> = {
   dashboard: '/',
   history: '/logs',
   bidders: '/bidders',
   cardCd: '/card-cd',
+  tournament: '/tournament',
 };
 
 export const PUBLIC_REGISTRATION_PATH = '/registration';
@@ -31,9 +33,8 @@ export function pathForTab(tab: DashboardTab): string {
 
 export function tabFromPath(pathname: string): DashboardTab {
   const clean = normalizePath(pathname);
-  if (clean === '/logs') return 'history';
   if (clean === '/bidders') return 'bidders';
-  if (clean === '/card-cd') return 'cardCd';
+  if (clean === '/tournament') return 'tournament';
   return 'dashboard';
 }
 
@@ -42,9 +43,8 @@ export function isKnownTabPath(pathname: string): boolean {
   const clean = normalizePath(pathname);
   return (
     clean === '/' ||
-    clean === '/logs' ||
     clean === '/bidders' ||
-    clean === '/card-cd'
+    clean === '/tournament'
   );
 }
 

@@ -16,6 +16,7 @@ import {
   migrateBidderAuditLogTable,
   migrateMembersIntPk,
   migrateOverrunRewardsRunsTable,
+  migrateTournamentTables,
   migrateDefaultAuctionItems,
   migrateIllusionFragCardDisplayOrder,
   seedIfEmpty,
@@ -71,6 +72,19 @@ import { getAuctionWeekTimezone } from './auctionWeek.js';
 import { pinShuffleQueueItems } from './sureWinPin.js';
 import { shuffleIds } from './shuffleRandom.js';
 import { getOnCdList, listBiddersWithCardCd } from './cardCdApi.js';
+import {
+  listTournaments,
+  getTournament,
+  createTournament,
+  deleteTournament,
+  registerPlayer,
+  removePlayer,
+  adminShuffle,
+  reopenRegistration,
+  adjustMatchScore,
+  renameTeam,
+  setMatchLive,
+} from './tournaments.js';
 
 const PORT = Number(process.env.PORT ?? 3333);
 
@@ -934,6 +948,180 @@ app.get('/api/admin/overrun/runs', requireAuth, async (req, res) => {
   }
 });
 
+/* --------------------------------------------------------------------------
+ * Tournament brackets (3v3 double elimination). Reads are public; signup
+ * needs the member's own IGN + password; everything else needs a privileged
+ * Bidders-tab session (Bearer). See `tournaments.js`.
+ * ----------------------------------------------------------------------- */
+
+function sendError(res, e) {
+  const code = e.statusCode ?? 500;
+  if (code >= 500) console.error(e);
+  res.status(code).json({ error: String(e.message ?? 'Error') });
+}
+
+/** Resolve the privileged actor or answer 401/403 and return null. */
+async function requireTournamentAdmin(req, res, roles = null) {
+  const actor = await getFreshActor(pool, bearerToken(req));
+  if (!actor) {
+    res.status(401).json({ error: 'Sign in as Officer, Admin, or Developer to manage tournaments' });
+    return null;
+  }
+  if (roles && !roles.includes(actor.role)) {
+    res.status(403).json({ error: `This action requires ${roles.join(' or ')}` });
+    return null;
+  }
+  return actor;
+}
+
+app.get('/api/tournaments', async (_req, res) => {
+  try {
+    res.json({ tournaments: await listTournaments(pool) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.get('/api/tournaments/:id', async (req, res) => {
+  try {
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.post('/api/public/tournaments/:id/register', async (req, res) => {
+  try {
+    const member = await verifyMemberCredentials(pool, req.body, { ip: clientIp(req) });
+    const { started } = await registerPlayer(pool, req.params.id, member);
+    console.log(
+      `[audit] tournament register id=${req.params.id} member=${member.id} name="${member.name}" started=${started ? 1 : 0} ip=${clientIp(req)}`
+    );
+    res.json({ started, tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.post('/api/public/tournaments/:id/withdraw', async (req, res) => {
+  try {
+    const member = await verifyMemberCredentials(pool, req.body, { ip: clientIp(req) });
+    await removePlayer(pool, req.params.id, member.id);
+    console.log(
+      `[audit] tournament withdraw id=${req.params.id} member=${member.id} name="${member.name}" ip=${clientIp(req)}`
+    );
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.post('/api/tournaments', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res);
+    if (!actor) return;
+    const tournament = await createTournament(pool, req.body, actor);
+    console.log(
+      `[audit] tournament create id=${tournament.id} name="${tournament.name}" max=${tournament.maxPlayers} by=${actor.name} ip=${clientIp(req)}`
+    );
+    res.status(201).json({ tournament });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.delete('/api/tournaments/:id', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res, ['Admin', 'Developer']);
+    if (!actor) return;
+    await deleteTournament(pool, req.params.id);
+    console.log(`[audit] tournament delete id=${req.params.id} by=${actor.name} ip=${clientIp(req)}`);
+    res.json({ ok: true });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.delete('/api/tournaments/:id/players/:memberId', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res);
+    if (!actor) return;
+    await removePlayer(pool, req.params.id, req.params.memberId);
+    console.log(
+      `[audit] tournament remove-player id=${req.params.id} member=${req.params.memberId} by=${actor.name} ip=${clientIp(req)}`
+    );
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.post('/api/tournaments/:id/shuffle', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res);
+    if (!actor) return;
+    await adminShuffle(pool, req.params.id);
+    console.log(`[audit] tournament shuffle id=${req.params.id} by=${actor.name} ip=${clientIp(req)}`);
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.post('/api/tournaments/:id/reopen', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res, ['Admin', 'Developer']);
+    if (!actor) return;
+    await reopenRegistration(pool, req.params.id);
+    console.log(`[audit] tournament reopen id=${req.params.id} by=${actor.name} ip=${clientIp(req)}`);
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.post('/api/tournaments/:id/matches/:matchId', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res);
+    if (!actor) return;
+    const teamId = req.body?.teamId;
+    const delta = req.body?.delta;
+    await adjustMatchScore(pool, req.params.id, req.params.matchId, teamId, delta);
+    console.log(
+      `[audit] tournament score id=${req.params.id} match=${req.params.matchId} team=${teamId} delta=${delta} by=${actor.name} ip=${clientIp(req)}`
+    );
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.post('/api/tournaments/:id/matches/:matchId/live', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res);
+    if (!actor) return;
+    const live = req.body?.live !== false;
+    await setMatchLive(pool, req.params.id, req.params.matchId, live);
+    console.log(
+      `[audit] tournament match-${live ? 'start' : 'stop'} id=${req.params.id} match=${req.params.matchId} by=${actor.name} ip=${clientIp(req)}`
+    );
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.put('/api/tournaments/:id/teams/:teamId', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res);
+    if (!actor) return;
+    await renameTeam(pool, req.params.id, req.params.teamId, req.body?.name);
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 async function main() {
   await verifyMysqlConnection(pool);
   await initSchema(pool);
@@ -949,6 +1137,7 @@ async function main() {
   await migrateBidderAuditLogTable(pool);
   await migrateMembersIntPk(pool);
   await migrateOverrunRewardsRunsTable(pool);
+  await migrateTournamentTables(pool);
   await seedIfEmpty(pool);
   await migrateDefaultAuctionItems(pool);
   await migrateIllusionFragCardDisplayOrder(pool);

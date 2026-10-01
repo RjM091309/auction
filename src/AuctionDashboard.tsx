@@ -6,7 +6,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   ClipboardList,
-  History,
   Trash2,
   Check,
   Clock,
@@ -175,6 +174,7 @@ import { BidderRankingExpandableRows } from './components/BidderRankingExpandabl
 import BidderAuditLogSection from './components/BidderAuditLogSection';
 import BidderRegistration from './BidderRegistration';
 import CardCdSection from './CardCdSection';
+import TournamentSection from './TournamentSection';
 import BidderAuthModal from './BidderAuthModal';
 import { NameDropdown } from './BidderAuthGate';
 import {
@@ -790,7 +790,8 @@ export default function AuctionDashboard() {
       if (!mayPersist.current) return;
       // Bidder Registration tab has its own data source (`/api/bidders`); polling
       // the full auction state here just churns CPU on the parent component.
-      if (activeTabRef.current === 'bidders' || activeTabRef.current === 'cardCd')
+      if (activeTabRef.current === 'bidders' || activeTabRef.current === 'cardCd' ||
+        activeTabRef.current === 'tournament')
         return;
       if (shuffleRunningRef.current) return;
       if (
@@ -2693,7 +2694,9 @@ export default function AuctionDashboard() {
         ? 'Logs'
         : activeTab === 'cardCd'
           ? 'On CD'
-          : 'Bidders';
+          : activeTab === 'tournament'
+            ? 'Tournament'
+            : 'Bidders';
 
   const queueAdminToolbar =
     visibleActiveAuctions.length > 0 ? (
@@ -2859,19 +2862,11 @@ export default function AuctionDashboard() {
               </button>
               <button
                 type="button"
-                onClick={() => setActiveTab('history')}
-                className={navTabClass('history', 'blue')}
+                onClick={() => setActiveTab('tournament')}
+                className={navTabClass('tournament', 'amber')}
               >
-                <History className="h-4 w-4 shrink-0" aria-hidden />
-                Logs
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('cardCd')}
-                className={navTabClass('cardCd', 'amber')}
-              >
-                <Clock className="h-4 w-4 shrink-0" aria-hidden />
-                On CD
+                <Trophy className="h-4 w-4 shrink-0" aria-hidden />
+                Tournament
               </button>
               <button
                 type="button"
@@ -2957,19 +2952,11 @@ export default function AuctionDashboard() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => selectTab('history')}
-                  className={navTabClass('history', 'blue', true)}
+                  onClick={() => selectTab('tournament')}
+                  className={navTabClass('tournament', 'amber', true)}
                 >
-                  <History className="h-4 w-4 shrink-0" aria-hidden />
-                  Logs
-                </button>
-                <button
-                  type="button"
-                  onClick={() => selectTab('cardCd')}
-                  className={navTabClass('cardCd', 'amber', true)}
-                >
-                  <Clock className="h-4 w-4 shrink-0" aria-hidden />
-                  On CD
+                  <Trophy className="h-4 w-4 shrink-0" aria-hidden />
+                  Tournament
                 </button>
                 <button
                   type="button"
@@ -3305,6 +3292,16 @@ export default function AuctionDashboard() {
               className="space-y-8"
             >
               <CardCdSection />
+            </div>
+          )}
+
+          {visitedTabs.has('tournament') && (
+            <div
+              key="tournament"
+              hidden={activeTab !== 'tournament'}
+              className="space-y-8"
+            >
+              <TournamentSection active={activeTab === 'tournament'} />
             </div>
           )}
         </div>

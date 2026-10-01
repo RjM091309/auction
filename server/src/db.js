@@ -562,3 +562,56 @@ export async function migrateOverrunRewardsRunsTable(pool) {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 }
+
+/**
+ * Tournament brackets (3v3 double elimination). Players self-register with
+ * their member credentials; once `max_players` is reached the server shuffles
+ * them into teams and seeds the bracket. Teams + match results live as JSON
+ * on the tournament row — the bracket itself is recomputed from them
+ * (`tournamentBracket.js`), so there is no per-match table to keep in sync.
+ */
+export async function migrateTournamentTables(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tournaments (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(128) NOT NULL,
+      status ENUM('registration', 'ongoing', 'completed') NOT NULL DEFAULT 'registration',
+      max_players INT NOT NULL,
+      team_size INT NOT NULL DEFAULT 3,
+      teams_json TEXT NULL,
+      results_json TEXT NULL,
+      created_by VARCHAR(255) NOT NULL DEFAULT '',
+      created_at BIGINT NOT NULL,
+      started_at BIGINT NULL,
+      completed_at BIGINT NULL,
+      INDEX idx_tournaments_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tournament_players (
+      tournament_id BIGINT UNSIGNED NOT NULL,
+      member_id BIGINT UNSIGNED NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      registered_at BIGINT NOT NULL,
+      PRIMARY KEY (tournament_id, member_id),
+      CONSTRAINT fk_tournament_players_tournament FOREIGN KEY (tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE,
+      INDEX idx_tournament_players_registered (tournament_id, registered_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  // Matches the admin started ("Start game") — shown in the live VS banners.
+  // Replaces the short-lived single `current_match_id` pin.
+  const [cols] = await pool.query(
+    `SELECT COLUMN_NAME AS c FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tournaments'
+       AND COLUMN_NAME IN ('live_matches_json', 'current_match_id')`
+  );
+  const have = new Set((Array.isArray(cols) ? cols : []).map((r) => r.c));
+  if (!have.has('live_matches_json')) {
+    await pool.query(
+      `ALTER TABLE tournaments ADD COLUMN live_matches_json TEXT NULL AFTER results_json`
+    );
+  }
+  if (have.has('current_match_id')) {
+    await pool.query(`ALTER TABLE tournaments DROP COLUMN current_match_id`);
+  }
+}
