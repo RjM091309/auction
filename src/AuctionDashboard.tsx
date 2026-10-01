@@ -246,7 +246,9 @@ function auctionPollSnapshot(s: AuctionState): string {
 
 const DEFAULT_EVENT_MODE: WeeklyEventType = 'Emperium Overrun';
 
-function rankPresetLimits(rank: GuildRank): { fragment: number; feathers: number } {
+function rankPresetLimits(
+  rank: GuildRank
+): { fragment: number; feathers: number; feathersItemsPerWinner?: number } {
   return {
     fragment: totalItemsForTypeByRank('Fragment Card', rank),
     feathers: totalItemsForTypeByRank('Feathers', rank),
@@ -323,9 +325,7 @@ export default function AuctionDashboard() {
   const skipPersistAfterPollRef = useRef(false);
   /** Skip one debounced persist after an immediate save (e.g. clear all queues). */
   const skipPersistOnceRef = useRef(false);
-  const persistDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  );
+  const persistDebounceTimerRef = useRef<number | null>(null);
   const [clearQueuesSaving, setClearQueuesSaving] = useState(false);
 
   const cancelPendingPersist = () => {

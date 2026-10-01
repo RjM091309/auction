@@ -1173,6 +1173,30 @@ export async function deactivateMember(pool, memberId) {
   return getFullState(pool);
 }
 
+/**
+ * While the shuffle stays locked, the drawn winner slots (queue head) are
+ * final. A stale tab / merge that sends a reordered queue would otherwise
+ * silently change who won. If the incoming head differs from the saved head,
+ * restore the saved relative order and append any brand-new members after it.
+ * Tail-only changes (e.g. free draw) pass through untouched.
+ * @param {number[]} prevIds saved queue order
+ * @param {number[]} nextIds incoming queue order
+ * @param {number} headSlots winner slots to protect
+ * @returns {number[] | null} corrected order, or null when nextIds is fine
+ */
+function protectLockedQueueHead(prevIds, nextIds, headSlots) {
+  const nextSet = new Set(nextIds);
+  const prevKept = prevIds.filter((id) => nextSet.has(id));
+  const k = Math.min(Math.max(0, Math.floor(headSlots)), prevKept.length);
+  let headMatches = nextIds.length >= k;
+  for (let i = 0; headMatches && i < k; i += 1) {
+    if (nextIds[i] !== prevKept[i]) headMatches = false;
+  }
+  if (headMatches) return null;
+  const prevSet = new Set(prevKept);
+  return prevKept.concat(nextIds.filter((id) => !prevSet.has(id)));
+}
+
 export async function replaceFullState(pool, body) {
   if (!isAuctionState(body)) {
     const err = new Error('Invalid body: expected { items: [], members: [] }');
@@ -1239,6 +1263,34 @@ export async function replaceFullState(pool, body) {
     body.items = body.items.map((it) =>
       pruneOrphanRecordedWinnerNames(it, membersByIdForValidation)
     );
+  }
+
+  if (
+    prevShuffleLocked &&
+    body.shuffleLocked === true &&
+    Array.isArray(body.items)
+  ) {
+    for (const it of body.items) {
+      if (!it || it.status !== 'active') continue;
+      const prevQueue = oldQueueOrderedByItem.get(it.id);
+      if (!prevQueue || prevQueue.length === 0) continue;
+      const nextQueue = (
+        Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : []
+      )
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id !== 0);
+      const headSlots =
+        shuffleWinnerSlotsByItemId[it.id] != null
+          ? shuffleWinnerSlotsByItemId[it.id]
+          : maxWinnersForItemInState(it, body);
+      const fixed = protectLockedQueueHead(prevQueue, nextQueue, headSlots);
+      if (fixed) {
+        console.warn(
+          `[shuffle-guard] kept locked winner order for "${it.name}" (${it.id}); incoming reorder ignored`
+        );
+        it.interestedMemberIds = fixed;
+      }
+    }
   }
 
   // Shuffle lock only reorders queues — it does not add manual winner marks.

@@ -348,6 +348,7 @@ export class PublicAddBidError extends Error {
       itemName?: string;
       otherItemName?: string;
       expiresAt?: number;
+      matchedIgn?: string;
     }
   ) {
     super(message);

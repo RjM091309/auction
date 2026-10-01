@@ -158,7 +158,7 @@ export function migrateFeatherItems(items: AuctionItem[]): AuctionItem[] {
   let winnerPoolCap = defaultWinnerPoolCapForType('Feathers');
   for (const it of mergeSources) {
     const cap =
-      it.winnerPoolCap != null && it.winnerPoolCap !== ''
+      it.winnerPoolCap != null
         ? Math.max(0, Math.floor(Number(it.winnerPoolCap)))
         : isLegacyFeatherType(it.type)
           ? it.type === 'LND'
