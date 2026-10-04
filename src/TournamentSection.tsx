@@ -4,12 +4,14 @@
  *
  * 3v3 double-elimination tournament tab. Public can view brackets and
  * register with their own IGN + password; once the player cap is reached
+ * (or an admin starts it — the only way for an open, uncapped tournament)
  * the server shuffles everyone into teams. Officers/Admins/Developers
  * (Bidders-tab session) create tournaments and record match winners.
  */
 
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Swal from 'sweetalert2';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import {
   Crown,
   Eye,
@@ -31,6 +33,8 @@ import {
   X,
 } from 'lucide-react';
 import BidderAuthModal from './BidderAuthModal';
+import ClassSelect from './components/ClassSelect';
+import type { MemberClass } from './lib/memberClasses';
 import { NameDropdown } from './BidderAuthGate';
 import {
   type ActiveMember,
@@ -44,10 +48,13 @@ import {
   type BracketMatch,
   type TournamentDetail,
   type TournamentStatus,
+  type TournamentPlayer,
   type TournamentSummary,
   type TournamentTeam,
   TournamentApiError,
   createTournamentRequest,
+  fetchTournamentPool,
+  removeFromTournamentPool,
   deleteTournamentRequest,
   fetchTournament,
   fetchTournaments,
@@ -133,6 +140,134 @@ const GRAND_FINAL_GAP = 96;
 /** Smallest zoom used to fit a wide bracket on screen before scrolling. */
 const MIN_FIT_SCALE = 0.6;
 
+/**
+ * Team name area that opens the team modal on click. Placeholder teams (bracket
+ * preview, no members yet) and TBD slots render as plain, non-clickable text.
+ */
+function TeamNameBox({
+  team,
+  onOpen,
+  className = 'min-w-0 flex-1',
+  children,
+}: {
+  team: TournamentTeam | undefined;
+  onOpen: (teamId: string) => void;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  if (!team || team.members.length === 0) return <div className={className}>{children}</div>;
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(team.id)}
+      title={`View ${team.name}`}
+      className={`${className} [text-align:inherit] transition-opacity hover:opacity-80 [&_*]:hover:underline [&_*]:hover:decoration-white/40`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Modal listing one team (clicked) or every team ("Teams" button). */
+function TeamsModal({
+  title,
+  teams,
+  championId,
+  canRename,
+  busy,
+  onRename,
+  onClose,
+}: {
+  title: string;
+  teams: TournamentTeam[];
+  championId: string | null;
+  canRename: boolean;
+  busy: boolean;
+  onRename: (team: TournamentTeam) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const single = teams.length === 1;
+  return (
+    <div
+      className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={onClose}
+    >
+      <div
+        className={`flex max-h-full w-full flex-col rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl ${
+          single ? 'max-w-md' : 'max-w-4xl'
+        }`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-center justify-between gap-3 border-b border-slate-800 px-5 py-4">
+          <h3 className="flex items-center gap-2 text-base font-black text-white">
+            <Users className="h-5 w-5 text-blue-300" aria-hidden />
+            {title}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white"
+          >
+            <X className="h-5 w-5" aria-hidden />
+          </button>
+        </header>
+        <div
+          className={`grid gap-3 overflow-y-auto p-5 ${single ? '' : 'sm:grid-cols-2 lg:grid-cols-3'}`}
+        >
+          {teams.map((t) => (
+            <div
+              key={t.id}
+              className={`rounded-xl border bg-slate-950/50 p-4 ${
+                t.id === championId ? 'border-amber-500/60' : 'border-slate-800'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="flex min-w-0 items-center gap-1.5 truncate text-lg font-black text-white">
+                  {t.id === championId && <Trophy className="h-4 w-4 shrink-0 text-amber-300" aria-hidden />}
+                  <span className="truncate">{t.name}</span>
+                </p>
+                {canRename && (
+                  <button
+                    type="button"
+                    onClick={() => onRename(t)}
+                    disabled={busy}
+                    className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-slate-500 hover:text-blue-300"
+                  >
+                    Rename
+                  </button>
+                )}
+              </div>
+              <ul className="mt-3 space-y-1.5">
+                {t.members.map((m) => (
+                  <li
+                    key={m.id}
+                    className="flex items-center justify-between gap-2 rounded-lg bg-slate-800/70 px-3 py-2 text-sm"
+                  >
+                    <span className="truncate font-semibold text-slate-100">{m.name}</span>
+                    <span className="shrink-0 text-xs text-slate-400">{m.jobClass ?? '—'}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface MatchCardProps {
   match: BracketMatch;
   teamsById: Map<string, TournamentTeam>;
@@ -145,6 +280,8 @@ interface MatchCardProps {
   liveMatchIds: string[];
   onScore: (match: BracketMatch, teamId: string, delta: 1 | -1) => void;
   onToggleLive: (match: BracketMatch, live: boolean) => void;
+  /** Open the team details modal. */
+  onOpenTeam: (teamId: string) => void;
 }
 
 function MatchCard({
@@ -157,6 +294,7 @@ function MatchCard({
   liveMatchIds,
   onScore,
   onToggleLive,
+  onOpenTeam,
 }: MatchCardProps) {
   const match: BracketMatch = preview && raw.state === 'ready' ? { ...raw, state: 'pending' } : raw;
   const isBye = match.state === 'bye';
@@ -186,7 +324,7 @@ function MatchCard({
           hit ? 'ring-2 ring-inset ring-amber-400' : ''
         }`}
       >
-        <div className="min-w-0 flex-1">
+        <TeamNameBox team={team} onOpen={onOpenTeam}>
           {team ? (
             <>
               <span
@@ -208,7 +346,7 @@ function MatchCard({
               {isBye && !team ? 'BYE' : 'TBD'}
             </span>
           )}
-        </div>
+        </TeamNameBox>
         {team && showScore && (
           <div className="flex shrink-0 items-center gap-1">
             {editable && (
@@ -349,6 +487,164 @@ function AnimatedBorder({ gradient }: { gradient: string }) {
   );
 }
 
+function shuffled<T>(items: T[]): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+const SHUFFLE_MS = 2600;
+const SHUFFLE_TICK_MS = 220;
+
+/**
+ * Full-screen draw animation shown when teams are formed (auto-start, start
+ * early or reshuffle): every name jumbles around, then the teams the server
+ * drew are revealed one by one. Purely visual — the teams are already set.
+ */
+function ShuffleReveal({
+  tournamentName,
+  teams,
+  reserves,
+  onClose,
+}: {
+  tournamentName: string;
+  teams: TournamentTeam[];
+  reserves: TournamentPlayer[];
+  onClose: () => void;
+}) {
+  const reduceMotion = useReducedMotion();
+  const [phase, setPhase] = useState<'shuffle' | 'reveal'>(reduceMotion ? 'reveal' : 'shuffle');
+  const [order, setOrder] = useState(() =>
+    shuffled([
+      ...teams.flatMap((t) => t.members),
+      ...reserves.map((p) => ({ id: p.memberId, name: p.name })),
+    ])
+  );
+
+  useEffect(() => {
+    if (phase !== 'shuffle') return;
+    const tick = window.setInterval(() => setOrder((o) => shuffled(o)), SHUFFLE_TICK_MS);
+    const done = window.setTimeout(() => setPhase('reveal'), SHUFFLE_MS);
+    return () => {
+      window.clearInterval(tick);
+      window.clearTimeout(done);
+    };
+  }, [phase]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  // Keep the whole reveal within ~3s however many teams there are.
+  const stagger = Math.min(0.3, 3 / Math.max(1, teams.length));
+
+  return (
+    <motion.div
+      className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/90 px-4 py-8 backdrop-blur-sm"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Team draw"
+    >
+      <div className="mx-auto max-w-5xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-widest text-amber-400">{tournamentName}</p>
+            <h3 className="mt-1 flex items-center gap-2 text-xl font-black text-white">
+              <motion.span
+                animate={phase === 'shuffle' ? { rotate: 360 } : { rotate: 0 }}
+                transition={phase === 'shuffle' ? { repeat: Infinity, duration: 0.8, ease: 'linear' } : { duration: 0.3 }}
+                className="inline-flex"
+              >
+                <Shuffle className="h-5 w-5 text-amber-400" aria-hidden />
+              </motion.span>
+              {phase === 'shuffle' ? 'Shuffling players…' : `${teams.length} teams drawn!`}
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={phase === 'shuffle' ? () => setPhase('reveal') : onClose}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-slate-800 px-3 py-2 text-[11px] font-black uppercase tracking-wide text-slate-200 hover:bg-slate-700"
+          >
+            {phase === 'shuffle' ? 'Skip' : <><X className="h-4 w-4" aria-hidden /> Close</>}
+          </button>
+        </div>
+
+        <AnimatePresence mode="wait">
+          {phase === 'shuffle' ? (
+            <motion.ul
+              key="shuffle"
+              className="mt-8 flex flex-wrap justify-center gap-2"
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.25 }}
+            >
+              {order.map((m) => (
+                <motion.li
+                  key={m.id}
+                  layout
+                  transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm font-bold text-slate-100 shadow"
+                >
+                  {m.name}
+                </motion.li>
+              ))}
+            </motion.ul>
+          ) : (
+            <motion.div key="reveal" className="mt-8 space-y-4">
+              <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-4">
+                {teams.map((t, i) => (
+                  <motion.div
+                    key={t.id}
+                    initial={{ opacity: 0, y: 24, scale: 0.85, rotateX: -60 }}
+                    animate={{ opacity: 1, y: 0, scale: 1, rotateX: 0 }}
+                    transition={{ delay: i * stagger, type: 'spring', stiffness: 260, damping: 20 }}
+                    className="rounded-xl border border-amber-600/50 bg-slate-900 p-3 shadow-lg shadow-amber-900/20"
+                  >
+                    <p className="truncate text-sm font-black text-amber-300">{t.name}</p>
+                    <ul className="mt-1.5 space-y-0.5 text-xs text-slate-200">
+                      {t.members.map((m, j) => (
+                        <motion.li
+                          key={m.id}
+                          className="truncate"
+                          initial={{ opacity: 0, x: -8 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ delay: i * stagger + 0.15 + j * 0.08 }}
+                        >
+                          {m.name}
+                          {m.jobClass && <span className="ml-1.5 text-[10px] text-slate-500">{m.jobClass}</span>}
+                        </motion.li>
+                      ))}
+                    </ul>
+                  </motion.div>
+                ))}
+              </div>
+              {reserves.length > 0 && (
+                <motion.p
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: teams.length * stagger + 0.3 }}
+                  className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs text-slate-300"
+                >
+                  <strong className="text-white">Reserves:</strong> {reserves.map((p) => p.name).join(', ')}
+                </motion.p>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </motion.div>
+  );
+}
+
 /** Gold winner banner shown once the Grand Final is decided. */
 function ChampionBanner({
   champion,
@@ -473,11 +769,13 @@ function VersusSide({
   score,
   side,
   size,
+  onOpenTeam,
 }: {
   team: TournamentTeam | undefined;
   score: number;
   side: 'blue' | 'red';
   size: VersusSize;
+  onOpenTeam: (teamId: string) => void;
 }) {
   const blue = side === 'blue';
   const z = VERSUS_SIZES[size];
@@ -489,7 +787,11 @@ function VersusSide({
           : `${z.redDir} border-rose-400/50 bg-rose-950/25 shadow-[0_0_40px_-6px_rgba(251,113,133,0.45)]`
       }`}
     >
-      <div className={`w-full min-w-0 ${z.nameBox} ${blue ? z.blueAlign : z.redAlign}`}>
+      <TeamNameBox
+        team={team}
+        onOpen={onOpenTeam}
+        className={`w-full min-w-0 ${z.nameBox} ${blue ? z.blueAlign : z.redAlign}`}
+      >
         <p className={`break-words font-black uppercase tracking-wider text-white ${z.name}`}>
           {team?.name ?? 'TBD'}
         </p>
@@ -500,7 +802,7 @@ function VersusSide({
         >
           {team?.members.map((m) => m.name).join(' · ')}
         </p>
-      </div>
+      </TeamNameBox>
       <span
         className={`shrink-0 font-black tabular-nums drop-shadow-[0_0_14px_currentColor] ${z.score} ${
           blue ? 'text-sky-300' : 'text-rose-300'
@@ -517,10 +819,12 @@ function VersusBanner({
   match,
   teamsById,
   size = 'full',
+  onOpenTeam,
 }: {
   match: BracketMatch;
   teamsById: Map<string, TournamentTeam>;
   size?: VersusSize;
+  onOpenTeam: (teamId: string) => void;
 }) {
   const z = VERSUS_SIZES[size];
   const [a, b] = match.teams;
@@ -560,14 +864,14 @@ function VersusBanner({
           </span>
         </p>
         <div className={`grid grid-cols-[1fr_auto_1fr] items-stretch ${z.grid}`}>
-          <VersusSide team={a ? teamsById.get(a) : undefined} score={sa} side="blue" size={size} />
+          <VersusSide team={a ? teamsById.get(a) : undefined} score={sa} side="blue" size={size} onOpenTeam={onOpenTeam} />
           <span
             className={`select-none bg-gradient-to-b from-white via-slate-300 to-slate-500 bg-clip-text self-center px-1 font-black italic leading-none tracking-tighter text-transparent drop-shadow-[0_4px_12px_rgba(0,0,0,0.8)] ${z.vs}`}
             aria-label="versus"
           >
             VS
           </span>
-          <VersusSide team={b ? teamsById.get(b) : undefined} score={sb} side="red" size={size} />
+          <VersusSide team={b ? teamsById.get(b) : undefined} score={sb} side="red" size={size} onOpenTeam={onOpenTeam} />
         </div>
       </div>
     </section>
@@ -766,23 +1070,37 @@ export default function TournamentSection({ active }: { active: boolean }) {
   const [authOpen, setAuthOpen] = useState(false);
   const isAdmin = !!actor;
   const isSuperAdmin = actor?.role === 'Admin' || actor?.role === 'Developer';
+  const isDeveloper = actor?.role === 'Developer';
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState('');
-  const [createMax, setCreateMax] = useState(12);
+  // Empty = open registration (no cap; team count decided at start).
+  const [createMax, setCreateMax] = useState('');
+  const [waitingPool, setWaitingPool] = useState<TournamentPlayer[]>([]);
+  // Team draw animation: plays when a tournament's teams change while we
+  // watch (not on first load), so every viewer sees the shuffle.
+  const [reveal, setReveal] = useState<TournamentDetail | null>(null);
+  const teamsSigRef = useRef(new Map<number, string>());
+  const closeReveal = useCallback(() => setReveal(null), []);
 
   const [members, setMembers] = useState<ActiveMember[]>([]);
   const [regName, setRegName] = useState('');
   const [regPassword, setRegPassword] = useState('');
+  const [regClass, setRegClass] = useState<MemberClass | ''>('');
   const [regShowPassword, setRegShowPassword] = useState(false);
 
   const [highlightInput, setHighlightInput] = useState('');
+  /** Team modal: one team id, every team, or closed. */
+  const [teamModal, setTeamModal] = useState<string | 'all' | null>(null);
+  const openTeam = useCallback((teamId: string) => setTeamModal(teamId), []);
+  const closeTeamModal = useCallback(() => setTeamModal(null), []);
   const highlight = highlightInput.trim().toLowerCase();
 
   const loadList = useCallback(async () => {
     try {
-      const rows = await fetchTournaments();
+      const [rows, pooled] = await Promise.all([fetchTournaments(), fetchTournamentPool()]);
       setList(rows);
+      setWaitingPool(pooled);
       setSelectedId((cur) => (cur != null && rows.some((r) => r.id === cur) ? cur : rows[0]?.id ?? null));
       setError(null);
     } catch (e) {
@@ -845,6 +1163,14 @@ export default function TournamentSection({ active }: { active: boolean }) {
   }, [active, registrationOpen, members.length]);
 
   /** Apply a fresh detail payload and keep the list's summary in sync. */
+  useEffect(() => {
+    if (!detail) return;
+    const sig = detail.teams.map((t) => `${t.id}:${t.members.map((m) => m.id).join(',')}`).join('|');
+    const prev = teamsSigRef.current.get(detail.id);
+    teamsSigRef.current.set(detail.id, sig);
+    if (prev !== undefined && sig !== prev && detail.teams.length >= 2) setReveal(detail);
+  }, [detail]);
+
   const applyDetail = (d: TournamentDetail) => {
     setDetail(d);
     setList((rows) => rows.map((r) => (r.id === d.id ? { ...r, ...d } : r)));
@@ -876,9 +1202,14 @@ export default function TournamentSection({ active }: { active: boolean }) {
     }
   };
 
+  const createCap = createMax.trim() === '' ? null : Number(createMax);
+  const createCapValid =
+    createCap == null ||
+    (Number.isInteger(createCap) && createCap >= TEAM_SIZE * 2 && createCap % TEAM_SIZE === 0);
+
   const handleCreate = () =>
     runAdmin(async () => {
-      const t = await createTournamentRequest(createName.trim(), createMax);
+      const t = await createTournamentRequest(createName.trim(), createCap);
       setCreateOpen(false);
       setCreateName('');
       await loadList();
@@ -889,13 +1220,18 @@ export default function TournamentSection({ active }: { active: boolean }) {
   const handleDelete = async (t: TournamentSummary) => {
     const ok = await swalConfirm(
       'Delete tournament?',
-      `<p><strong>${escapeHtml(t.name)}</strong> and all its registrations, teams and results will be permanently deleted.</p>`,
+      t.status === 'completed'
+        ? `<p><strong>${escapeHtml(t.name)}</strong> and all its registrations, teams and results will be permanently deleted.</p>`
+        : `<p><strong>${escapeHtml(t.name)}</strong> and its teams and results will be deleted.</p><p>Its <strong>${t.playerCount}</strong> registered player(s) move to the waiting pool and join the next tournament created — no need to register again.</p>`,
       'Delete'
     );
     if (!ok) return;
     await runAdmin(async () => {
-      await deleteTournamentRequest(t.id);
+      const carried = await deleteTournamentRequest(t.id);
       forgetTournament(t.id);
+      if (carried > 0) {
+        void swalSuccess('Tournament deleted', `<p><strong>${carried}</strong> player(s) moved to the waiting pool.</p>`);
+      }
     });
   };
 
@@ -906,7 +1242,10 @@ export default function TournamentSection({ active }: { active: boolean }) {
       reshuffle ? 'Reshuffle teams?' : 'Start tournament now?',
       reshuffle
         ? '<p>All teams will be shuffled again and the bracket regenerated.</p>'
-        : `<p>Registration will close and the <strong>${detail.playerCount}</strong> registered players will be shuffled into ${TEAM_SIZE}v${TEAM_SIZE} teams.</p>`,
+        : `<p>Registration will close and the <strong>${detail.playerCount}</strong> registered players will be shuffled into <strong>${Math.floor(detail.playerCount / TEAM_SIZE)}</strong> ${TEAM_SIZE}v${TEAM_SIZE} teams.</p>` +
+          (detail.playerCount % TEAM_SIZE
+            ? `<p>The last <strong>${detail.playerCount % TEAM_SIZE}</strong> to register will sit out as reserves.</p>`
+            : ''),
       reshuffle ? 'Reshuffle' : 'Shuffle & start'
     );
     if (!ok) return;
@@ -929,6 +1268,16 @@ export default function TournamentSection({ active }: { active: boolean }) {
     const ok = await swalConfirm('Remove player?', `<p>Remove <strong>${escapeHtml(name)}</strong> from this tournament?</p>`, 'Remove');
     if (!ok) return;
     await runAdmin(async () => applyDetail(await removeTournamentPlayer(detail.id, memberId)));
+  };
+
+  const handleRemoveFromPool = async (memberId: number, name: string) => {
+    const ok = await swalConfirm(
+      'Remove from waiting pool?',
+      `<p><strong>${escapeHtml(name)}</strong> will no longer be added to the next tournament and will have to register again.</p>`,
+      'Remove'
+    );
+    if (!ok) return;
+    await runAdmin(async () => setWaitingPool(await removeFromTournamentPool(memberId)));
   };
 
   const handleRenameTeam = async (team: TournamentTeam) => {
@@ -979,17 +1328,20 @@ export default function TournamentSection({ active }: { active: boolean }) {
 
   const submitRegistration = async (mode: 'register' | 'withdraw') => {
     if (!detail || !regName || !regPassword.trim()) return;
+    const jobClass = regClass;
+    if (mode === 'register' && !jobClass) return;
     setBusy(true);
     try {
       if (mode === 'register') {
-        const out = await registerForTournament(detail.id, regName, regPassword.trim());
+        const out = await registerForTournament(detail.id, regName, regPassword.trim(), jobClass as MemberClass);
         applyDetail(out.tournament);
-        void swalSuccess(
-          out.started ? 'Registered — teams are set!' : 'Registered!',
-          out.started
-            ? `<p><strong>${escapeHtml(regName)}</strong> filled the last slot. Players have been shuffled into ${TEAM_SIZE}v${TEAM_SIZE} teams and the bracket is live.</p>`
-            : `<p><strong>${escapeHtml(regName)}</strong> is now registered for <strong>${escapeHtml(detail.name)}</strong>.</p>`
-        );
+        // Filling the last slot starts the draw animation instead of a popup.
+        if (!out.started) {
+          void swalSuccess(
+            'Registered!',
+            `<p><strong>${escapeHtml(regName)}</strong> is now registered for <strong>${escapeHtml(detail.name)}</strong>.</p>`
+          );
+        }
       } else {
         applyDetail(await withdrawFromTournament(detail.id, regName, regPassword.trim()));
         void swalSuccess('Withdrawn', `<p><strong>${escapeHtml(regName)}</strong> left the tournament.</p>`);
@@ -1001,6 +1353,11 @@ export default function TournamentSection({ active }: { active: boolean }) {
       setBusy(false);
     }
   };
+
+  // Prefill the class from the member profile whenever the IGN changes.
+  useEffect(() => {
+    setRegClass(members.find((m) => m.name === regName)?.jobClass ?? '');
+  }, [regName, members]);
 
   const registeredIds = useMemo(
     () => new Set((detail?.players ?? []).map((p) => p.memberId)),
@@ -1023,10 +1380,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
       .filter((m): m is BracketMatch => !!m && m.state === 'ready');
   }, [bracket, detail?.liveMatchIds]);
   const canStartEarly =
-    !!detail &&
-    detail.status === 'registration' &&
-    detail.playerCount >= TEAM_SIZE * 2 &&
-    detail.playerCount % TEAM_SIZE === 0;
+    !!detail && detail.status === 'registration' && detail.playerCount >= TEAM_SIZE * 2;
 
   const cardProps = {
     teamsById,
@@ -1040,6 +1394,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
       void runAdmin(async () => {
         if (detail) applyDetail(await setTournamentMatchLive(detail.id, m.id, live));
       }),
+    onOpenTeam: openTeam,
   };
 
   const btn =
@@ -1047,6 +1402,17 @@ export default function TournamentSection({ active }: { active: boolean }) {
 
   return (
     <section className="space-y-6 [&_button:not(:disabled)]:cursor-pointer">
+      <AnimatePresence>
+        {reveal && (
+          <ShuffleReveal
+            key={`${reveal.id}-${reveal.startedAt}`}
+            tournamentName={reveal.name}
+            teams={reveal.teams}
+            reserves={reveal.reserves}
+            onClose={closeReveal}
+          />
+        )}
+      </AnimatePresence>
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
@@ -1056,7 +1422,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
           </h2>
           <p className="mt-1 text-sm text-slate-400">
             {TEAM_SIZE}v{TEAM_SIZE} double elimination · best of 3, Grand Final best of 5. Register with your IGN and password; once all
-            slots are filled, the system automatically shuffles players into teams.
+            slots are filled (or an admin starts it), the system shuffles players into teams.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -1128,17 +1494,19 @@ export default function TournamentSection({ active }: { active: boolean }) {
               min={TEAM_SIZE * 2}
               step={TEAM_SIZE}
               value={createMax}
-              onChange={(e) => setCreateMax(Number(e.target.value))}
+              onChange={(e) => setCreateMax(e.target.value)}
+              placeholder="No limit"
+              title="Leave empty for open registration — start it manually once signups close."
               className="mt-1.5 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500"
             />
           </label>
           <div className="flex gap-2">
             <button
               type="submit"
-              disabled={busy || !createName.trim() || createMax < TEAM_SIZE * 2 || createMax % TEAM_SIZE !== 0}
+              disabled={busy || !createName.trim() || !createCapValid}
               className={`${btn} flex-1 bg-blue-600 text-white hover:bg-blue-500`}
             >
-              Create ({Math.floor(createMax / TEAM_SIZE) || 0} teams)
+              {createCap == null ? 'Create (open)' : `Create (${Math.floor(createCap / TEAM_SIZE)} teams)`}
             </button>
             <button
               type="button"
@@ -1153,6 +1521,36 @@ export default function TournamentSection({ active }: { active: boolean }) {
       )}
 
       {error && <p className="text-sm text-rose-300">{error}</p>}
+
+      {waitingPool.length > 0 && (
+        <div className="rounded-2xl border border-amber-900/60 bg-amber-950/20 px-4 py-3">
+          <p className="text-xs text-amber-200">
+            <strong className="text-white">Waiting pool ({waitingPool.length}).</strong> Registered in a deleted
+            tournament — they join the next tournament created automatically, no need to register again.
+          </p>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {waitingPool.map((p) => (
+              <li
+                key={p.memberId}
+                className="flex items-center gap-1 rounded-lg bg-slate-950/60 py-1 pl-2.5 pr-1 text-xs font-semibold text-slate-200"
+              >
+                {p.name}
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => void handleRemoveFromPool(p.memberId, p.name)}
+                    disabled={busy}
+                    aria-label={`Remove ${p.name} from the waiting pool`}
+                    className="rounded p-0.5 text-slate-500 hover:bg-rose-900/50 hover:text-rose-300"
+                  >
+                    <X className="h-3.5 w-3.5" aria-hidden />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Tournament picker */}
       {listLoading ? (
@@ -1185,7 +1583,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
                     <span className="truncate text-amber-300">🏆 {t.championName}</span>
                   ) : (
                     <span>
-                      {t.playerCount}/{t.maxPlayers} players
+                      {t.maxPlayers == null ? `${t.playerCount} players` : `${t.playerCount}/${t.maxPlayers} players`}
                     </span>
                   )}
                 </span>
@@ -1215,21 +1613,39 @@ export default function TournamentSection({ active }: { active: boolean }) {
             <div className="grid gap-6 lg:grid-cols-[22rem_1fr]">
               <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900 p-4">
                 <div>
-                  <div className="flex items-center justify-between text-xs font-bold text-slate-300">
-                    <span>Slots</span>
-                    <span>
-                      {detail.playerCount}/{detail.maxPlayers}
-                    </span>
-                  </div>
-                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800">
-                    <div
-                      className="h-full rounded-full bg-blue-500 transition-all"
-                      style={{ width: `${Math.min(100, (detail.playerCount / detail.maxPlayers) * 100)}%` }}
-                    />
-                  </div>
-                  <p className="mt-2 text-[11px] text-slate-500">
-                    {detail.maxPlayers - detail.playerCount} slot(s) left — auto-shuffle into teams once full.
-                  </p>
+                  {detail.maxPlayers == null ? (
+                    <>
+                      <div className="flex items-center justify-between text-xs font-bold text-slate-300">
+                        <span>Open registration</span>
+                        <span>{detail.playerCount} players</span>
+                      </div>
+                      <p className="mt-2 text-[11px] text-slate-500">
+                        {Math.floor(detail.playerCount / TEAM_SIZE)} team(s) so far
+                        {detail.playerCount % TEAM_SIZE
+                          ? ` · ${TEAM_SIZE - (detail.playerCount % TEAM_SIZE)} more for the next team`
+                          : ''}
+                        . Teams are drawn when an admin starts the tournament.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between text-xs font-bold text-slate-300">
+                        <span>Slots</span>
+                        <span>
+                          {detail.playerCount}/{detail.maxPlayers}
+                        </span>
+                      </div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800">
+                        <div
+                          className="h-full rounded-full bg-blue-500 transition-all"
+                          style={{ width: `${Math.min(100, (detail.playerCount / detail.maxPlayers) * 100)}%` }}
+                        />
+                      </div>
+                      <p className="mt-2 text-[11px] text-slate-500">
+                        {detail.maxPlayers - detail.playerCount} slot(s) left — auto-shuffle into teams once full.
+                      </p>
+                    </>
+                  )}
                   {isAdmin && canStartEarly && (
                     <button
                       type="button"
@@ -1255,6 +1671,24 @@ export default function TournamentSection({ active }: { active: boolean }) {
                       <NameDropdown options={members} value={regName} onChange={setRegName} disabled={busy} />
                     </div>
                   </div>
+                  {!regIsRegistered && (
+                    <div>
+                      <label
+                        htmlFor="tournament-class"
+                        className="block text-[10px] font-black uppercase tracking-widest text-slate-400"
+                      >
+                        Class
+                      </label>
+                      <div className="mt-1.5">
+                        <ClassSelect
+                          id="tournament-class"
+                          value={regClass || null}
+                          onChange={(c) => setRegClass(c ?? '')}
+                          disabled={busy}
+                        />
+                      </div>
+                    </div>
+                  )}
                   <div>
                     <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Password</span>
                     <div className="relative mt-1.5">
@@ -1280,7 +1714,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
                   </div>
                   <button
                     type="submit"
-                    disabled={busy || !regName || !regPassword.trim()}
+                    disabled={busy || !regName || !regPassword.trim() || (!regIsRegistered && !regClass)}
                     className={`${btn} w-full py-2.5 text-xs ${
                       regIsRegistered
                         ? 'bg-rose-700 text-white hover:bg-rose-600'
@@ -1314,7 +1748,10 @@ export default function TournamentSection({ active }: { active: boolean }) {
                         className="flex items-center gap-2 rounded-lg bg-slate-950/60 px-3 py-1.5 text-sm text-slate-200"
                       >
                         <span className="w-6 shrink-0 text-right text-[11px] font-bold text-slate-500">{i + 1}.</span>
-                        <span className="min-w-0 flex-1 truncate font-semibold">{p.name}</span>
+                        <span className="min-w-0 flex-1 truncate font-semibold">
+                          {p.name}
+                          {p.jobClass && <span className="ml-1.5 text-[11px] font-normal text-slate-500">{p.jobClass}</span>}
+                        </span>
                         {isAdmin && (
                           <button
                             type="button"
@@ -1353,79 +1790,58 @@ export default function TournamentSection({ active }: { active: boolean }) {
                       key={m.id}
                       match={m}
                       teamsById={teamsById}
+                      onOpenTeam={openTeam}
                       size={liveMatches.length > 1 ? 'compact' : 'full'}
                     />
                   ))}
                 </div>
               )}
 
-              <div className="space-y-3">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <h4 className="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-slate-400">
-                    <Users className="h-4 w-4" aria-hidden /> Teams
-                  </h4>
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                    {isAdmin && detail.status === 'ongoing' && !hasResults && (
-                      <button type="button" onClick={() => void handleShuffle()} disabled={busy} className={`${btn} bg-slate-800 text-white hover:bg-amber-700`}>
-                        <Shuffle className="h-4 w-4" aria-hidden />
-                        Reshuffle teams
-                      </button>
-                    )}
-                    {isSuperAdmin && (
-                      <button type="button" onClick={() => void handleReopen()} disabled={busy} className={`${btn} bg-slate-800 text-white hover:bg-amber-800`}>
-                        <RotateCcw className="h-4 w-4" aria-hidden />
-                        Reopen registration
-                      </button>
-                    )}
-                    <label className="relative block sm:w-64">
-                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" aria-hidden />
-                      <input
-                        value={highlightInput}
-                        onChange={(e) => setHighlightInput(e.target.value)}
-                        placeholder="Find an IGN or team…"
-                        className="w-full rounded-xl border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-blue-500"
-                      />
-                    </label>
+              {/* Teams live in a modal (click a team, or the "Teams" button). */}
+              {detail.status !== 'completed' && (
+                <div className="space-y-3">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <button
+                      type="button"
+                      onClick={() => setTeamModal('all')}
+                      className={`${btn} bg-slate-800 text-white hover:bg-slate-700`}
+                    >
+                      <Users className="h-4 w-4" aria-hidden />
+                      Teams ({detail.teams.length})
+                    </button>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      {isDeveloper && detail.status === 'ongoing' && !hasResults && (
+                        <button type="button" onClick={() => void handleShuffle()} disabled={busy} className={`${btn} bg-slate-800 text-white hover:bg-amber-700`}>
+                          <Shuffle className="h-4 w-4" aria-hidden />
+                          Reshuffle teams
+                        </button>
+                      )}
+                      {isSuperAdmin && (
+                        <button type="button" onClick={() => void handleReopen()} disabled={busy} className={`${btn} bg-slate-800 text-white hover:bg-amber-800`}>
+                          <RotateCcw className="h-4 w-4" aria-hidden />
+                          Reopen registration
+                        </button>
+                      )}
+                      <label className="relative block sm:w-64">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" aria-hidden />
+                        <input
+                          value={highlightInput}
+                          onChange={(e) => setHighlightInput(e.target.value)}
+                          placeholder="Find an IGN or team…"
+                          className="w-full rounded-xl border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-blue-500"
+                        />
+                      </label>
+                    </div>
                   </div>
+                  {detail.reserves.length > 0 && (
+                    <p className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs text-slate-300">
+                      <strong className="text-white">Reserves:</strong>{' '}
+                      {detail.reserves.map((p) => p.name).join(', ')}
+                      <span className="text-slate-500"> — registered after the last full team.</span>
+                    </p>
+                  )}
                 </div>
-                <div className="grid grid-cols-2 gap-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {detail.teams.map((t) => {
-                    const hit =
-                      !!highlight &&
-                      (t.name.toLowerCase().includes(highlight) ||
-                        t.members.some((m) => m.name.toLowerCase().includes(highlight)));
-                    return (
-                      <div
-                        key={t.id}
-                        className={`rounded-xl border bg-slate-900 p-3 ${
-                          hit ? 'border-amber-400' : t.id === champion?.id ? 'border-amber-600/60' : 'border-slate-800'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="truncate text-sm font-black text-white">{t.name}</p>
-                          {isAdmin && (
-                            <button
-                              type="button"
-                              onClick={() => void handleRenameTeam(t)}
-                              disabled={busy}
-                              className="text-[10px] font-bold uppercase tracking-wide text-slate-500 hover:text-blue-300"
-                            >
-                              Rename
-                            </button>
-                          )}
-                        </div>
-                        <ul className="mt-1.5 space-y-0.5 text-xs text-slate-300">
-                          {t.members.map((m) => (
-                            <li key={m.id} className="truncate">
-                              {m.name}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
+              )}
 
             </>
           )}
@@ -1434,8 +1850,10 @@ export default function TournamentSection({ active }: { active: boolean }) {
             <>
               {bracket.preview && (
                 <p className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs text-slate-300">
-                  <strong className="text-white">Bracket preview.</strong> Teams are drawn at random once all{' '}
-                  {detail.maxPlayers} slots are filled.
+                  <strong className="text-white">Bracket preview.</strong>{' '}
+                  {detail.maxPlayers == null
+                    ? 'Based on the players registered so far — teams are drawn at random when the tournament starts.'
+                    : `Teams are drawn at random once all ${detail.maxPlayers} slots are filled.`}
                 </p>
               )}
               {isAdmin && detail.status === 'ongoing' && (
@@ -1479,6 +1897,22 @@ export default function TournamentSection({ active }: { active: boolean }) {
             </>
           )}
         </div>
+      )}
+
+      {teamModal && detail && (
+        <TeamsModal
+          title={teamModal === 'all' ? `Teams · ${detail.name}` : teamsById.get(teamModal)?.name ?? 'Team'}
+          teams={
+            teamModal === 'all'
+              ? detail.teams
+              : detail.teams.filter((t) => t.id === teamModal)
+          }
+          championId={bracket?.championTeamId ?? null}
+          canRename={isAdmin}
+          busy={busy}
+          onRename={(t) => void handleRenameTeam(t)}
+          onClose={closeTeamModal}
+        />
       )}
 
       <BidderAuthModal

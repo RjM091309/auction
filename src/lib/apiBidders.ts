@@ -1,6 +1,7 @@
 import { apiUrl } from './apiState';
 import type { PuppetCardCdDisplay } from './puppetCardCdDisplay';
 import type { WeeklyEventType } from '../types';
+import { type MemberClass, parseMemberClass } from './memberClasses';
 
 export type BidderRole = 'Officer' | 'Member' | 'Developer' | 'Admin';
 export type PrivilegedRole = 'Officer' | 'Developer' | 'Admin';
@@ -11,6 +12,7 @@ export interface Bidder {
   id: number;
   name: string;
   role: BidderRole;
+  jobClass: MemberClass | null;
   password: string;
   active: boolean;
   approvalStatus: BidderApprovalStatus;
@@ -28,12 +30,14 @@ export const BIDDERS_LIST_CACHE_KEY = 'bidders-list';
 export interface BidderInput {
   name: string;
   role: BidderRole;
+  jobClass?: MemberClass | null;
   password?: string;
 }
 
 export interface BidderUpdate {
   name?: string;
   role?: BidderRole;
+  jobClass?: MemberClass | null;
   password?: string;
   active?: boolean;
 }
@@ -60,6 +64,7 @@ export interface ActiveMember {
   id: number;
   name: string;
   role: BidderRole;
+  jobClass: MemberClass | null;
 }
 
 /** Result of `verifyMemberRequest` — a successfully-authenticated member. */
@@ -151,6 +156,7 @@ function parseBidder(raw: unknown): Bidder | null {
           : r.role === 'Admin'
             ? 'Admin'
             : 'Member',
+    jobClass: parseMemberClass(r.jobClass),
     password: typeof r.password === 'string' ? r.password : '',
     active: r.active === true || r.active === 1,
     approvalStatus:
@@ -217,7 +223,7 @@ function parseActiveMember(raw: unknown): ActiveMember | null {
   ) {
     return null;
   }
-  return { id, name: o.name, role: o.role };
+  return { id, name: o.name, role: o.role, jobClass: parseMemberClass(o.jobClass) };
 }
 
 /** Fetch every active member (any role) for the Join-queue dropdown. */
@@ -452,12 +458,13 @@ export async function publicCheckIgn(ign: string): Promise<PublicIgnCheck> {
 /** Submit a new Member-role registration. Server enforces uniqueness. */
 export async function publicRegisterRequest(
   name: string,
-  password: string
+  password: string,
+  jobClass: MemberClass | null = null
 ): Promise<PublicRegisterResult> {
   const res = await fetch(apiUrl('/api/public/register'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, password }),
+    body: JSON.stringify({ name, password, jobClass }),
   });
   const json = await readJson(res);
   if (!res.ok) {

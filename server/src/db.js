@@ -576,7 +576,7 @@ export async function migrateTournamentTables(pool) {
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       name VARCHAR(128) NOT NULL,
       status ENUM('registration', 'ongoing', 'completed') NOT NULL DEFAULT 'registration',
-      max_players INT NOT NULL,
+      max_players INT NULL,
       team_size INT NOT NULL DEFAULT 3,
       teams_json TEXT NULL,
       results_json TEXT NULL,
@@ -598,6 +598,25 @@ export async function migrateTournamentTables(pool) {
       INDEX idx_tournament_players_registered (tournament_id, registered_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+  // Optional job class (see memberClasses.js), shown in tournament teams.
+  const [classCol] = await pool.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'members' AND COLUMN_NAME = 'job_class'`
+  );
+  if (!Array.isArray(classCol) || classCol.length === 0) {
+    await pool.query(`ALTER TABLE members ADD COLUMN job_class VARCHAR(32) NULL AFTER role`);
+  }
+  // Players carried over from a deleted (unfinished) tournament; the next
+  // tournament created picks them up so nobody has to register again. They
+  // stay here until that happens or an admin removes them.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tournament_pool (
+      member_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      registered_at BIGINT NOT NULL,
+      INDEX idx_tournament_pool_registered (registered_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
   // Matches the admin started ("Start game") — shown in the live VS banners.
   // Replaces the short-lived single `current_match_id` pin.
   const [cols] = await pool.query(
@@ -613,5 +632,13 @@ export async function migrateTournamentTables(pool) {
   }
   if (have.has('current_match_id')) {
     await pool.query(`ALTER TABLE tournaments DROP COLUMN current_match_id`);
+  }
+  // NULL max_players = open registration (no cap; team count is set at start).
+  const [capCol] = await pool.query(
+    `SELECT IS_NULLABLE AS n FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tournaments' AND COLUMN_NAME = 'max_players'`
+  );
+  if (Array.isArray(capCol) && capCol[0]?.n === 'NO') {
+    await pool.query(`ALTER TABLE tournaments MODIFY max_players INT NULL`);
   }
 }

@@ -185,6 +185,9 @@ export function buildBidderEditDetails(before, after, body) {
   if (Object.prototype.hasOwnProperty.call(body, 'role') && before.role !== after.role) {
     changes.push({ field: 'role', from: before.role, to: after.role });
   }
+  if (Object.prototype.hasOwnProperty.call(body, 'jobClass') && before.jobClass !== after.jobClass) {
+    changes.push({ field: 'class', from: before.jobClass ?? '—', to: after.jobClass ?? '—' });
+  }
   if (Object.prototype.hasOwnProperty.call(body, 'active') && before.active !== after.active) {
     changes.push({
       field: 'active',

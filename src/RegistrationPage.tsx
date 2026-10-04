@@ -11,6 +11,8 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
+import ClassSelect from './components/ClassSelect';
+import type { MemberClass } from './lib/memberClasses';
 import {
   CheckCircle2,
   Eye,
@@ -80,6 +82,7 @@ type AvailabilityState =
 export default function RegistrationPage() {
   const [ign, setIgn] = useState('');
   const [password, setPassword] = useState('');
+  const [jobClass, setJobClass] = useState<MemberClass | null>(null);
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -166,12 +169,13 @@ export default function RegistrationPage() {
     if (!canSubmit) return;
     setSubmitting(true);
     try {
-      await publicRegisterRequest(ignTrim, passwordTrim);
+      await publicRegisterRequest(ignTrim, passwordTrim, jobClass);
       await swalSuccess(ignTrim);
       // Reset the form — the account is pending, so there's nothing useful for
       // them on the dashboard yet. Stay on /registration so they can register
       // a second account if needed, or close the tab.
       setIgn('');
+      setJobClass(null);
       setPassword('');
       setConfirmPassword('');
       setAvailability({ kind: 'idle' });
@@ -274,6 +278,18 @@ export default function RegistrationPage() {
               />
               <div className="mt-1.5 min-h-[1.1rem] leading-tight">
                 {ignStatusNode}
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="register-class"
+                className="block text-[10px] font-black uppercase tracking-widest text-slate-400"
+              >
+                Class
+              </label>
+              <div className="mt-1.5">
+                <ClassSelect id="register-class" value={jobClass} onChange={setJobClass} disabled={submitting} />
               </div>
             </div>
 

@@ -46,6 +46,8 @@ import { puppetCardCdBadgeClass, type PuppetCardCdDisplay } from './lib/puppetCa
 import { isEmperiumWinCooldownEnabled } from './lib/emperiumWinCooldown';
 import { fetchWithCache, invalidateFetchCache } from './lib/fetchCache';
 import type { WeeklyEventType } from './types';
+import ClassSelect from './components/ClassSelect';
+import type { MemberClass } from './lib/memberClasses';
 import BidderAuthGate from './BidderAuthGate';
 
 /**
@@ -135,6 +137,9 @@ const BidderRow = React.memo(function BidderRow({
         >
           {bidder.role}
         </span>
+      </td>
+      <td className="px-4 py-3 text-slate-300">
+        {bidder.jobClass ?? <span className="text-slate-600">—</span>}
       </td>
       <td className="px-4 py-3 font-mono text-slate-300">
         <span className="select-none tracking-widest text-slate-500">
@@ -381,6 +386,7 @@ interface EditDraft {
   id: number | null;
   name: string;
   role: BidderRole;
+  jobClass: MemberClass | null;
   password: string;
   active: boolean;
 }
@@ -389,6 +395,7 @@ const EMPTY_DRAFT: EditDraft = {
   id: null,
   name: '',
   role: 'Member',
+  jobClass: null,
   password: '',
   active: true,
 };
@@ -474,7 +481,7 @@ function BidderRegistrationAuthed({
     actor.role === 'Admin' || actor.role === 'Developer';
   const roleOptions = useMemo(() => roleOptionsFor(actor.role), [actor.role]);
   const showCardCd = isEmperiumWinCooldownEnabled(auctionEventMode);
-  const tableColSpan = showCardCd ? 7 : 6;
+  const tableColSpan = showCardCd ? 8 : 7;
 
   const handleAuthFailure = useCallback(
     (msg: string) => {
@@ -630,7 +637,7 @@ function BidderRegistrationAuthed({
         if (cdFilter === 'ready' && cd?.tone !== 'clear') return false;
       }
       if (!q) return true;
-      const hay = `${b.id} ${b.name} ${b.role} ${b.password}`.toLowerCase();
+      const hay = `${b.id} ${b.name} ${b.role} ${b.jobClass ?? ''} ${b.password}`.toLowerCase();
       return hay.includes(q);
     });
   }, [bidders, searchTerm, statusFilter, cdFilter, showCardCd]);
@@ -680,6 +687,7 @@ function BidderRegistrationAuthed({
       id: b.id,
       name: b.name,
       role: b.role,
+      jobClass: b.jobClass,
       password: b.password,
       active: b.active,
     });
@@ -712,6 +720,7 @@ function BidderRegistrationAuthed({
         const payload: BidderInput = {
           name,
           role: draft.role,
+          jobClass: draft.jobClass,
           password,
         };
         const created = await createBidderRequest(payload);
@@ -723,10 +732,11 @@ function BidderRegistrationAuthed({
         void swalSuccess(`"${created.name}" has been added.`);
       } else {
         // Password and active are managed elsewhere (row toggle / create flow),
-        // so the edit modal only patches name + role.
+        // so the edit modal only patches name + role + class.
         const patch: BidderUpdate = {
           name,
           role: draft.role,
+          jobClass: draft.jobClass,
         };
         const updated = await updateBidderRequest(draft.id, patch);
         setBidders((prev) =>
@@ -1021,6 +1031,7 @@ function BidderRegistrationAuthed({
                 <th className="px-4 py-3">ID</th>
                 <th className="px-4 py-3">Name</th>
                 <th className="px-4 py-3">Role</th>
+                <th className="px-4 py-3">Class</th>
                 <th className="px-4 py-3">Password</th>
                 <th className="px-4 py-3">Status</th>
                 {showCardCd ? <th className="px-4 py-3">Card CD</th> : null}
@@ -1205,6 +1216,23 @@ function BidderRegistrationAuthed({
                       {opt}
                     </button>
                   ))}
+                </div>
+              </div>
+              <div>
+                <label
+                  htmlFor="bidder-class"
+                  className="block text-[10px] font-black uppercase tracking-widest text-slate-400"
+                >
+                  Class
+                </label>
+                <div className="mt-1.5">
+                  <ClassSelect
+                    id="bidder-class"
+                    value={draft.jobClass}
+                    onChange={(c) => setDraft((d) => ({ ...d, jobClass: c }))}
+                    placeholder="— No class —"
+                    allowClear
+                  />
                 </div>
               </div>
               {!isEditing && (

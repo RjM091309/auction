@@ -7,6 +7,7 @@
  */
 
 import crypto from 'node:crypto';
+import { sanitizeMemberClass } from './memberClasses.js';
 import {
   appendBidderAuditLog,
   buildBidderEditDetails,
@@ -131,6 +132,7 @@ function rowToBidder(row) {
     id: Number(row.id),
     name: String(row.name ?? ''),
     role,
+    jobClass: sanitizeMemberClass(row.job_class),
     password: String(row.password ?? ''),
     active: Number(row.active) === 1,
     approvalStatus: sanitizeApprovalStatus(row.approval_status ?? row.approvalStatus),
@@ -212,7 +214,7 @@ export async function authBidder(pool, body, meta = {}) {
   if (!password) throw clientError(400, 'Password is required');
 
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active, approval_status FROM members WHERE name = ? LIMIT 1`,
+    `SELECT id, name, role, job_class, password, active, approval_status FROM members WHERE name = ? LIMIT 1`,
     [name]
   );
   const recordFail = () => {
@@ -355,7 +357,7 @@ export async function verifyMemberCredentials(pool, body, meta = {}) {
   if (!password) throw clientError(400, 'Password is required');
 
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active, approval_status FROM members WHERE name = ? LIMIT 1`,
+    `SELECT id, name, role, job_class, password, active, approval_status FROM members WHERE name = ? LIMIT 1`,
     [name]
   );
   const recordFail = () => {
@@ -399,7 +401,7 @@ export async function verifyMemberCredentials(pool, body, meta = {}) {
  */
 export async function listActiveMembers(pool) {
   const [rows] = await pool.query(
-    `SELECT id, name, role FROM members
+    `SELECT id, name, role, job_class FROM members
      WHERE active = 1
      ORDER BY FIELD(role, 'Developer', 'Admin', 'Officer', 'Member'), name ASC`
   );
@@ -407,6 +409,7 @@ export async function listActiveMembers(pool) {
     id: Number(r.id),
     name: String(r.name),
     role: r.role,
+    jobClass: sanitizeMemberClass(r.job_class),
   }));
 }
 
@@ -461,7 +464,7 @@ export async function listBidders(pool, actor) {
   // Pending registrations are surfaced via the dedicated `listPendingBidders`
   // call, so the main Bidders table only shows approved + rejected rows.
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active, approval_status
+    `SELECT id, name, role, job_class, password, active, approval_status
      FROM members
      WHERE approval_status <> 'pending'
      ORDER BY active DESC, name ASC`
@@ -478,7 +481,7 @@ export async function listBidders(pool, actor) {
 export async function listPendingBidders(pool, actor) {
   requireEditPermission(actor);
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active, approval_status
+    `SELECT id, name, role, job_class, password, active, approval_status
      FROM members
      WHERE approval_status = 'pending'
      ORDER BY id ASC`
@@ -521,7 +524,7 @@ export async function approvePendingBidder(pool, idRaw, actor) {
     [id]
   );
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
+    `SELECT id, name, role, job_class, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
   const bidder = redactPasswordForActor(rowToBidder(rows[0]), actor);
@@ -568,7 +571,7 @@ export async function rejectPendingBidder(pool, idRaw, actor) {
   );
   invalidateSessionsForMember(id);
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
+    `SELECT id, name, role, job_class, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
   const bidder = redactPasswordForActor(rowToBidder(rows[0]), actor);
@@ -593,18 +596,19 @@ export async function createBidder(pool, body, actor) {
   }
   const rawPassword = sanitizePassword(body?.password);
   if (!rawPassword) throw clientError(400, 'Password is required');
+  const jobClass = sanitizeMemberClass(body?.jobClass);
 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
     const [ins] = await conn.query(
-      `INSERT INTO members (name, role, password, active) VALUES (?, ?, ?, 1)`,
-      [name, role, rawPassword]
+      `INSERT INTO members (name, role, job_class, password, active) VALUES (?, ?, ?, ?, 1)`,
+      [name, role, jobClass, rawPassword]
     );
     const id = Number(ins.insertId);
     await conn.commit();
     const [rows] = await conn.query(
-      `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
+      `SELECT id, name, role, job_class, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
       [id]
     );
     const bidder = redactPasswordForActor(rowToBidder(rows[0]), actor);
@@ -631,7 +635,7 @@ export async function updateBidder(pool, idRaw, body, actor) {
   if (id == null) throw clientError(400, 'Invalid bidder id');
 
   const [existing] = await pool.query(
-    `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
+    `SELECT id, name, role, job_class, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
   if (!Array.isArray(existing) || existing.length === 0) {
@@ -676,6 +680,10 @@ export async function updateBidder(pool, idRaw, body, actor) {
       sets.push('role = ?');
       args.push(nextRole);
     }
+    if (Object.prototype.hasOwnProperty.call(body, 'jobClass')) {
+      sets.push('job_class = ?');
+      args.push(sanitizeMemberClass(body.jobClass));
+    }
     if (Object.prototype.hasOwnProperty.call(body, 'password')) {
       if (isDeveloper) {
         throw clientError(403, 'Developer accounts are protected and cannot be modified');
@@ -696,7 +704,7 @@ export async function updateBidder(pool, idRaw, body, actor) {
   args.push(id);
   await pool.query(`UPDATE members SET ${sets.join(', ')} WHERE id = ?`, args);
   const [rows] = await pool.query(
-    `SELECT id, name, role, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
+    `SELECT id, name, role, job_class, password, active, approval_status FROM members WHERE id = ? LIMIT 1`,
     [id]
   );
   const updated = rowToBidder(rows[0]);
@@ -890,6 +898,7 @@ export async function publicRegisterMember(pool, body, meta = {}) {
   if (name.length < 2) throw clientError(400, 'IGN must be at least 2 characters');
   if (name.length > 32) throw clientError(400, 'IGN must be at most 32 characters');
   if (!password) throw clientError(400, 'Password is required');
+  const jobClass = sanitizeMemberClass(body?.jobClass);
   if (password.length < 4) {
     throw clientError(400, 'Password must be at least 4 characters');
   }
@@ -918,9 +927,9 @@ export async function publicRegisterMember(pool, body, meta = {}) {
       throw clientError(409, 'This IGN is already registered. Please pick another.');
     }
     const [ins] = await conn.query(
-      `INSERT INTO members (name, role, password, active, approval_status)
-       VALUES (?, 'Member', ?, 0, 'pending')`,
-      [name, password]
+      `INSERT INTO members (name, role, job_class, password, active, approval_status)
+       VALUES (?, 'Member', ?, ?, 0, 'pending')`,
+      [name, jobClass, password]
     );
     const id = Number(ins.insertId);
     await conn.commit();

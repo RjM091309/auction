@@ -84,6 +84,8 @@ import {
   adjustMatchScore,
   renameTeam,
   setMatchLive,
+  listPool,
+  removeFromPool,
 } from './tournaments.js';
 
 const PORT = Number(process.env.PORT ?? 3333);
@@ -974,6 +976,28 @@ async function requireTournamentAdmin(req, res, roles = null) {
   return actor;
 }
 
+app.get('/api/tournament-pool', async (_req, res) => {
+  try {
+    res.json({ players: await listPool(pool) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.delete('/api/tournament-pool/:memberId', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res);
+    if (!actor) return;
+    await removeFromPool(pool, req.params.memberId);
+    console.log(
+      `[audit] tournament pool remove member=${req.params.memberId} by=${actor.name} ip=${clientIp(req)}`
+    );
+    res.json({ players: await listPool(pool) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 app.get('/api/tournaments', async (_req, res) => {
   try {
     res.json({ tournaments: await listTournaments(pool) });
@@ -993,7 +1017,7 @@ app.get('/api/tournaments/:id', async (req, res) => {
 app.post('/api/public/tournaments/:id/register', async (req, res) => {
   try {
     const member = await verifyMemberCredentials(pool, req.body, { ip: clientIp(req) });
-    const { started } = await registerPlayer(pool, req.params.id, member);
+    const { started } = await registerPlayer(pool, req.params.id, member, req.body?.jobClass);
     console.log(
       `[audit] tournament register id=${req.params.id} member=${member.id} name="${member.name}" started=${started ? 1 : 0} ip=${clientIp(req)}`
     );
@@ -1022,7 +1046,7 @@ app.post('/api/tournaments', async (req, res) => {
     if (!actor) return;
     const tournament = await createTournament(pool, req.body, actor);
     console.log(
-      `[audit] tournament create id=${tournament.id} name="${tournament.name}" max=${tournament.maxPlayers} by=${actor.name} ip=${clientIp(req)}`
+      `[audit] tournament create id=${tournament.id} name="${tournament.name}" max=${tournament.maxPlayers ?? 'open'} by=${actor.name} ip=${clientIp(req)}`
     );
     res.status(201).json({ tournament });
   } catch (e) {
@@ -1034,9 +1058,11 @@ app.delete('/api/tournaments/:id', async (req, res) => {
   try {
     const actor = await requireTournamentAdmin(req, res, ['Admin', 'Developer']);
     if (!actor) return;
-    await deleteTournament(pool, req.params.id);
-    console.log(`[audit] tournament delete id=${req.params.id} by=${actor.name} ip=${clientIp(req)}`);
-    res.json({ ok: true });
+    const { carried } = await deleteTournament(pool, req.params.id);
+    console.log(
+      `[audit] tournament delete id=${req.params.id} carried=${carried} by=${actor.name} ip=${clientIp(req)}`
+    );
+    res.json({ ok: true, carried });
   } catch (e) {
     sendError(res, e);
   }
@@ -1060,7 +1086,7 @@ app.post('/api/tournaments/:id/shuffle', async (req, res) => {
   try {
     const actor = await requireTournamentAdmin(req, res);
     if (!actor) return;
-    await adminShuffle(pool, req.params.id);
+    await adminShuffle(pool, req.params.id, actor);
     console.log(`[audit] tournament shuffle id=${req.params.id} by=${actor.name} ip=${clientIp(req)}`);
     res.json({ tournament: await getTournament(pool, req.params.id) });
   } catch (e) {

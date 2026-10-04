@@ -2,18 +2,27 @@
  * Tournament brackets — 3v3 double elimination.
  *
  * Flow:
- *   1. Officer/Admin/Developer creates a tournament with a player cap
- *      (multiple of the team size).
+ *   1. Officer/Admin/Developer creates a tournament, either with a player cap
+ *      (multiple of the team size) or open (no cap) when the turnout is not
+ *      known yet.
  *   2. Members register themselves with IGN + password (same credential
  *      check as "Join queue").
- *   3. The registration that fills the last slot shuffles everyone into
- *      teams server-side and seeds the bracket. Admins can also start early
- *      or reshuffle before any result is recorded.
+ *   3. With a cap, the registration that fills the last slot shuffles
+ *      everyone into teams server-side and seeds the bracket. Admins can also
+ *      start early (the only way to start an open tournament) or reshuffle
+ *      before any result is recorded. Players past the last full team — the
+ *      latest signups — sit out as reserves.
  *   4. Admins click the winning team of each match; the bracket is
  *      recomputed from `results_json` (`tournamentBracket.js`).
+ *
+ * Deleting an unfinished tournament moves its players into a waiting pool
+ * (`tournament_pool`); the next tournament created is seeded from it, so
+ * players don't have to register again. Pool entries stay until picked up
+ * or removed by an admin.
  */
 import { computeDoubleElimBracket } from './tournamentBracket.js';
 import { shuffleIds } from './shuffleRandom.js';
+import { sanitizeMemberClass } from './memberClasses.js';
 
 export const TEAM_SIZE = 3;
 const MIN_TEAMS = 2;
@@ -51,6 +60,11 @@ function liveMatchIds(stored, bracket) {
   return [...new Set(stored.map(String))].filter((mid) => ready.has(mid));
 }
 
+/** Player cap, or null for open registration. */
+function playerCap(row) {
+  return row.max_players == null ? null : Number(row.max_players);
+}
+
 function rowToSummary(row, playerCount) {
   const teams = parseJson(row.teams_json, []);
   const results = parseJson(row.results_json, {});
@@ -68,7 +82,7 @@ function rowToSummary(row, playerCount) {
     id: Number(row.id),
     name: String(row.name),
     status: row.status,
-    maxPlayers: Number(row.max_players),
+    maxPlayers: playerCap(row),
     teamSize: Number(row.team_size),
     playerCount: Number(playerCount ?? 0),
     createdBy: String(row.created_by ?? ''),
@@ -102,25 +116,44 @@ export async function getTournament(pool, idRaw) {
   );
   const teams = parseJson(row.teams_json, []);
   const results = parseJson(row.results_json, {});
+  // Job classes are read live from `members` so profile edits show up.
+  const memberIds = [
+    ...new Set([...players.map((p) => Number(p.member_id)), ...teams.flatMap((t) => t.members.map((m) => Number(m.id)))]),
+  ];
+  const classById = new Map();
+  if (memberIds.length) {
+    const [cls] = await pool.query(`SELECT id, job_class FROM members WHERE id IN (?)`, [memberIds]);
+    for (const c of cls) classById.set(Number(c.id), c.job_class ?? null);
+  }
+  for (const t of teams) {
+    for (const m of t.members) m.jobClass = classById.get(Number(m.id)) ?? null;
+  }
   // Before the shuffle, preview the empty bracket for the planned team count
-  // so players can see the layout while signups are open. Placeholder ids
+  // (from the cap, or from the signups so far when registration is open) so
+  // players can see the layout while signups are open. Placeholder ids
   // match the ids `shuffleIntoTeams` will assign (t1..tN).
   const preview = teams.length < MIN_TEAMS;
-  const plannedTeams = Math.floor(Number(row.max_players) / (Number(row.team_size) || TEAM_SIZE));
+  const teamSize = Number(row.team_size) || TEAM_SIZE;
+  const plannedTeams = Math.floor((playerCap(row) ?? players.length) / teamSize);
+  const inTeam = new Set(teams.flatMap((t) => t.members.map((m) => Number(m.id))));
   const bracket = computeDoubleElimBracket(
     preview
       ? Array.from({ length: Math.max(MIN_TEAMS, plannedTeams) }, (_, i) => `t${i + 1}`)
       : teams.map((t) => t.id),
     preview ? {} : results
   );
+  const playerList = players.map((p) => ({
+    memberId: Number(p.member_id),
+    name: String(p.name),
+    jobClass: classById.get(Number(p.member_id)) ?? null,
+    registeredAt: Number(p.registered_at),
+  }));
   return {
     ...rowToSummary(row, players.length),
-    players: players.map((p) => ({
-      memberId: Number(p.member_id),
-      name: String(p.name),
-      registeredAt: Number(p.registered_at),
-    })),
+    players: playerList,
     teams,
+    // Registered but left out of the teams (count not a multiple of the team size).
+    reserves: preview ? [] : playerList.filter((p) => !inTeam.has(p.memberId)),
     bracket: {
       preview,
       matches: bracket.matches,
@@ -134,28 +167,98 @@ export async function getTournament(pool, idRaw) {
 export async function createTournament(pool, body, actor) {
   const name = typeof body?.name === 'string' ? body.name.trim().slice(0, 128) : '';
   if (!name) throw clientError(400, 'Tournament name is required');
-  const maxPlayers = Number(body?.maxPlayers);
-  if (!Number.isInteger(maxPlayers) || maxPlayers < TEAM_SIZE * MIN_TEAMS) {
+  // Empty / null / 0 = open registration: no cap, admin starts it manually.
+  const rawCap = body?.maxPlayers;
+  const open = rawCap == null || rawCap === '' || Number(rawCap) === 0;
+  const maxPlayers = open ? null : Number(rawCap);
+  if (!open && (!Number.isInteger(maxPlayers) || maxPlayers < TEAM_SIZE * MIN_TEAMS)) {
     throw clientError(400, `Player count must be at least ${TEAM_SIZE * MIN_TEAMS}`);
   }
-  if (maxPlayers > MAX_PLAYERS) {
+  if (!open && maxPlayers > MAX_PLAYERS) {
     throw clientError(400, `Player count must be at most ${MAX_PLAYERS}`);
   }
-  if (maxPlayers % TEAM_SIZE !== 0) {
+  if (!open && maxPlayers % TEAM_SIZE !== 0) {
     throw clientError(400, `Player count must be a multiple of ${TEAM_SIZE} (3v3 teams)`);
   }
-  const [res] = await pool.query(
-    `INSERT INTO tournaments (name, status, max_players, team_size, created_by, created_at)
-     VALUES (?, 'registration', ?, ?, ?, ?)`,
-    [name, maxPlayers, TEAM_SIZE, actor.name, Date.now()]
-  );
-  return getTournament(pool, res.insertId);
+  const conn = await pool.getConnection();
+  let id;
+  try {
+    await conn.beginTransaction();
+    const [res] = await conn.query(
+      `INSERT INTO tournaments (name, status, max_players, team_size, created_by, created_at)
+       VALUES (?, 'registration', ?, ?, ?, ?)`,
+      [name, maxPlayers, TEAM_SIZE, actor.name, Date.now()]
+    );
+    id = res.insertId;
+    // Seed from the waiting pool (earliest first, up to the cap). Overflow
+    // stays in the pool for the next tournament. A full cap is not
+    // auto-started here — the admin starts it.
+    const [pooled] = await conn.query(
+      `SELECT member_id, name, registered_at FROM tournament_pool
+       ORDER BY registered_at ASC, member_id ASC LIMIT ? FOR UPDATE`,
+      [maxPlayers ?? MAX_PLAYERS]
+    );
+    if (pooled.length) {
+      await conn.query(
+        `INSERT INTO tournament_players (tournament_id, member_id, name, registered_at) VALUES ?`,
+        [pooled.map((p) => [id, p.member_id, p.name, p.registered_at])]
+      );
+      await conn.query(`DELETE FROM tournament_pool WHERE member_id IN (?)`, [
+        pooled.map((p) => p.member_id),
+      ]);
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback().catch(() => {});
+    throw e;
+  } finally {
+    conn.release();
+  }
+  return getTournament(pool, id);
 }
 
+/**
+ * Delete a tournament. Players of an unfinished one (registration or
+ * ongoing) go back to the waiting pool, keeping their original signup time.
+ * Returns how many were carried over.
+ */
 export async function deleteTournament(pool, idRaw) {
   const id = parseTournamentId(idRaw);
-  const [res] = await pool.query(`DELETE FROM tournaments WHERE id = ?`, [id]);
-  if (!res.affectedRows) throw clientError(404, 'Tournament not found');
+  return withLockedTournament(pool, id, async (conn, row) => {
+    let carried = 0;
+    if (row.status !== 'completed') {
+      const [res] = await conn.query(
+        `INSERT IGNORE INTO tournament_pool (member_id, name, registered_at)
+         SELECT member_id, name, registered_at FROM tournament_players WHERE tournament_id = ?`,
+        [id]
+      );
+      carried = res.affectedRows;
+    }
+    await conn.query(`DELETE FROM tournaments WHERE id = ?`, [id]);
+    return { carried };
+  });
+}
+
+export async function listPool(pool) {
+  const [rows] = await pool.query(
+    `SELECT member_id, name, registered_at FROM tournament_pool
+     ORDER BY registered_at ASC, member_id ASC`
+  );
+  return rows.map((p) => ({
+    memberId: Number(p.member_id),
+    name: String(p.name),
+    registeredAt: Number(p.registered_at),
+  }));
+}
+
+/** Admin: remove a player from the waiting pool for good. */
+export async function removeFromPool(pool, memberIdRaw) {
+  const memberId = Number(memberIdRaw);
+  if (!Number.isInteger(memberId) || memberId <= 0) {
+    throw clientError(400, 'Invalid member id');
+  }
+  const [res] = await pool.query(`DELETE FROM tournament_pool WHERE member_id = ?`, [memberId]);
+  if (!res.affectedRows) throw clientError(404, 'Player is not in the waiting pool');
 }
 
 /** Run `fn(conn, row)` inside a transaction holding a row lock on the tournament. */
@@ -179,33 +282,80 @@ async function withLockedTournament(pool, id, fn) {
   }
 }
 
-/** Shuffle registered players into teams and open the bracket. */
+/**
+ * Randomly split players into teams of `teamSize` so that no team has two
+ * players of the same job class whenever that is possible (each class has at
+ * most one player per team). When a class has more players than there are
+ * teams, its extras are spread so as few teams as possible share a class.
+ *
+ * Method: order players by class — biggest class first, ties and players
+ * within a class shuffled — then deal them round-robin across the teams.
+ * A class of c ≤ teamCount players lands on c consecutive (mod teamCount)
+ * slots, i.e. c different teams. Players without a class go last and are
+ * unconstrained. Teams and members are shuffled afterwards so team numbers
+ * (= seeds) and pairings stay random.
+ *
+ * @param {{ id: number, name: string, jobClass: string | null }[]} players
+ * @param {number} teamSize
+ * @returns {{ id: number, name: string, jobClass: string | null }[][]}
+ */
+export function buildClassBalancedTeams(players, teamSize) {
+  const teamCount = Math.floor(players.length / teamSize);
+  const byClass = new Map();
+  const classless = [];
+  for (const p of players) {
+    if (!p.jobClass) {
+      classless.push(p);
+      continue;
+    }
+    const list = byClass.get(p.jobClass) ?? [];
+    list.push(p);
+    byClass.set(p.jobClass, list);
+  }
+  const shuffled = (list) => shuffleIds(list.map((_, i) => i)).map((i) => list[i]);
+  const groups = shuffled([...byClass.values()].map(shuffled)).sort((x, y) => y.length - x.length);
+  const ordered = [...groups.flat(), ...shuffled(classless)];
+
+  const offset = shuffleIds(Array.from({ length: teamCount }, (_, i) => i))[0] ?? 0;
+  const teams = Array.from({ length: teamCount }, () => []);
+  ordered.forEach((p, i) => teams[(i + offset) % teamCount].push(p));
+  return shuffled(teams).map(shuffled);
+}
+
+/**
+ * Shuffle registered players into teams and open the bracket. When the count
+ * is not a multiple of the team size, the latest signups (first come, first
+ * served) are left out as reserves — `getTournament` derives them.
+ */
 async function shuffleIntoTeams(conn, row) {
   const [players] = await conn.query(
-    `SELECT member_id, name FROM tournament_players WHERE tournament_id = ?`,
+    `SELECT member_id, name FROM tournament_players WHERE tournament_id = ?
+     ORDER BY registered_at ASC, member_id ASC`,
     [row.id]
   );
   const teamSize = Number(row.team_size) || TEAM_SIZE;
   if (players.length < teamSize * MIN_TEAMS) {
     throw clientError(400, `Need at least ${teamSize * MIN_TEAMS} players to start`);
   }
-  if (players.length % teamSize !== 0) {
-    throw clientError(
-      400,
-      `Player count (${players.length}) must be a multiple of ${teamSize} to form ${teamSize}v${teamSize} teams`
-    );
+  const starters = players.slice(0, players.length - (players.length % teamSize));
+  const ids = starters.map((p) => Number(p.member_id));
+  const classById = new Map();
+  if (ids.length) {
+    const [cls] = await conn.query(`SELECT id, job_class FROM members WHERE id IN (?)`, [ids]);
+    for (const c of cls) classById.set(Number(c.id), c.job_class ?? null);
   }
-  const byId = new Map(players.map((p) => [Number(p.member_id), String(p.name)]));
-  const order = shuffleIds([...byId.keys()]);
-  const teams = [];
-  for (let i = 0; i < order.length; i += teamSize) {
-    const n = teams.length + 1;
-    teams.push({
-      id: `t${n}`,
-      name: `Team ${n}`,
-      members: order.slice(i, i + teamSize).map((mid) => ({ id: mid, name: byId.get(mid) })),
-    });
-  }
+  const teams = buildClassBalancedTeams(
+    starters.map((p) => ({
+      id: Number(p.member_id),
+      name: String(p.name),
+      jobClass: classById.get(Number(p.member_id)) ?? null,
+    })),
+    teamSize
+  ).map((members, i) => ({
+    id: `t${i + 1}`,
+    name: `Team ${i + 1}`,
+    members: members.map((m) => ({ id: m.id, name: m.name })),
+  }));
   await conn.query(
     `UPDATE tournaments
      SET status = 'ongoing', teams_json = ?, results_json = '{}', live_matches_json = NULL,
@@ -221,8 +371,10 @@ async function shuffleIntoTeams(conn, row) {
  * Returns `{ started }` — true when this signup filled the last slot and
  * triggered the automatic team shuffle.
  */
-export async function registerPlayer(pool, idRaw, member) {
+export async function registerPlayer(pool, idRaw, member, jobClassRaw) {
   const id = parseTournamentId(idRaw);
+  const jobClass = sanitizeMemberClass(jobClassRaw);
+  if (!jobClass) throw clientError(400, 'Please select your class');
   return withLockedTournament(pool, id, async (conn, row) => {
     if (row.status !== 'registration') {
       throw clientError(400, 'Registration for this tournament is closed');
@@ -236,7 +388,8 @@ export async function registerPlayer(pool, idRaw, member) {
       [id, member.id]
     );
     if (dup.length) throw clientError(400, `${member.name} is already registered`);
-    if (Number(n) >= Number(row.max_players)) {
+    const cap = playerCap(row);
+    if (Number(n) >= (cap ?? MAX_PLAYERS)) {
       throw clientError(400, 'This tournament is already full');
     }
     await conn.query(
@@ -244,7 +397,9 @@ export async function registerPlayer(pool, idRaw, member) {
        VALUES (?, ?, ?, ?)`,
       [id, member.id, member.name, Date.now()]
     );
-    if (Number(n) + 1 >= Number(row.max_players)) {
+    // The picked class is saved on the member profile (Bidders tab "Class").
+    await conn.query(`UPDATE members SET job_class = ? WHERE id = ?`, [jobClass, member.id]);
+    if (cap != null && Number(n) + 1 >= cap) {
       await shuffleIntoTeams(conn, row);
       return { started: true };
     }
@@ -272,16 +427,19 @@ export async function removePlayer(pool, idRaw, memberIdRaw) {
 }
 
 /**
- * Admin: start early (registration) or reshuffle teams (ongoing, before any
- * match result is recorded).
+ * Admin: start early (registration; Officer+) or reshuffle teams (ongoing,
+ * before any match result is recorded; Developer only).
  */
-export async function adminShuffle(pool, idRaw) {
+export async function adminShuffle(pool, idRaw, actor) {
   const id = parseTournamentId(idRaw);
   return withLockedTournament(pool, id, async (conn, row) => {
     if (row.status === 'completed') {
       throw clientError(400, 'Tournament is already completed');
     }
     if (row.status === 'ongoing') {
+      if (actor?.role !== 'Developer') {
+        throw clientError(403, 'Only a Developer can reshuffle teams');
+      }
       const results = parseJson(row.results_json, {});
       if (Object.keys(results).length > 0) {
         throw clientError(400, 'Cannot reshuffle after match results are recorded');

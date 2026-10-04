@@ -1,5 +1,6 @@
 import { apiUrl } from './apiState';
 import { loadStoredActor } from './apiBidders';
+import type { MemberClass } from './memberClasses';
 
 const cred: RequestInit = { credentials: 'include' };
 
@@ -9,7 +10,8 @@ export interface TournamentSummary {
   id: number;
   name: string;
   status: TournamentStatus;
-  maxPlayers: number;
+  /** Player cap, or null for open registration (admin starts it manually). */
+  maxPlayers: number | null;
   teamSize: number;
   playerCount: number;
   createdBy: string;
@@ -24,13 +26,14 @@ export interface TournamentSummary {
 export interface TournamentPlayer {
   memberId: number;
   name: string;
+  jobClass?: MemberClass | null;
   registeredAt: number;
 }
 
 export interface TournamentTeam {
   id: string;
   name: string;
-  members: { id: number; name: string }[];
+  members: { id: number; name: string; jobClass?: MemberClass | null }[];
 }
 
 export type MatchState = 'pending' | 'ready' | 'done' | 'bye';
@@ -54,6 +57,8 @@ export interface BracketMatch {
 export interface TournamentDetail extends TournamentSummary {
   players: TournamentPlayer[];
   teams: TournamentTeam[];
+  /** Registered players left out of the teams (latest signups past the last full team). */
+  reserves: TournamentPlayer[];
   bracket: {
     /** True while registration is open: placeholder teams, not clickable. */
     preview: boolean;
@@ -117,7 +122,7 @@ export async function fetchTournament(id: number): Promise<TournamentDetail> {
 
 export async function createTournamentRequest(
   name: string,
-  maxPlayers: number
+  maxPlayers: number | null
 ): Promise<TournamentDetail> {
   const o = await request<{ tournament: TournamentDetail }>('/api/tournaments', {
     method: 'POST',
@@ -126,18 +131,34 @@ export async function createTournamentRequest(
   return o.tournament;
 }
 
-export async function deleteTournamentRequest(id: number): Promise<void> {
-  await request(`/api/tournaments/${id}`, { method: 'DELETE' });
+/** Returns how many players were moved to the waiting pool. */
+export async function deleteTournamentRequest(id: number): Promise<number> {
+  const o = await request<{ carried?: number }>(`/api/tournaments/${id}`, { method: 'DELETE' });
+  return Number(o?.carried ?? 0);
+}
+
+/** Players from deleted tournaments, waiting to join the next one created. */
+export async function fetchTournamentPool(): Promise<TournamentPlayer[]> {
+  const o = await request<{ players?: TournamentPlayer[] }>('/api/tournament-pool');
+  return Array.isArray(o?.players) ? o.players : [];
+}
+
+export async function removeFromTournamentPool(memberId: number): Promise<TournamentPlayer[]> {
+  const o = await request<{ players?: TournamentPlayer[] }>(`/api/tournament-pool/${memberId}`, {
+    method: 'DELETE',
+  });
+  return Array.isArray(o?.players) ? o.players : [];
 }
 
 export async function registerForTournament(
   id: number,
   name: string,
-  password: string
+  password: string,
+  jobClass: MemberClass
 ): Promise<{ started: boolean; tournament: TournamentDetail }> {
   return request(`/api/public/tournaments/${id}/register`, {
     method: 'POST',
-    body: JSON.stringify({ name, password }),
+    body: JSON.stringify({ name, password, jobClass }),
   });
 }
 
