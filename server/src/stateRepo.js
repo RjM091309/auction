@@ -40,7 +40,7 @@ import {
   appendBidderStateLog,
 } from './bidderStateLog.js';
 import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
-import { applySureWinPin, applySureWinPinsToItems } from './sureWinPin.js';
+import { applySureWinPin } from './sureWinPin.js';
 import { shuffleIds, takeIssuedShuffleOrders } from './shuffleRandom.js';
 
 const EVENT_MODE_META_KEY = 'event_mode';
@@ -1278,8 +1278,10 @@ export async function replaceFullState(pool, body, opts = {}) {
   const prevItemRowById = new Map(oldItemRows.map((r) => [r.id, r]));
 
   if (!prevShuffleLocked && body.shuffleLocked === true) {
+    // Pins are already baked into the issued order (and the reshuffle
+    // fallback). Re-pinning here would move members after the client's
+    // orphan/IGN prune and change the result the reel just revealed.
     enforceServerShuffleOrder(body.items, oldQueueOrderedByItem, opts.shuffleActorId);
-    applySureWinPinsToItems(body.items);
   }
 
   const [eventMetaRows] = await pool.query(
