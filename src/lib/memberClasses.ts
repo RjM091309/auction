@@ -8,6 +8,8 @@ export const MEMBER_CLASSES = [
   'Sniper',
   'Bard / Gypsy',
   'Priest',
+  'High Wizard',
+  'Professor',
   'Mastersmith',
   'Biochemist',
   'Doram',

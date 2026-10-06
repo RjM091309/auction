@@ -103,3 +103,10 @@
 .swal2-popup .swal2-timer-progress-bar {
   background: rgb(37 99 235) !important;
 }
+
+/* Tournament banners: light streak running around the border (SVG stroke). */
+@keyframes banner-border-run {
+  to {
+    stroke-dashoffset: -100;
+  }
+}

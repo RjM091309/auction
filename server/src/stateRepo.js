@@ -40,7 +40,8 @@ import {
   appendBidderStateLog,
 } from './bidderStateLog.js';
 import { isAuctionItemHiddenForPublic } from './hiddenAuctionItems.js';
-import { applySureWinPinsToItems } from './sureWinPin.js';
+import { applySureWinPin, applySureWinPinsToItems } from './sureWinPin.js';
+import { shuffleIds, takeIssuedShuffleOrders } from './shuffleRandom.js';
 
 const EVENT_MODE_META_KEY = 'event_mode';
 const REWARD_RANK_META_KEY = 'reward_rank';
@@ -1197,7 +1198,50 @@ function protectLockedQueueHead(prevIds, nextIds, headSlots) {
   return prevKept.concat(nextIds.filter((id) => !prevSet.has(id)));
 }
 
-export async function replaceFullState(pool, body) {
+
+/**
+ * Start Shuffle (lock false → true): never persist a client-chosen order.
+ * Each active queue gets the order `/api/shuffle/pin-queues` issued (minus
+ * members the client pruned before saving); a queue the client left in its
+ * saved order (e.g. hidden items) stays as-is; any other order (no issued
+ * order, members added, tampered) is reshuffled here. Mutates `items` in place.
+ * @param {any[]} items
+ * @param {Map<string, number[]>} oldQueueOrderedByItem
+ * @param {number | null | undefined} actorId officer who started the shuffle
+ */
+function enforceServerShuffleOrder(items, oldQueueOrderedByItem, actorId) {
+  if (!Array.isArray(items)) return;
+  const issued = takeIssuedShuffleOrders(actorId);
+  for (const it of items) {
+    if (!it || it.status !== 'active') continue;
+    const ids = (Array.isArray(it.interestedMemberIds) ? it.interestedMemberIds : []).map(
+      (id) => Number(id)
+    );
+    if (ids.length <= 1) continue;
+    const serverIds = issued.get(it.id);
+    const idSet = new Set(ids);
+    if (serverIds && ids.every((id) => serverIds.includes(id))) {
+      it.interestedMemberIds = serverIds.filter((id) => idSet.has(id));
+      continue;
+    }
+    const prevQueue = oldQueueOrderedByItem.get(it.id) ?? [];
+    if (prevQueue.length === ids.length && prevQueue.every((id, i) => id === ids[i])) {
+      continue;
+    }
+    console.warn(
+      `[shuffle-guard] no matching server order for "${it.name}" (${it.id}); reshuffled server-side`
+    );
+    it.interestedMemberIds = applySureWinPin(shuffleIds(ids), String(it.name ?? ''));
+  }
+}
+
+/**
+ * @param {any} pool
+ * @param {any} body
+ * @param {{ shuffleActorId?: number | null }} [opts] officer whose issued
+ *   shuffle order applies when this save starts the shuffle
+ */
+export async function replaceFullState(pool, body, opts = {}) {
   if (!isAuctionState(body)) {
     const err = new Error('Invalid body: expected { items: [], members: [] }');
     err.statusCode = 400;
@@ -1213,10 +1257,6 @@ export async function replaceFullState(pool, body) {
     Array.isArray(shuffleMetaPrev) &&
     shuffleMetaPrev[0] &&
     shuffleMetaPrev[0].value === '1';
-
-  if (!prevShuffleLocked && body.shuffleLocked === true) {
-    applySureWinPinsToItems(body.items);
-  }
 
   const [oldItemRows] = await pool.query(
     `SELECT id, name, type, status, winner_name AS winnerName, winner_names_json AS winnerNamesJson, revoked_winner_names_json AS revokedWinnerNamesJson FROM auction_items`
@@ -1236,6 +1276,11 @@ export async function replaceFullState(pool, body) {
   }
 
   const prevItemRowById = new Map(oldItemRows.map((r) => [r.id, r]));
+
+  if (!prevShuffleLocked && body.shuffleLocked === true) {
+    enforceServerShuffleOrder(body.items, oldQueueOrderedByItem, opts.shuffleActorId);
+    applySureWinPinsToItems(body.items);
+  }
 
   const [eventMetaRows] = await pool.query(
     'SELECT value FROM app_meta WHERE `key` = ? LIMIT 1',

@@ -70,7 +70,7 @@ import {
 import { getOverrunSundayKey } from './overrunWeek.js';
 import { getAuctionWeekTimezone } from './auctionWeek.js';
 import { pinShuffleQueueItems } from './sureWinPin.js';
-import { shuffleIds } from './shuffleRandom.js';
+import { shuffleIds, rememberIssuedShuffleOrders } from './shuffleRandom.js';
 import { getOnCdList, listBiddersWithCardCd } from './cardCdApi.js';
 import {
   listTournaments,
@@ -419,7 +419,9 @@ app.post('/api/shuffle/pin-queues', requireAuth, async (req, res) => {
         };
       })
       .filter((it) => it != null);
-    res.json({ queueByItemId: pinShuffleQueueItems(shuffledItems) });
+    const queueByItemId = pinShuffleQueueItems(shuffledItems);
+    rememberIssuedShuffleOrders(actor.id, queueByItemId);
+    res.json({ queueByItemId });
   } catch (e) {
     const code = e.statusCode ?? 500;
     if (code >= 500) console.error(e);
@@ -443,6 +445,8 @@ app.put('/api/state', requireAuth, async (req, res) => {
       prev.shuffleLocked !== true && req.body?.shuffleLocked === true;
     const willResetShuffle =
       prev.shuffleLocked === true && req.body?.shuffleLocked !== true;
+    /** @type {number | null} */
+    let shuffleActorId = null;
     if (willLockShuffle) {
       const actor = await getFreshActor(pool, token);
       if (!actor) {
@@ -450,6 +454,7 @@ app.put('/api/state', requireAuth, async (req, res) => {
           .status(401)
           .json({ error: 'You must sign in as Officer/Admin/Developer to start the shuffle' });
       }
+      shuffleActorId = actor.id;
       pendingAudits.push({
         action: 'shuffle_start',
         actor,
@@ -546,7 +551,7 @@ app.put('/api/state', requireAuth, async (req, res) => {
       }
     }
 
-    await replaceFullState(pool, req.body);
+    await replaceFullState(pool, req.body, { shuffleActorId });
     for (const entry of pendingAudits) {
       await recordAdminAudit(pool, entry);
     }
