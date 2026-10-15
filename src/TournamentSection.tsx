@@ -24,6 +24,7 @@ import {
   RotateCcw,
   Search,
   Shuffle,
+  Medal,
   Trophy,
   Play,
   Square,
@@ -774,15 +775,182 @@ function ShuffleReveal({
 }
 
 /** Gold winner banner shown once the Grand Final is decided. */
+const PORTRAIT_TONES = {
+  blue: { panel: 'border-sky-300/30 from-sky-400/35 to-blue-950/70', plate: 'bg-sky-600/90' },
+  red: { panel: 'border-rose-300/30 from-rose-400/35 to-red-950/70', plate: 'bg-rose-600/90' },
+  gold: { panel: 'border-amber-300/40 from-amber-400/40 to-amber-950/70', plate: 'bg-amber-600/90' },
+  silver: { panel: 'border-slate-200/40 from-slate-300/35 to-slate-900/70', plate: 'bg-slate-500/90' },
+  bronze: { panel: 'border-orange-300/40 from-orange-400/35 to-orange-950/70', plate: 'bg-orange-700/90' },
+  plain: { panel: 'border-white/15 from-white/15 to-slate-950/70', plate: 'bg-slate-700/90' },
+} as const;
+
+/**
+ * Fighting-game select-screen card for one member: slanted panel with a faded
+ * close-up of their class art, the full figure in front, and a name plate.
+ * The art faces left, so `flip` turns it to face right.
+ */
+function ClassPortrait({
+  member,
+  tone,
+  flip = false,
+  widthClass,
+  heightClass,
+  textClass,
+}: {
+  member: { name: string; jobClass?: MemberClass | null };
+  tone: keyof typeof PORTRAIT_TONES;
+  flip?: boolean;
+  widthClass: string;
+  heightClass: string;
+  textClass: string;
+}) {
+  const src = memberClassImage(member.jobClass);
+  const t = PORTRAIT_TONES[tone];
+  return (
+    <li className={`relative min-w-0 flex-1 ${widthClass}`} title={member.jobClass ?? undefined}>
+      <div className={`relative ${heightClass}`}>
+        <div
+          className={`absolute inset-0 -skew-x-6 overflow-hidden rounded-md border bg-gradient-to-b ${t.panel}`}
+          aria-hidden
+        >
+          {src ? (
+            <img
+              src={src}
+              alt=""
+              loading="lazy"
+              className="absolute inset-0 h-full w-full object-cover opacity-30"
+              style={{
+                objectPosition: '50% 10%',
+                transformOrigin: '50% 12%',
+                transform: `skewX(6deg) scale(${flip ? -2.6 : 2.6}, 2.6)`,
+              }}
+            />
+          ) : (
+            <span className="absolute inset-0 flex skew-x-6 items-center justify-center text-5xl font-black text-white/15">
+              {member.name.charAt(0).toUpperCase()}
+            </span>
+          )}
+          <span className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent" />
+        </div>
+        {src && (
+          <img
+            src={src}
+            alt={member.jobClass ?? ''}
+            loading="lazy"
+            className={`absolute bottom-0 left-1/2 h-[108%] max-w-none -translate-x-1/2 object-contain object-bottom ${
+              flip ? '-scale-x-100' : ''
+            }`}
+          />
+        )}
+      </div>
+      <div className={`relative -mt-2 mx-auto w-[94%] -skew-x-6 rounded-sm px-1 py-0.5 ${t.plate}`}>
+        <span className={`block skew-x-6 truncate text-center font-bold text-white ${textClass}`}>{member.name}</span>
+      </div>
+    </li>
+  );
+}
+
+/** The team that lost a decided series, or null for byes / unplayed matches. */
+function matchLoser(m: BracketMatch | undefined): string | null {
+  if (!m || m.state !== 'done' || !m.winnerTeamId) return null;
+  return m.teams.find((t) => t && t !== m.winnerTeamId) ?? null;
+}
+
+/**
+ * 2nd–4th place from the double-elimination graph: the Grand Final loser,
+ * the Lower Final loser, then the loser of the lower match feeding the
+ * Lower Final (the Upper Final loser is the Lower Final's other entrant).
+ */
+function runnerUpPlacings(matches: BracketMatch[]): { place: 2 | 3 | 4; teamId: string }[] {
+  const byId = new Map(matches.map((m) => [m.id, m]));
+  const final = matches.find((m) => m.bracket === 'final');
+  const lowerRounds = Math.max(0, ...matches.filter((m) => m.bracket === 'lower').map((m) => m.round));
+  const lowerFinal = matches.find((m) => m.bracket === 'lower' && m.round === lowerRounds);
+  const lowerSemi = lowerFinal?.feeds.map((id) => byId.get(id)).find((m) => m?.bracket === 'lower');
+  const out: { place: 2 | 3 | 4; teamId: string }[] = [];
+  for (const [place, m] of [[2, final], [3, lowerFinal], [4, lowerSemi]] as const) {
+    const teamId = matchLoser(m);
+    if (teamId) out.push({ place, teamId });
+  }
+  return out;
+}
+
+const REWARDS = {
+  bounty: { name: 'Bounty Pass', src: '/images/rewards/bountypass.png' },
+  radiant: { name: 'Radiant Pass', src: '/images/rewards/radiantpass.png' },
+} as const;
+
+/** Prize per finishing place. */
+const PRIZES: Record<1 | 2 | 3 | 4, { reward: keyof typeof REWARDS; qty: number }> = {
+  1: { reward: 'bounty', qty: 6 },
+  2: { reward: 'bounty', qty: 3 },
+  3: { reward: 'bounty', qty: 3 },
+  4: { reward: 'radiant', qty: 3 },
+};
+
+const PRIZE_SPONSOR = 'Miroku';
+
+const PLACE_STYLES = {
+  2: { label: '2nd Place', tone: 'silver', text: 'text-slate-200' },
+  3: { label: '3rd Place', tone: 'bronze', text: 'text-orange-300' },
+  4: { label: '4th Place', tone: 'plain', text: 'text-slate-400' },
+} as const;
+
+/** Prize list beside the standings (below them on narrow screens). */
+function PrizePanel() {
+  const rows = [
+    { place: 1, label: 'Champion', text: 'text-amber-300', Icon: Trophy },
+    ...([2, 3, 4] as const).map((place) => ({ place, label: PLACE_STYLES[place].label, text: PLACE_STYLES[place].text, Icon: Medal })),
+  ] as const;
+  return (
+    <aside className="w-full rounded-2xl border border-amber-300/20 bg-black/35 p-4 backdrop-blur-sm sm:p-5">
+      <p className="text-center text-[11px] font-black uppercase tracking-[0.4em] text-amber-200/90">Prize Pool</p>
+      <ul className="mt-4 space-y-2">
+        {rows.map(({ place, label, text, Icon }) => {
+          const { reward, qty } = PRIZES[place];
+          const rw = REWARDS[reward];
+          return (
+            <li
+              key={place}
+              className={`flex items-center gap-3 rounded-xl px-3 py-2 ${
+                place === 1 ? 'bg-amber-400/10 ring-1 ring-amber-300/30' : 'bg-white/5'
+              }`}
+            >
+              <span className={`flex w-24 shrink-0 items-center gap-1.5 text-[11px] font-black uppercase tracking-wider ${text}`}>
+                <Icon className="h-4 w-4 shrink-0" aria-hidden />
+                {label}
+              </span>
+              <img
+                src={rw.src}
+                alt=""
+                loading="lazy"
+                className={`shrink-0 drop-shadow-[0_0_8px_rgba(251,191,36,0.4)] ${place === 1 ? 'h-12 w-12' : 'h-10 w-10'}`}
+              />
+              <span className="min-w-0 text-left text-sm font-bold leading-tight text-slate-100">
+                <span className="font-black text-white">{qty}×</span> {rw.name}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="mt-4 text-center text-[10px] font-bold uppercase tracking-[0.3em] text-white/50">
+        Sponsored by <span className="font-black text-amber-200">{PRIZE_SPONSOR}</span>
+      </p>
+    </aside>
+  );
+}
+
 function ChampionBanner({
   champion,
-  final,
+  matches,
   teamsById,
 }: {
   champion: TournamentTeam;
-  final: BracketMatch | undefined;
+  matches: BracketMatch[];
   teamsById: Map<string, TournamentTeam>;
 }) {
+  const final = matches.find((m) => m.bracket === 'final');
+  const placings = runnerUpPlacings(matches);
   const idx = final ? final.teams.indexOf(champion.id) : -1;
   const runnerUpId = final && idx >= 0 ? final.teams[1 - idx] : null;
   const runnerUp = runnerUpId ? teamsById.get(runnerUpId) : undefined;
@@ -809,39 +977,83 @@ function ChampionBanner({
         aria-hidden
       />
       <AnimatedBorder gradient={CHAMPION_BORDER} />
-      <div className="relative flex flex-col items-center px-4 py-8 text-center sm:py-10">
-        <div className="relative">
-          <div className="absolute inset-0 rounded-full bg-amber-400/40 blur-2xl" aria-hidden />
-          <Trophy
-            className="relative h-14 w-14 text-amber-300 drop-shadow-[0_0_18px_rgba(251,191,36,0.8)] sm:h-20 sm:w-20"
-            aria-hidden
-          />
-        </div>
-        <p className="mt-4 text-[11px] font-black uppercase tracking-[0.5em] text-amber-200/90 sm:text-xs">
-          Champion
-        </p>
-        <p className="mt-2 max-w-full break-words bg-gradient-to-b from-amber-100 via-amber-300 to-amber-600 bg-clip-text text-4xl font-black uppercase italic tracking-wide text-transparent drop-shadow-[0_4px_14px_rgba(0,0,0,0.7)] sm:text-6xl">
-          {champion.name}
-        </p>
-        <ul className="mt-4 flex flex-wrap justify-center gap-2">
-          {champion.members.map((m) => (
-            <li
-              key={m.id}
-              className="rounded-full border border-amber-400/40 bg-amber-950/40 px-3 py-1 text-xs font-bold text-amber-100 sm:text-sm"
-            >
-              {m.name}
-            </li>
-          ))}
-        </ul>
-        {won != null && lost != null && (
-          <p className="mt-5 text-[11px] font-black uppercase tracking-[0.3em] text-white/70 sm:text-xs">
-            Grand Final{' '}
-            <span className="text-amber-200">
-              {won}–{lost}
-            </span>
-            {runnerUp ? <> vs {runnerUp.name}</> : null}
-          </p>
+      <div className="relative grid items-center gap-8 px-4 py-8 sm:py-10 lg:grid-cols-[minmax(0,1fr)_20rem] lg:px-8">
+        <div className="flex min-w-0 flex-col items-center text-center">
+          {/* Title block on the left, the champions' portraits on the right (stacked on phones). */}
+          <div className="flex w-full flex-col items-center gap-6 sm:flex-row sm:justify-center sm:gap-10">
+            <div className="flex min-w-0 flex-col items-center">
+              <div className="relative">
+                <div className="absolute inset-0 rounded-full bg-amber-400/40 blur-2xl" aria-hidden />
+                <Trophy
+                  className="relative h-14 w-14 text-amber-300 drop-shadow-[0_0_18px_rgba(251,191,36,0.8)] sm:h-20 sm:w-20"
+                  aria-hidden
+                />
+              </div>
+              <p className="mt-4 text-[11px] font-black uppercase tracking-[0.5em] text-amber-200/90 sm:text-xs">
+                Champion
+              </p>
+              <p className="mt-2 max-w-full break-words bg-gradient-to-b from-amber-100 via-amber-300 to-amber-600 bg-clip-text text-4xl font-black uppercase italic tracking-wide text-transparent drop-shadow-[0_4px_14px_rgba(0,0,0,0.7)] sm:text-6xl">
+                {champion.name}
+              </p>
+              {won != null && lost != null && (
+                <p className="mt-4 text-[11px] font-black uppercase tracking-[0.3em] text-white/70 sm:text-xs">
+                  Grand Final{' '}
+                  <span className="text-amber-200">
+                    {won}–{lost}
+                  </span>
+                  {runnerUp ? <> vs {runnerUp.name}</> : null}
+                </p>
+              )}
+            </div>
+            <ul className="flex w-full max-w-md justify-center gap-1.5 sm:gap-2">
+              {champion.members.map((m) => (
+                <ClassPortrait
+                  key={m.id}
+                  member={m}
+                  tone="gold"
+                  widthClass="max-w-24 sm:max-w-32"
+                  heightClass="h-32 sm:h-48"
+                  textClass="text-[10px] sm:text-sm"
+                />
+              ))}
+            </ul>
+          </div>
+        {placings.length > 0 && (
+          <div className="mt-8 grid w-full max-w-4xl gap-6 border-t border-amber-200/15 pt-6 sm:grid-cols-3 sm:gap-4">
+            {placings.map(({ place, teamId }) => {
+              const team = teamsById.get(teamId);
+              const st = PLACE_STYLES[place];
+              return (
+                <div key={place} className="flex min-w-0 flex-col items-center">
+                  <p className={`flex items-center gap-1.5 text-[10px] font-black uppercase tracking-[0.3em] sm:text-[11px] ${st.text}`}>
+                    <Medal className="h-4 w-4" aria-hidden />
+                    {st.label}
+                  </p>
+                  <p className="mt-1 max-w-full truncate text-lg font-black uppercase tracking-wide text-white sm:text-xl">
+                    {team?.name ?? 'TBD'}
+                  </p>
+                  <ul className="mt-3 flex w-full max-w-64 justify-center gap-1.5">
+                    {team?.members.map((m) => (
+                      <ClassPortrait
+                        key={m.id}
+                        member={m}
+                        tone={st.tone}
+                        widthClass="max-w-20"
+                        heightClass="h-24 sm:h-28"
+                        textClass="text-[10px]"
+                      />
+                    ))}
+                  </ul>
+
+                </div>
+              );
+            })}
+          </div>
         )}
+        </div>
+        <div className="w-full max-w-sm justify-self-center lg:max-w-none">
+          <PrizePanel />
+        </div>
       </div>
     </section>
   );
@@ -919,11 +1131,7 @@ function VersusSide({
   const z = VERSUS_SIZES[size];
   return (
     <div
-      className={`relative flex min-w-0 items-center justify-end rounded-2xl border text-center backdrop-blur-sm ${z.side} ${
-        blue
-          ? `${z.blueDir} border-sky-400/50 bg-sky-950/25 shadow-[0_0_40px_-6px_rgba(56,189,248,0.45)]`
-          : `${z.redDir} border-rose-400/50 bg-rose-950/25 shadow-[0_0_40px_-6px_rgba(251,113,133,0.45)]`
-      }`}
+      className={`relative flex min-w-0 items-center justify-end text-center ${z.side} ${blue ? z.blueDir : z.redDir}`}
     >
       <TeamNameBox
         team={team}
@@ -934,58 +1142,17 @@ function VersusSide({
           {team?.name ?? 'TBD'}
         </p>
         <ul className={`mt-2 flex ${z.lineup} ${blue ? z.blueLineup : z.redLineup}`}>
-          {team?.members.map((m) => {
-            const src = memberClassImage(m.jobClass);
-            return (
-              <li key={m.id} className={`relative min-w-0 flex-1 ${z.portraitW}`} title={m.jobClass ?? undefined}>
-                <div className={`relative ${z.portraitH}`}>
-                  {/* Slanted select-screen panel with a faded close-up of the art behind the full figure. */}
-                  <div
-                    className={`absolute inset-0 -skew-x-6 overflow-hidden rounded-md border bg-gradient-to-b ${
-                      blue ? 'border-sky-300/30 from-sky-400/35 to-blue-950/70' : 'border-rose-300/30 from-rose-400/35 to-red-950/70'
-                    }`}
-                    aria-hidden
-                  >
-                    {src ? (
-                      <img
-                        src={src}
-                        alt=""
-                        loading="lazy"
-                        className="absolute inset-0 h-full w-full object-cover opacity-30"
-                        style={{
-                          objectPosition: '50% 10%',
-                          transformOrigin: '50% 12%',
-                          transform: `skewX(6deg) scale(${blue ? 2.6 : -2.6}, 2.6)`,
-                        }}
-                      />
-                    ) : (
-                      <span className="absolute inset-0 flex skew-x-6 items-center justify-center text-5xl font-black text-white/15">
-                        {m.name.charAt(0).toUpperCase()}
-                      </span>
-                    )}
-                    <span className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent" />
-                  </div>
-                  {src && (
-                    <img
-                      src={src}
-                      alt={m.jobClass ?? ''}
-                      loading="lazy"
-                      className={`absolute bottom-0 left-1/2 h-[108%] max-w-none -translate-x-1/2 object-contain object-bottom ${
-                        blue ? '' : '-scale-x-100'
-                      }`}
-                    />
-                  )}
-                </div>
-                <div
-                  className={`relative -mt-2 mx-auto w-[94%] -skew-x-6 rounded-sm px-1 py-0.5 ${
-                    blue ? 'bg-sky-600/90' : 'bg-rose-600/90'
-                  }`}
-                >
-                  <span className={`block skew-x-6 truncate text-center font-bold text-white ${z.members}`}>{m.name}</span>
-                </div>
-              </li>
-            );
-          })}
+          {team?.members.map((m) => (
+            <ClassPortrait
+              key={m.id}
+              member={m}
+              tone={side}
+              flip={blue}
+              widthClass={z.portraitW}
+              heightClass={z.portraitH}
+              textClass={z.members}
+            />
+          ))}
         </ul>
       </TeamNameBox>
       <span
@@ -2038,7 +2205,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
               {champion && (
                 <ChampionBanner
                   champion={champion}
-                  final={bracket.matches.find((m) => m.bracket === 'final')}
+                  matches={bracket.matches}
                   teamsById={teamsById}
                 />
               )}
