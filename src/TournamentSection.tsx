@@ -17,6 +17,7 @@ import {
   Eye,
   EyeOff,
   Loader2,
+  Lock,
   LogIn,
   LogOut,
   Plus,
@@ -27,6 +28,8 @@ import {
   Play,
   Square,
   Minus,
+  Pencil,
+  Unlock,
   UserMinus,
   UserPlus,
   Users,
@@ -34,7 +37,7 @@ import {
 } from 'lucide-react';
 import BidderAuthModal from './BidderAuthModal';
 import ClassSelect from './components/ClassSelect';
-import type { MemberClass } from './lib/memberClasses';
+import { memberClassImage, type MemberClass } from './lib/memberClasses';
 import { NameDropdown } from './BidderAuthGate';
 import {
   type ActiveMember,
@@ -66,6 +69,9 @@ import {
   setTournamentMatchLive,
   shuffleTournament,
   withdrawFromTournament,
+  editTournamentPlayerClass,
+  lockTournamentPlayerClass,
+  setTournamentPlayerClassLock,
 } from './lib/apiTournaments';
 
 const REFRESH_MS = 10_000;
@@ -177,6 +183,9 @@ function TeamsModal({
   busy,
   onRename,
   onClose,
+  onEditClass,
+  onLockClass,
+  onToggleLock,
 }: {
   title: string;
   teams: TournamentTeam[];
@@ -185,48 +194,62 @@ function TeamsModal({
   busy: boolean;
   onRename: (team: TournamentTeam) => void;
   onClose: () => void;
+  /** Self-service class edit for one roster member; resolves `true` on success. */
+  onEditClass: (memberId: number, name: string, password: string, jobClass: MemberClass) => Promise<boolean>;
+  /** Self-service: the player locks their own class (password, no new class needed). */
+  onLockClass: (memberId: number, name: string, password: string) => Promise<boolean>;
+  /** Admin override: unlock a class a player locked by mistake. Same gate as `canRename`. */
+  onToggleLock: (memberId: number, locked: boolean) => void;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editClass, setEditClass] = useState<MemberClass | ''>('');
+  const [editPassword, setEditPassword] = useState('');
+  const [editShowPassword, setEditShowPassword] = useState(false);
+  const [savingId, setSavingId] = useState<number | null>(null);
 
-  const single = teams.length === 1;
+  const startEdit = (m: { id: number; name: string; jobClass?: MemberClass | null }) => {
+    setEditingId(m.id);
+    setEditClass(m.jobClass ?? '');
+    setEditPassword('');
+    setEditShowPassword(false);
+  };
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditPassword('');
+  };
+  const saveEdit = async (m: { id: number; name: string }) => {
+    if (!editClass || !editPassword.trim()) return;
+    setSavingId(m.id);
+    const ok = await onEditClass(m.id, m.name, editPassword.trim(), editClass);
+    setSavingId(null);
+    if (ok) cancelEdit();
+  };
+  const saveLock = async (m: { id: number; name: string }) => {
+    if (!editPassword.trim()) return;
+    setSavingId(m.id);
+    const ok = await onLockClass(m.id, m.name, editPassword.trim());
+    setSavingId(null);
+    if (ok) cancelEdit();
+  };
+
   return (
-    <div
-      className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      onClick={onClose}
-    >
-      <div
-        className={`flex max-h-full w-full flex-col rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl ${
-          single ? 'max-w-md' : 'max-w-4xl'
-        }`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <header className="flex items-center justify-between gap-3 border-b border-slate-800 px-5 py-4">
-          <h3 className="flex items-center gap-2 text-base font-black text-white">
-            <Users className="h-5 w-5 text-blue-300" aria-hidden />
-            {title}
-          </h3>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white"
-          >
-            <X className="h-5 w-5" aria-hidden />
-          </button>
-        </header>
-        <div
-          className={`grid gap-3 overflow-y-auto p-5 ${single ? '' : 'sm:grid-cols-2 lg:grid-cols-3'}`}
+    <div className="rounded-2xl border border-slate-800 bg-slate-900 shadow-xl">
+      <header className="flex items-center justify-between gap-3 border-b border-slate-800 px-5 py-4">
+        <h3 className="flex items-center gap-2 text-base font-black text-white">
+          <Users className="h-5 w-5 text-blue-300" aria-hidden />
+          {title}
+        </h3>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white"
         >
-          {teams.map((t) => (
+          <X className="h-5 w-5" aria-hidden />
+        </button>
+      </header>
+      <div className="grid gap-3 p-5 sm:grid-cols-2 lg:grid-cols-3">
+        {teams.map((t) => (
             <div
               key={t.id}
               className={`rounded-xl border bg-slate-950/50 p-4 ${
@@ -250,25 +273,130 @@ function TeamsModal({
                 )}
               </div>
               <ul className="mt-3 space-y-1.5">
-                {t.members.map((m) => (
-                  <li
-                    key={m.id}
-                    className="flex items-center justify-between gap-2 rounded-lg bg-slate-800/70 px-3 py-2 text-sm"
-                  >
-                    <span className="truncate font-semibold text-slate-100">{m.name}</span>
-                    <span className="shrink-0 text-xs text-slate-400">{m.jobClass ?? '—'}</span>
-                  </li>
-                ))}
+                {t.members.map((m) =>
+                  editingId === m.id ? (
+                    <li key={m.id} className="space-y-2 rounded-lg bg-slate-800/70 px-3 py-2 text-sm">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate font-semibold text-slate-100">{m.name}</span>
+                        <button
+                          type="button"
+                          onClick={cancelEdit}
+                          disabled={savingId === m.id}
+                          aria-label="Cancel"
+                          className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-white"
+                        >
+                          <X className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                      </div>
+                      <ClassSelect
+                        id={`edit-class-${m.id}`}
+                        value={editClass || null}
+                        onChange={(c) => setEditClass(c ?? '')}
+                        disabled={savingId === m.id}
+                      />
+                      <div className="relative">
+                        <input
+                          type={editShowPassword ? 'text' : 'password'}
+                          value={editPassword}
+                          onChange={(e) => setEditPassword(e.target.value)}
+                          disabled={savingId === m.id}
+                          autoComplete="current-password"
+                          placeholder="Your password"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 pr-8 font-mono text-xs text-slate-100 outline-none placeholder:text-slate-600 focus:border-blue-500"
+                        />
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => setEditShowPassword((v) => !v)}
+                          aria-label={editShowPassword ? 'Hide password' : 'Show password'}
+                          className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-100"
+                        >
+                          {editShowPassword ? <EyeOff className="h-3.5 w-3.5" aria-hidden /> : <Eye className="h-3.5 w-3.5" aria-hidden />}
+                        </button>
+                      </div>
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void saveEdit(m)}
+                          disabled={savingId === m.id || !editClass || !editPassword.trim()}
+                          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-1.5 text-xs font-bold text-white hover:bg-blue-500 disabled:opacity-50"
+                        >
+                          <Pencil className="h-3.5 w-3.5" aria-hidden /> Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void saveLock(m)}
+                          disabled={savingId === m.id || !editPassword.trim()}
+                          title="Lock your class so it can no longer be edited"
+                          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-amber-600 py-1.5 text-xs font-bold text-white hover:bg-amber-500 disabled:opacity-50"
+                        >
+                          <Lock className="h-3.5 w-3.5" aria-hidden /> Lock
+                        </button>
+                      </div>
+                    </li>
+                  ) : (
+                    <li
+                      key={m.id}
+                      className="flex items-center justify-between gap-2 rounded-lg bg-slate-800/70 px-3 py-2 text-sm"
+                    >
+                      <span className="truncate font-semibold text-slate-100">{m.name}</span>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <span className="text-xs text-slate-400">{m.jobClass ?? '—'}</span>
+                        {canRename && (
+                          <button
+                            type="button"
+                            onClick={() => onToggleLock(m.id, !m.classLocked)}
+                            disabled={busy}
+                            title={m.classLocked ? 'Unlock class editing' : 'Lock class editing'}
+                            aria-label={m.classLocked ? `Unlock ${m.name}'s class` : `Lock ${m.name}'s class`}
+                            className={`rounded p-1 ${
+                              m.classLocked
+                                ? 'text-amber-400 hover:bg-slate-700 hover:text-amber-300'
+                                : 'text-slate-500 hover:bg-slate-700 hover:text-emerald-300'
+                            }`}
+                          >
+                            {m.classLocked ? (
+                              <Lock className="h-3.5 w-3.5" aria-hidden />
+                            ) : (
+                              <Unlock className="h-3.5 w-3.5" aria-hidden />
+                            )}
+                          </button>
+                        )}
+                        {m.classLocked ? (
+                          !canRename && (
+                            <span
+                              title="Class locked"
+                              aria-label="Class locked"
+                              className="rounded p-1 text-amber-400"
+                            >
+                              <Lock className="h-3.5 w-3.5" aria-hidden />
+                            </span>
+                          )
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => startEdit(m)}
+                            disabled={busy}
+                            aria-label={`Edit ${m.name}'s class`}
+                            className="rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-blue-300"
+                          >
+                            <Pencil className="h-3.5 w-3.5" aria-hidden />
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  )
+                )}
               </ul>
             </div>
           ))}
         </div>
       </div>
-    </div>
   );
 }
 
 interface MatchCardProps {
+
   match: BracketMatch;
   teamsById: Map<string, TournamentTeam>;
   highlight: string;
@@ -727,34 +855,44 @@ function ChampionBanner({
  */
 const VERSUS_SIZES = {
   full: {
-    side: 'px-2 py-3 sm:gap-5 sm:px-6 sm:py-6',
-    blueDir: 'sm:flex-row',
-    redDir: 'sm:flex-row-reverse',
-    nameBox: 'sm:flex-1',
-    blueAlign: 'sm:text-left',
-    redAlign: 'sm:text-right',
+    side: 'gap-3 px-3 py-3 sm:gap-5 sm:px-6 sm:py-6',
+    blueDir: 'flex-row',
+    redDir: 'flex-row-reverse',
+    nameBox: 'flex-1',
+    blueAlign: 'text-left',
+    redAlign: 'text-right',
     name: 'text-sm sm:truncate sm:text-3xl',
     members: 'text-[10px] sm:truncate sm:text-sm',
-    score: 'text-3xl sm:text-6xl',
+    lineup: 'gap-1.5 sm:gap-2',
+    blueLineup: 'justify-start',
+    redLineup: 'justify-end',
+    portraitW: 'max-w-24 sm:max-w-32',
+    portraitH: 'h-32 sm:h-52',
+    score: 'text-5xl sm:text-6xl',
     body: 'px-3 py-5 sm:px-8 sm:py-8',
-    grid: 'mt-4 gap-2 sm:mt-6 sm:items-center sm:gap-6',
+    grid: 'mt-4 grid-cols-1 gap-2 sm:mt-6 sm:grid-cols-[1fr_auto_1fr] sm:items-center sm:gap-6',
     vs: 'text-3xl sm:text-8xl',
     label: 'text-[10px] sm:text-xs',
     labelBreak: 'block sm:inline',
     labelDot: 'hidden sm:inline',
   },
   compact: {
-    side: 'px-3 py-4 lg:gap-2 lg:py-5',
-    blueDir: '',
-    redDir: '',
+    side: 'gap-1 px-3 py-4 lg:gap-2 lg:py-5',
+    blueDir: 'flex-col-reverse',
+    redDir: 'flex-col-reverse',
     nameBox: '',
     blueAlign: '',
     redAlign: '',
     name: 'text-base lg:text-xl',
     members: 'text-[11px] lg:text-xs',
+    lineup: 'justify-center gap-1 lg:gap-2',
+    blueLineup: '',
+    redLineup: '',
+    portraitW: 'max-w-24 lg:max-w-20',
+    portraitH: 'h-32',
     score: 'text-4xl lg:text-5xl',
     body: 'px-3 py-5 lg:px-5 lg:py-6',
-    grid: 'mt-4 gap-2 lg:gap-3',
+    grid: 'mt-4 grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_1fr] lg:gap-3',
     vs: 'text-4xl lg:text-6xl',
     label: 'text-[10px]',
     labelBreak: 'block',
@@ -781,7 +919,7 @@ function VersusSide({
   const z = VERSUS_SIZES[size];
   return (
     <div
-      className={`relative flex min-w-0 flex-col-reverse items-center justify-end gap-1 rounded-2xl border text-center backdrop-blur-sm ${z.side} ${
+      className={`relative flex min-w-0 items-center justify-end rounded-2xl border text-center backdrop-blur-sm ${z.side} ${
         blue
           ? `${z.blueDir} border-sky-400/50 bg-sky-950/25 shadow-[0_0_40px_-6px_rgba(56,189,248,0.45)]`
           : `${z.redDir} border-rose-400/50 bg-rose-950/25 shadow-[0_0_40px_-6px_rgba(251,113,133,0.45)]`
@@ -795,13 +933,60 @@ function VersusSide({
         <p className={`break-words font-black uppercase tracking-wider text-white ${z.name}`}>
           {team?.name ?? 'TBD'}
         </p>
-        <p
-          className={`mt-1 font-semibold leading-snug ${z.members} ${
-            blue ? 'text-sky-200/80' : 'text-rose-200/80'
-          }`}
-        >
-          {team?.members.map((m) => m.name).join(' · ')}
-        </p>
+        <ul className={`mt-2 flex ${z.lineup} ${blue ? z.blueLineup : z.redLineup}`}>
+          {team?.members.map((m) => {
+            const src = memberClassImage(m.jobClass);
+            return (
+              <li key={m.id} className={`relative min-w-0 flex-1 ${z.portraitW}`} title={m.jobClass ?? undefined}>
+                <div className={`relative ${z.portraitH}`}>
+                  {/* Slanted select-screen panel with a faded close-up of the art behind the full figure. */}
+                  <div
+                    className={`absolute inset-0 -skew-x-6 overflow-hidden rounded-md border bg-gradient-to-b ${
+                      blue ? 'border-sky-300/30 from-sky-400/35 to-blue-950/70' : 'border-rose-300/30 from-rose-400/35 to-red-950/70'
+                    }`}
+                    aria-hidden
+                  >
+                    {src ? (
+                      <img
+                        src={src}
+                        alt=""
+                        loading="lazy"
+                        className="absolute inset-0 h-full w-full object-cover opacity-30"
+                        style={{
+                          objectPosition: '50% 10%',
+                          transformOrigin: '50% 12%',
+                          transform: `skewX(6deg) scale(${blue ? 2.6 : -2.6}, 2.6)`,
+                        }}
+                      />
+                    ) : (
+                      <span className="absolute inset-0 flex skew-x-6 items-center justify-center text-5xl font-black text-white/15">
+                        {m.name.charAt(0).toUpperCase()}
+                      </span>
+                    )}
+                    <span className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent" />
+                  </div>
+                  {src && (
+                    <img
+                      src={src}
+                      alt={m.jobClass ?? ''}
+                      loading="lazy"
+                      className={`absolute bottom-0 left-1/2 h-[108%] max-w-none -translate-x-1/2 object-contain object-bottom ${
+                        blue ? '' : '-scale-x-100'
+                      }`}
+                    />
+                  )}
+                </div>
+                <div
+                  className={`relative -mt-2 mx-auto w-[94%] -skew-x-6 rounded-sm px-1 py-0.5 ${
+                    blue ? 'bg-sky-600/90' : 'bg-rose-600/90'
+                  }`}
+                >
+                  <span className={`block skew-x-6 truncate text-center font-bold text-white ${z.members}`}>{m.name}</span>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       </TeamNameBox>
       <span
         className={`shrink-0 font-black tabular-nums drop-shadow-[0_0_14px_currentColor] ${z.score} ${
@@ -835,15 +1020,14 @@ function VersusBanner({
       aria-label={`Live: ${match.label}`}
       className="relative overflow-hidden rounded-3xl border border-white/10 bg-slate-950/20 backdrop-blur-[2px]"
     >
-      {/* Translucent diagonal blue / red split (site art shows through). */}
+      {/* Translucent diagonal blue / red split (site art shows through).
+          Phones stack the teams, so the split runs top / bottom there. */}
       <div
-        className="absolute inset-0 bg-gradient-to-br from-sky-500/40 via-blue-800/25 to-blue-950/10"
-        style={{ clipPath: 'polygon(0 0, 58% 0, 42% 100%, 0 100%)' }}
+        className="absolute inset-0 bg-gradient-to-br from-sky-500/40 via-blue-800/25 to-blue-950/10 [clip-path:polygon(0_0,100%_0,100%_46%,0_54%)] sm:[clip-path:polygon(0_0,58%_0,42%_100%,0_100%)]"
         aria-hidden
       />
       <div
-        className="absolute inset-0 bg-gradient-to-bl from-rose-500/40 via-red-800/25 to-red-950/10"
-        style={{ clipPath: 'polygon(58% 0, 100% 0, 100% 100%, 42% 100%)' }}
+        className="absolute inset-0 bg-gradient-to-bl from-rose-500/40 via-red-800/25 to-red-950/10 [clip-path:polygon(0_54%,100%_46%,100%_100%,0_100%)] sm:[clip-path:polygon(58%_0,100%_0,100%_100%,42%_100%)]"
         aria-hidden
       />
       <div
@@ -863,10 +1047,10 @@ function VersusBanner({
             {match.label} · Game {Math.min(sa + sb + 1, match.bestOf)} · Bo{match.bestOf}
           </span>
         </p>
-        <div className={`grid grid-cols-[1fr_auto_1fr] items-stretch ${z.grid}`}>
+        <div className={`grid items-stretch ${z.grid}`}>
           <VersusSide team={a ? teamsById.get(a) : undefined} score={sa} side="blue" size={size} onOpenTeam={onOpenTeam} />
           <span
-            className={`select-none bg-gradient-to-b from-white via-slate-300 to-slate-500 bg-clip-text self-center px-1 font-black italic leading-none tracking-tighter text-transparent drop-shadow-[0_4px_12px_rgba(0,0,0,0.8)] ${z.vs}`}
+            className={`select-none bg-gradient-to-b from-white via-slate-300 to-slate-500 bg-clip-text self-center justify-self-center px-1 font-black italic leading-none tracking-tighter text-transparent drop-shadow-[0_4px_12px_rgba(0,0,0,0.8)] ${z.vs}`}
             aria-label="versus"
           >
             VS
@@ -1091,7 +1275,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
 
   const [highlightInput, setHighlightInput] = useState('');
   /** Team modal: one team id, every team, or closed. */
-  const [teamModal, setTeamModal] = useState<string | 'all' | null>(null);
+  const [teamModal, setTeamModal] = useState<string | 'all' | null>('all');
   const openTeam = useCallback((teamId: string) => setTeamModal(teamId), []);
   const closeTeamModal = useCallback(() => setTeamModal(null), []);
   const highlight = highlightInput.trim().toLowerCase();
@@ -1144,6 +1328,24 @@ export default function TournamentSection({ active }: { active: boolean }) {
     const id = window.setInterval(() => void loadList(), REFRESH_MS * 3);
     return () => window.clearInterval(id);
   }, [active, loadList]);
+
+  // Shuffle announcement — fires every time a player lands on this tab.
+  useEffect(() => {
+    if (!active) return;
+    void Swal.fire({
+      ...SWAL_DARK,
+      title: '📢 Teams Have Been Shuffled!',
+      html: `
+        <div style="text-align:left; line-height:1.6;">
+          <p>The teams have been shuffled! Please check the updated team composition, coordinate with your party members, and make sure to <strong>lock in your assigned job/class</strong> on the website.</p>
+          <p style="margin-top:12px;">⏰ <strong>Job/Class Locking Deadline:</strong> October 15</p>
+          <p style="margin-top:12px; color:#fbbf24;">⚠️ <strong>Important:</strong> Jobs/classes will be automatically locked after Guild League, so make sure to finalize your job/class before the deadline!</p>
+          <p style="margin-top:12px;">Please coordinate with your teammates and make sure everyone is ready. Thank you, and good luck, everyone! 🔥</p>
+        </div>
+      `,
+      confirmButtonText: 'Got it',
+    });
+  }, [active]);
 
   useEffect(() => {
     if (!active || selectedId == null) return;
@@ -1297,6 +1499,13 @@ export default function TournamentSection({ active }: { active: boolean }) {
     await runAdmin(async () => applyDetail(await renameTournamentTeam(detail.id, team.id, name)));
   };
 
+  const handleToggleClassLock = async (memberId: number, locked: boolean) => {
+    if (!detail) return;
+    await runAdmin(async () =>
+      applyDetail(await setTournamentPlayerClassLock(detail.id, memberId, locked))
+    );
+  };
+
   const teamsById = useMemo(() => {
     const map = new Map((detail?.teams ?? []).map((t) => [t.id, t]));
     // Preview bracket (registration still open): show the planned seeds.
@@ -1326,10 +1535,10 @@ export default function TournamentSection({ active }: { active: boolean }) {
     );
   };
 
-  const submitRegistration = async (mode: 'register' | 'withdraw') => {
+  const submitRegistration = async (mode: 'register' | 'withdraw' | 'editClass') => {
     if (!detail || !regName || !regPassword.trim()) return;
     const jobClass = regClass;
-    if (mode === 'register' && !jobClass) return;
+    if ((mode === 'register' || mode === 'editClass') && !jobClass) return;
     setBusy(true);
     try {
       if (mode === 'register') {
@@ -1342,6 +1551,11 @@ export default function TournamentSection({ active }: { active: boolean }) {
             `<p><strong>${escapeHtml(regName)}</strong> is now registered for <strong>${escapeHtml(detail.name)}</strong>.</p>`
           );
         }
+      } else if (mode === 'editClass') {
+        applyDetail(
+          await editTournamentPlayerClass(detail.id, regName, regPassword.trim(), jobClass as MemberClass)
+        );
+        void swalSuccess('Class updated', `<p><strong>${escapeHtml(regName)}</strong> is now <strong>${escapeHtml(jobClass)}</strong>.</p>`);
       } else {
         applyDetail(await withdrawFromTournament(detail.id, regName, regPassword.trim()));
         void swalSuccess('Withdrawn', `<p><strong>${escapeHtml(regName)}</strong> left the tournament.</p>`);
@@ -1349,6 +1563,47 @@ export default function TournamentSection({ active }: { active: boolean }) {
       setRegPassword('');
     } catch (e) {
       void swalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Class edit from a roster row in the Teams modal. Returns `true` on success. */
+  const handleRosterEditClass = async (
+    _memberId: number,
+    name: string,
+    password: string,
+    jobClass: MemberClass
+  ): Promise<boolean> => {
+    if (!detail) return false;
+    setBusy(true);
+    try {
+      applyDetail(await editTournamentPlayerClass(detail.id, name, password, jobClass));
+      void swalSuccess('Class updated', `<p><strong>${escapeHtml(name)}</strong> is now <strong>${escapeHtml(jobClass)}</strong>.</p>`);
+      return true;
+    } catch (e) {
+      void swalError(e instanceof Error ? e.message : String(e));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Self-service: the player locks their own class via the roster row. */
+  const handleRosterLockClass = async (
+    _memberId: number,
+    name: string,
+    password: string
+  ): Promise<boolean> => {
+    if (!detail) return false;
+    setBusy(true);
+    try {
+      applyDetail(await lockTournamentPlayerClass(detail.id, name, password));
+      void swalSuccess('Class locked', `<p><strong>${escapeHtml(name)}</strong>'s class is now locked for this tournament.</p>`);
+      return true;
+    } catch (e) {
+      void swalError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -1661,7 +1916,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
-                    void submitRegistration(regIsRegistered ? 'withdraw' : 'register');
+                    void submitRegistration(regIsRegistered ? 'editClass' : 'register');
                   }}
                   className="space-y-3"
                 >
@@ -1671,24 +1926,22 @@ export default function TournamentSection({ active }: { active: boolean }) {
                       <NameDropdown options={members} value={regName} onChange={setRegName} disabled={busy} />
                     </div>
                   </div>
-                  {!regIsRegistered && (
-                    <div>
-                      <label
-                        htmlFor="tournament-class"
-                        className="block text-[10px] font-black uppercase tracking-widest text-slate-400"
-                      >
-                        Class
-                      </label>
-                      <div className="mt-1.5">
-                        <ClassSelect
-                          id="tournament-class"
-                          value={regClass || null}
-                          onChange={(c) => setRegClass(c ?? '')}
-                          disabled={busy}
-                        />
-                      </div>
+                  <div>
+                    <label
+                      htmlFor="tournament-class"
+                      className="block text-[10px] font-black uppercase tracking-widest text-slate-400"
+                    >
+                      Class
+                    </label>
+                    <div className="mt-1.5">
+                      <ClassSelect
+                        id="tournament-class"
+                        value={regClass || null}
+                        onChange={(c) => setRegClass(c ?? '')}
+                        disabled={busy}
+                      />
                     </div>
-                  )}
+                  </div>
                   <div>
                     <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Password</span>
                     <div className="relative mt-1.5">
@@ -1712,25 +1965,33 @@ export default function TournamentSection({ active }: { active: boolean }) {
                       </button>
                     </div>
                   </div>
-                  <button
-                    type="submit"
-                    disabled={busy || !regName || !regPassword.trim() || (!regIsRegistered && !regClass)}
-                    className={`${btn} w-full py-2.5 text-xs ${
-                      regIsRegistered
-                        ? 'bg-rose-700 text-white hover:bg-rose-600'
-                        : 'bg-blue-600 text-white hover:bg-blue-500'
-                    }`}
-                  >
-                    {regIsRegistered ? (
-                      <>
+                  {regIsRegistered ? (
+                    <div className="flex gap-2">
+                      <button
+                        type="submit"
+                        disabled={busy || !regName || !regPassword.trim() || !regClass}
+                        className={`${btn} flex-1 py-2.5 text-xs bg-blue-600 text-white hover:bg-blue-500`}
+                      >
+                        <Pencil className="h-4 w-4" aria-hidden /> Save class
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void submitRegistration('withdraw')}
+                        disabled={busy || !regName || !regPassword.trim()}
+                        className={`${btn} flex-1 py-2.5 text-xs bg-rose-700 text-white hover:bg-rose-600`}
+                      >
                         <UserMinus className="h-4 w-4" aria-hidden /> Withdraw
-                      </>
-                    ) : (
-                      <>
-                        <UserPlus className="h-4 w-4" aria-hidden /> Register
-                      </>
-                    )}
-                  </button>
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="submit"
+                      disabled={busy || !regName || !regPassword.trim() || !regClass}
+                      className={`${btn} w-full py-2.5 text-xs bg-blue-600 text-white hover:bg-blue-500`}
+                    >
+                      <UserPlus className="h-4 w-4" aria-hidden /> Register
+                    </button>
+                  )}
                 </form>
               </div>
 
@@ -1741,7 +2002,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
                 {detail.players.length === 0 ? (
                   <p className="mt-4 text-sm text-slate-500">No players registered yet.</p>
                 ) : (
-                  <ol className="mt-3 grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
+                  <ol className="mt-3 grid gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
                     {detail.players.map((p, i) => (
                       <li
                         key={p.memberId}
@@ -1797,13 +2058,13 @@ export default function TournamentSection({ active }: { active: boolean }) {
                 </div>
               )}
 
-              {/* Teams live in a modal (click a team, or the "Teams" button). */}
+              {/* Teams show inline below the banner (click a team, or the "Teams" button). */}
               {detail.status !== 'completed' && (
                 <div className="space-y-3">
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <button
                       type="button"
-                      onClick={() => setTeamModal('all')}
+                      onClick={() => setTeamModal((v) => (v ? null : 'all'))}
                       className={`${btn} bg-slate-800 text-white hover:bg-slate-700`}
                     >
                       <Users className="h-4 w-4" aria-hidden />
@@ -1843,6 +2104,26 @@ export default function TournamentSection({ active }: { active: boolean }) {
                 </div>
               )}
 
+              {/* Inline roster (not a popup) — opened via "Teams" above, or by
+                  clicking a team name in the live banner / bracket cards. */}
+              {teamModal && (
+                <TeamsModal
+                  title={teamModal === 'all' ? `Teams · ${detail.name}` : teamsById.get(teamModal)?.name ?? 'Team'}
+                  teams={
+                    teamModal === 'all'
+                      ? detail.teams
+                      : detail.teams.filter((t) => t.id === teamModal)
+                  }
+                  championId={bracket?.championTeamId ?? null}
+                  canRename={isAdmin}
+                  busy={busy}
+                  onRename={(t) => void handleRenameTeam(t)}
+                  onClose={closeTeamModal}
+                  onEditClass={handleRosterEditClass}
+                  onLockClass={handleRosterLockClass}
+                  onToggleLock={(memberId, locked) => void handleToggleClassLock(memberId, locked)}
+                />
+              )}
             </>
           )}
 
@@ -1899,27 +2180,13 @@ export default function TournamentSection({ active }: { active: boolean }) {
         </div>
       )}
 
-      {teamModal && detail && (
-        <TeamsModal
-          title={teamModal === 'all' ? `Teams · ${detail.name}` : teamsById.get(teamModal)?.name ?? 'Team'}
-          teams={
-            teamModal === 'all'
-              ? detail.teams
-              : detail.teams.filter((t) => t.id === teamModal)
-          }
-          championId={bracket?.championTeamId ?? null}
-          canRename={isAdmin}
-          busy={busy}
-          onRename={(t) => void handleRenameTeam(t)}
-          onClose={closeTeamModal}
-        />
-      )}
 
       <BidderAuthModal
         open={authOpen}
         title="Sign in to manage tournaments"
         description="Officer, Admin, or Developer access required."
         submitLabel="Sign in"
+        allowedRoles={['Officer', 'Admin', 'Developer']}
         onAuth={(a) => {
           storeActor(a);
           setActor(a);

@@ -641,4 +641,15 @@ export async function migrateTournamentTables(pool) {
   if (Array.isArray(capCol) && capCol[0]?.n === 'NO') {
     await pool.query(`ALTER TABLE tournaments MODIFY max_players INT NULL`);
   }
+  // Per-player class lock: an admin can freeze one registrant's class (e.g.
+  // after the shuffle) so they can no longer self-edit it in the roster.
+  const [lockCol] = await pool.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tournament_players' AND COLUMN_NAME = 'class_locked'`
+  );
+  if (!Array.isArray(lockCol) || lockCol.length === 0) {
+    await pool.query(
+      `ALTER TABLE tournament_players ADD COLUMN class_locked TINYINT(1) NOT NULL DEFAULT 0`
+    );
+  }
 }

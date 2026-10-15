@@ -110,7 +110,7 @@ export async function getTournament(pool, idRaw) {
   if (!rows.length) throw clientError(404, 'Tournament not found');
   const row = rows[0];
   const [players] = await pool.query(
-    `SELECT member_id, name, registered_at FROM tournament_players
+    `SELECT member_id, name, registered_at, class_locked FROM tournament_players
      WHERE tournament_id = ? ORDER BY registered_at ASC, member_id ASC`,
     [id]
   );
@@ -125,8 +125,12 @@ export async function getTournament(pool, idRaw) {
     const [cls] = await pool.query(`SELECT id, job_class FROM members WHERE id IN (?)`, [memberIds]);
     for (const c of cls) classById.set(Number(c.id), c.job_class ?? null);
   }
+  const lockedById = new Map(players.map((p) => [Number(p.member_id), Number(p.class_locked) === 1]));
   for (const t of teams) {
-    for (const m of t.members) m.jobClass = classById.get(Number(m.id)) ?? null;
+    for (const m of t.members) {
+      m.jobClass = classById.get(Number(m.id)) ?? null;
+      m.classLocked = lockedById.get(Number(m.id)) ?? false;
+    }
   }
   // Before the shuffle, preview the empty bracket for the planned team count
   // (from the cap, or from the signups so far when registration is open) so
@@ -147,6 +151,7 @@ export async function getTournament(pool, idRaw) {
     name: String(p.name),
     jobClass: classById.get(Number(p.member_id)) ?? null,
     registeredAt: Number(p.registered_at),
+    classLocked: Number(p.class_locked) === 1,
   }));
   return {
     ...rowToSummary(row, players.length),
@@ -405,6 +410,56 @@ export async function registerPlayer(pool, idRaw, member, jobClassRaw) {
     }
     return { started: false };
   });
+}
+
+/**
+ * Public self-service: change the registered player's own job class.
+ * `member` is the already-verified `{ id, name }`. Allowed any time the
+ * player is registered (before or after the shuffle) since job class is
+ * read live from `members`, not frozen into `teams_json`.
+ */
+export async function editPlayerClass(pool, idRaw, member, jobClassRaw) {
+  const id = parseTournamentId(idRaw);
+  const jobClass = sanitizeMemberClass(jobClassRaw);
+  if (!jobClass) throw clientError(400, 'Please select your class');
+  const [rows] = await pool.query(
+    `SELECT class_locked FROM tournament_players WHERE tournament_id = ? AND member_id = ? LIMIT 1`,
+    [id, member.id]
+  );
+  if (!rows.length) throw clientError(404, `${member.name} is not registered in this tournament`);
+  if (Number(rows[0].class_locked) === 1) {
+    throw clientError(403, 'Your class is locked for this tournament');
+  }
+  await pool.query(`UPDATE members SET job_class = ? WHERE id = ?`, [jobClass, member.id]);
+}
+
+/**
+ * Public self-service: the player locks their own class so nobody (including
+ * themselves) can edit it again for this tournament. `member` is already
+ * verified `{ id, name }` — same name+password check as editing/withdrawing.
+ */
+export async function lockOwnClass(pool, idRaw, member) {
+  const id = parseTournamentId(idRaw);
+  const [res] = await pool.query(
+    `UPDATE tournament_players SET class_locked = 1 WHERE tournament_id = ? AND member_id = ?`,
+    [id, member.id]
+  );
+  if (!res.affectedRows) throw clientError(404, `${member.name} is not registered in this tournament`);
+}
+
+/** Admin: unlock (or lock) a player's class for this tournament's roster — an override if a player locked by mistake. */
+export async function setPlayerClassLock(pool, idRaw, memberIdRaw, lockedRaw) {
+  const id = parseTournamentId(idRaw);
+  const memberId = Number(memberIdRaw);
+  if (!Number.isInteger(memberId) || memberId <= 0) {
+    throw clientError(400, 'Invalid member id');
+  }
+  const locked = lockedRaw === true || lockedRaw === 'true' || lockedRaw === 1;
+  const [res] = await pool.query(
+    `UPDATE tournament_players SET class_locked = ? WHERE tournament_id = ? AND member_id = ?`,
+    [locked ? 1 : 0, id, memberId]
+  );
+  if (!res.affectedRows) throw clientError(404, 'Player is not registered in this tournament');
 }
 
 /** Remove a player while registration is still open (self-withdraw or admin). */

@@ -1,6 +1,17 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Check, ChevronDown } from 'lucide-react';
-import { MEMBER_CLASSES, type MemberClass } from '../lib/memberClasses';
+import { MEMBER_CLASSES, memberClassImage, type MemberClass } from '../lib/memberClasses';
+
+/** Small head-crop of the class art; empty box keeps rows aligned when there's no art. */
+function ClassThumb({ value }: { value: MemberClass | null }) {
+  const src = memberClassImage(value);
+  return (
+    <span className="h-6 w-6 shrink-0 overflow-hidden rounded-md bg-slate-800 ring-1 ring-white/10">
+      {src && <img src={src} alt="" loading="lazy" className="h-full w-full scale-[2.2] object-cover object-[50%_10%]" style={{ transformOrigin: '50% 18%' }} />}
+    </span>
+  );
+}
 
 interface ClassSelectProps {
   id?: string;
@@ -27,17 +38,38 @@ export default function ClassSelect({
   const options: (MemberClass | null)[] = allowClear ? [null, ...MEMBER_CLASSES] : [...MEMBER_CLASSES];
   const [open, setOpen] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
+  const [menuRect, setMenuRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
 
-  useEffect(() => {
+  // Floats the option list in a portal (position: fixed, off the normal flow)
+  // so it never grows a scrollable ancestor's scrollHeight — e.g. the Teams
+  // modal's roster list, which has its own overflow-y-auto.
+  useLayoutEffect(() => {
     if (!open) return;
+    const updateRect = () => {
+      const r = wrapRef.current?.getBoundingClientRect();
+      if (r) setMenuRect({ top: r.bottom, left: r.left, width: r.width });
+    };
+    updateRect();
     setActiveIdx(Math.max(0, options.indexOf(value)));
     const onDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      // The option list is portaled to <body>, so it's outside wrapRef's
+      // subtree — check it separately or every click inside it reads as an
+      // outside click and closes the menu before the option's onClick fires.
+      if (wrapRef.current?.contains(t)) return;
+      if (listRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
+    window.addEventListener('scroll', updateRect, true);
+    window.addEventListener('resize', updateRect);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      window.removeEventListener('scroll', updateRect, true);
+      window.removeEventListener('resize', updateRect);
+    };
   }, [open]);
 
   useEffect(() => {
@@ -85,7 +117,8 @@ export default function ClassSelect({
         aria-expanded={open}
         className="inline-flex w-full cursor-pointer items-center justify-between gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 transition-colors hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        <span className="truncate">
+        <span className="flex min-w-0 items-center gap-2 truncate">
+          {value && <ClassThumb value={value} />}
           {value ? <span className="font-bold">{value}</span> : <span className="text-slate-500">{placeholder}</span>}
         </span>
         <ChevronDown
@@ -93,40 +126,46 @@ export default function ClassSelect({
           aria-hidden
         />
       </button>
-      {open && (
-        <ul
-          ref={listRef}
-          role="listbox"
-          className="custom-scrollbar absolute left-0 right-0 z-20 mt-1 max-h-64 overflow-auto rounded-xl border border-slate-700 bg-slate-900 py-1 shadow-xl shadow-black/40"
-        >
-          {options.map((opt, idx) => {
-            const isSelected = opt === value;
-            const isActive = idx === activeIdx;
-            return (
-              <li key={opt ?? '__none'}>
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  data-idx={idx}
-                  onMouseEnter={() => setActiveIdx(idx)}
-                  onClick={() => commit(idx)}
-                  className={`flex w-full cursor-pointer items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors ${
-                    isSelected
-                      ? 'bg-blue-600 text-white'
-                      : isActive
-                        ? 'bg-slate-800 text-slate-100'
-                        : 'text-slate-200 hover:bg-slate-800'
-                  }`}
-                >
-                  <span className={opt ? 'font-bold' : 'italic text-slate-400'}>{opt ?? 'No class'}</span>
-                  {isSelected && <Check className="h-4 w-4 shrink-0" aria-hidden />}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      {open && menuRect &&
+        createPortal(
+          <ul
+            ref={listRef}
+            role="listbox"
+            style={{ top: menuRect.top + 4, left: menuRect.left, width: menuRect.width }}
+            className="custom-scrollbar fixed z-[200] max-h-64 overflow-auto rounded-xl border border-slate-700 bg-slate-900 py-1 shadow-xl shadow-black/40"
+          >
+            {options.map((opt, idx) => {
+              const isSelected = opt === value;
+              const isActive = idx === activeIdx;
+              return (
+                <li key={opt ?? '__none'}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    data-idx={idx}
+                    onMouseEnter={() => setActiveIdx(idx)}
+                    onClick={() => commit(idx)}
+                    className={`flex w-full cursor-pointer items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors ${
+                      isSelected
+                        ? 'bg-blue-600 text-white'
+                        : isActive
+                          ? 'bg-slate-800 text-slate-100'
+                          : 'text-slate-200 hover:bg-slate-800'
+                    }`}
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      {opt && <ClassThumb value={opt} />}
+                      <span className={opt ? 'font-bold' : 'italic text-slate-400'}>{opt ?? 'No class'}</span>
+                    </span>
+                    {isSelected && <Check className="h-4 w-4 shrink-0" aria-hidden />}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>,
+          document.body
+        )}
     </div>
   );
 }

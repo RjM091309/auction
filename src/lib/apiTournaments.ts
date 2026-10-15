@@ -28,12 +28,14 @@ export interface TournamentPlayer {
   name: string;
   jobClass?: MemberClass | null;
   registeredAt: number;
+  /** Admin-set: blocks this player's own class edits for this tournament. */
+  classLocked: boolean;
 }
 
 export interface TournamentTeam {
   id: string;
   name: string;
-  members: { id: number; name: string; jobClass?: MemberClass | null }[];
+  members: { id: number; name: string; jobClass?: MemberClass | null; classLocked?: boolean }[];
 }
 
 export type MatchState = 'pending' | 'ready' | 'done' | 'bye';
@@ -162,6 +164,19 @@ export async function registerForTournament(
   });
 }
 
+export async function editTournamentPlayerClass(
+  id: number,
+  name: string,
+  password: string,
+  jobClass: MemberClass
+): Promise<TournamentDetail> {
+  const o = await request<{ tournament: TournamentDetail }>(
+    `/api/public/tournaments/${id}/edit-class`,
+    { method: 'POST', body: JSON.stringify({ name, password, jobClass }) }
+  );
+  return o.tournament;
+}
+
 export async function withdrawFromTournament(
   id: number,
   name: string,
@@ -181,6 +196,32 @@ export async function removeTournamentPlayer(
   const o = await request<{ tournament: TournamentDetail }>(
     `/api/tournaments/${id}/players/${memberId}`,
     { method: 'DELETE' }
+  );
+  return o.tournament;
+}
+
+/** Self-service: the player locks their own class so no one can edit it again. */
+export async function lockTournamentPlayerClass(
+  id: number,
+  name: string,
+  password: string
+): Promise<TournamentDetail> {
+  const o = await request<{ tournament: TournamentDetail }>(
+    `/api/public/tournaments/${id}/lock-class`,
+    { method: 'POST', body: JSON.stringify({ name, password }) }
+  );
+  return o.tournament;
+}
+
+/** Admin: lock or unlock one player's ability to self-edit their class (override). */
+export async function setTournamentPlayerClassLock(
+  id: number,
+  memberId: number,
+  locked: boolean
+): Promise<TournamentDetail> {
+  const o = await request<{ tournament: TournamentDetail }>(
+    `/api/tournaments/${id}/players/${memberId}/lock`,
+    { method: 'POST', body: JSON.stringify({ locked }) }
   );
   return o.tournament;
 }

@@ -78,6 +78,9 @@ import {
   createTournament,
   deleteTournament,
   registerPlayer,
+  editPlayerClass,
+  lockOwnClass,
+  setPlayerClassLock,
   removePlayer,
   adminShuffle,
   reopenRegistration,
@@ -991,7 +994,7 @@ app.get('/api/tournament-pool', async (_req, res) => {
 
 app.delete('/api/tournament-pool/:memberId', async (req, res) => {
   try {
-    const actor = await requireTournamentAdmin(req, res);
+    const actor = await requireTournamentAdmin(req, res, ['Officer', 'Admin', 'Developer']);
     if (!actor) return;
     await removeFromPool(pool, req.params.memberId);
     console.log(
@@ -1032,6 +1035,32 @@ app.post('/api/public/tournaments/:id/register', async (req, res) => {
   }
 });
 
+app.post('/api/public/tournaments/:id/edit-class', async (req, res) => {
+  try {
+    const member = await verifyMemberCredentials(pool, req.body, { ip: clientIp(req) });
+    await editPlayerClass(pool, req.params.id, member, req.body?.jobClass);
+    console.log(
+      `[audit] tournament edit-class id=${req.params.id} member=${member.id} name="${member.name}" class=${req.body?.jobClass} ip=${clientIp(req)}`
+    );
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+app.post('/api/public/tournaments/:id/lock-class', async (req, res) => {
+  try {
+    const member = await verifyMemberCredentials(pool, req.body, { ip: clientIp(req) });
+    await lockOwnClass(pool, req.params.id, member);
+    console.log(
+      `[audit] tournament lock-class id=${req.params.id} member=${member.id} name="${member.name}" ip=${clientIp(req)}`
+    );
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 app.post('/api/public/tournaments/:id/withdraw', async (req, res) => {
   try {
     const member = await verifyMemberCredentials(pool, req.body, { ip: clientIp(req) });
@@ -1047,7 +1076,7 @@ app.post('/api/public/tournaments/:id/withdraw', async (req, res) => {
 
 app.post('/api/tournaments', async (req, res) => {
   try {
-    const actor = await requireTournamentAdmin(req, res);
+    const actor = await requireTournamentAdmin(req, res, ['Officer', 'Admin', 'Developer']);
     if (!actor) return;
     const tournament = await createTournament(pool, req.body, actor);
     console.log(
@@ -1075,7 +1104,7 @@ app.delete('/api/tournaments/:id', async (req, res) => {
 
 app.delete('/api/tournaments/:id/players/:memberId', async (req, res) => {
   try {
-    const actor = await requireTournamentAdmin(req, res);
+    const actor = await requireTournamentAdmin(req, res, ['Officer', 'Admin', 'Developer']);
     if (!actor) return;
     await removePlayer(pool, req.params.id, req.params.memberId);
     console.log(
@@ -1087,9 +1116,23 @@ app.delete('/api/tournaments/:id/players/:memberId', async (req, res) => {
   }
 });
 
+app.post('/api/tournaments/:id/players/:memberId/lock', async (req, res) => {
+  try {
+    const actor = await requireTournamentAdmin(req, res, ['Officer', 'Admin', 'Developer']);
+    if (!actor) return;
+    await setPlayerClassLock(pool, req.params.id, req.params.memberId, req.body?.locked);
+    console.log(
+      `[audit] tournament lock-class id=${req.params.id} member=${req.params.memberId} locked=${req.body?.locked ? 1 : 0} by=${actor.name} ip=${clientIp(req)}`
+    );
+    res.json({ tournament: await getTournament(pool, req.params.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 app.post('/api/tournaments/:id/shuffle', async (req, res) => {
   try {
-    const actor = await requireTournamentAdmin(req, res);
+    const actor = await requireTournamentAdmin(req, res, ['Officer', 'Admin', 'Developer']);
     if (!actor) return;
     await adminShuffle(pool, req.params.id, actor);
     console.log(`[audit] tournament shuffle id=${req.params.id} by=${actor.name} ip=${clientIp(req)}`);
@@ -1113,7 +1156,7 @@ app.post('/api/tournaments/:id/reopen', async (req, res) => {
 
 app.post('/api/tournaments/:id/matches/:matchId', async (req, res) => {
   try {
-    const actor = await requireTournamentAdmin(req, res);
+    const actor = await requireTournamentAdmin(req, res, ['Officer', 'Admin', 'Developer']);
     if (!actor) return;
     const teamId = req.body?.teamId;
     const delta = req.body?.delta;
@@ -1129,7 +1172,7 @@ app.post('/api/tournaments/:id/matches/:matchId', async (req, res) => {
 
 app.post('/api/tournaments/:id/matches/:matchId/live', async (req, res) => {
   try {
-    const actor = await requireTournamentAdmin(req, res);
+    const actor = await requireTournamentAdmin(req, res, ['Officer', 'Admin', 'Developer']);
     if (!actor) return;
     const live = req.body?.live !== false;
     await setMatchLive(pool, req.params.id, req.params.matchId, live);
@@ -1144,7 +1187,7 @@ app.post('/api/tournaments/:id/matches/:matchId/live', async (req, res) => {
 
 app.put('/api/tournaments/:id/teams/:teamId', async (req, res) => {
   try {
-    const actor = await requireTournamentAdmin(req, res);
+    const actor = await requireTournamentAdmin(req, res, ['Officer', 'Admin', 'Developer']);
     if (!actor) return;
     await renameTeam(pool, req.params.id, req.params.teamId, req.body?.name);
     res.json({ tournament: await getTournament(pool, req.params.id) });
