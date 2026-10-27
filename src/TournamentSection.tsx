@@ -1442,7 +1442,7 @@ export default function TournamentSection({ active }: { active: boolean }) {
 
   const [highlightInput, setHighlightInput] = useState('');
   /** Team modal: one team id, every team, or closed. */
-  const [teamModal, setTeamModal] = useState<string | 'all' | null>('all');
+  const [teamModal, setTeamModal] = useState<string | 'all' | null>(null);
   const openTeam = useCallback((teamId: string) => setTeamModal(teamId), []);
   const closeTeamModal = useCallback(() => setTeamModal(null), []);
   const highlight = highlightInput.trim().toLowerCase();
@@ -1496,23 +1496,6 @@ export default function TournamentSection({ active }: { active: boolean }) {
     return () => window.clearInterval(id);
   }, [active, loadList]);
 
-  // Shuffle announcement — fires every time a player lands on this tab.
-  useEffect(() => {
-    if (!active) return;
-    void Swal.fire({
-      ...SWAL_DARK,
-      title: '📢 Teams Have Been Shuffled!',
-      html: `
-        <div style="text-align:left; line-height:1.6;">
-          <p>The teams have been shuffled! Please check the updated team composition, coordinate with your party members, and make sure to <strong>lock in your assigned job/class</strong> on the website.</p>
-          <p style="margin-top:12px;">⏰ <strong>Job/Class Locking Deadline:</strong> October 15</p>
-          <p style="margin-top:12px; color:#fbbf24;">⚠️ <strong>Important:</strong> Jobs/classes will be automatically locked after Guild League, so make sure to finalize your job/class before the deadline!</p>
-          <p style="margin-top:12px;">Please coordinate with your teammates and make sure everyone is ready. Thank you, and good luck, everyone! 🔥</p>
-        </div>
-      `,
-      confirmButtonText: 'Got it',
-    });
-  }, [active]);
 
   useEffect(() => {
     if (!active || selectedId == null) return;

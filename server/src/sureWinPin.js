@@ -86,10 +86,20 @@ function splitItemRuleParts(raw) {
       .map((part) => part.trim())
       .filter(Boolean);
   }
-  return trimmed
-    .split(',')
-    .map((part) => part.trim())
-    .filter(Boolean);
+  // Comma-only list: a bare `member:slot` segment continues the previous
+  // item's pins (`Feathers:124:12,40:7`), it is not an item of its own.
+  /** @type {string[]} */
+  const parts = [];
+  for (const segment of trimmed.split(',')) {
+    const part = segment.trim();
+    if (!part) continue;
+    if (parts.length > 0 && /^\d+\s*:\s*\d+$/.test(part)) {
+      parts[parts.length - 1] += `,${part}`;
+    } else {
+      parts.push(part);
+    }
+  }
+  return parts;
 }
 
 /** @param {string} part @param {number[]} defaultSlotIndices @param {number} defaultSlotIndex */
